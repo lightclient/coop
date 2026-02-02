@@ -5,7 +5,7 @@ mod trust;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use coop_agent::GooseRuntime;
+use coop_agent::AnthropicRuntime;
 use coop_tui::{App, DisplayMessage, InputAction, handle_key_event, poll_event};
 use crossterm::{
     event::{Event, KeyEvent},
@@ -100,10 +100,10 @@ async fn cmd_chat(config_path: Option<&str>) -> Result<()> {
 
     let system_prompt = config.build_system_prompt(&config_dir)?;
 
-    // Create the Goose runtime
+    // Create the Anthropic runtime (uses Claude Code OAuth token)
     let runtime = Arc::new(
-        GooseRuntime::new(&config.agent.model, &config.provider.name)
-            .context("failed to initialize Goose runtime")?,
+        AnthropicRuntime::new(Some(&config.agent.model), None)
+            .context("failed to initialize Anthropic runtime")?,
     );
 
     let gw = Arc::new(Gateway::new(config.clone(), system_prompt, runtime));
