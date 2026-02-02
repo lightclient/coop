@@ -83,27 +83,46 @@ coop/
 ├── Cargo.toml              # workspace root
 ├── coop.yaml               # default config location
 ├── crates/
-│   ├── coop-gateway/       # the daemon
+│   ├── coop-gateway/       # the daemon — owns the event loop, routing, CLI
 │   │   ├── Cargo.toml
 │   │   └── src/
 │   │       ├── main.rs     # entry point, CLI
 │   │       ├── gateway.rs  # core event loop
-│   │       ├── config.rs   # config parsing
-│   │       ├── session.rs  # session manager
-│   │       ├── router.rs   # message routing (trivial for phase 1)
-│   │       └── trust.rs    # trust resolution
+│   │       ├── config.rs   # config parsing + validation
+│   │       ├── router.rs   # message routing (pure logic)
+│   │       └── trust.rs    # trust resolution (pure logic)
 │   │
-│   ├── coop-agent/         # agent runtime abstraction
+│   ├── coop-core/          # shared types and trait definitions
+│   │   ├── Cargo.toml      # NO external dependencies beyond serde
+│   │   └── src/
+│   │       ├── lib.rs
+│   │       ├── types.rs    # Message, SessionKey, TrustLevel, etc.
+│   │       ├── channel.rs  # Channel trait
+│   │       ├── runtime.rs  # AgentRuntime trait
+│   │       ├── tools.rs    # Tool trait + ToolContext
+│   │       ├── memory.rs   # MemoryIndex trait
+│   │       ├── session.rs  # SessionStore trait
+│   │       └── fakes.rs    # FakeChannel, FakeRuntime, FakeTool, etc.
+│   │
+│   ├── coop-agent/         # agent runtime — Goose integration
 │   │   ├── Cargo.toml
 │   │   └── src/
 │   │       ├── lib.rs
-│   │       ├── runtime.rs  # AgentRuntime trait
-│   │       ├── goose.rs    # Goose implementation
+│   │       ├── goose.rs    # Goose subprocess implementation
 │   │       └── tools/
 │   │           ├── mod.rs
 │   │           ├── read.rs
 │   │           ├── write.rs
 │   │           └── edit.rs
+│   │
+│   ├── coop-channels/      # channel implementations
+│   │   ├── Cargo.toml
+│   │   └── src/
+│   │       ├── lib.rs
+│   │       ├── terminal.rs # terminal/TUI channel (phase 1)
+│   │       └── signal/     # (phase 2)
+│   │           ├── mod.rs
+│   │           └── fixtures/
 │   │
 │   └── coop-tui/           # terminal interface
 │       ├── Cargo.toml
@@ -116,13 +135,29 @@ coop/
 ├── docs/
 │   ├── architecture.md
 │   ├── design.md
-│   └── phase1-plan.md
+│   ├── phase1-plan.md
+│   └── testing-strategy.md
 │
 └── workspaces/
     └── default/            # default workspace for phase 1
         ├── soul.md
         └── agents.md
 ```
+
+### Crate Dependency Graph
+
+```
+coop-core (traits, types, fakes — zero external deps)
+    ↑            ↑             ↑
+coop-agent   coop-channels   coop-gateway
+(goose)      (signal, etc.)  (router, config)
+    ↑            ↑             ↑
+    └────────────┴─────────────┘
+                 ↑
+             coop-tui
+```
+
+Key rule: **coop-core has no external dependencies** beyond serde. It defines the contracts. Everything else depends on it. Tests live close to the logic they test — integration tests in coop-gateway test the full flow using fakes from coop-core.
 
 ## Key Decisions to Make First
 
