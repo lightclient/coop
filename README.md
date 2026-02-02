@@ -12,3 +12,4 @@ Coop manages AI agents that live on your machine — routing messages from chann
 - [Design](docs/design.md) — full design document with config, trust model, and build phases
 - [Phase 1 Plan](docs/phase1-plan.md) — gateway + terminal TUI (current milestone)
 - [Testing Strategy](docs/testing-strategy.md) — trait boundaries, fakes, fixture-driven testing
+- [Memory Design](docs/memory-design.md) — structured observations, SQLite + FTS5, 3-layer progressive disclosure
