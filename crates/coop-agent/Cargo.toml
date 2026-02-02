@@ -1,14 +1,22 @@
 [package]
-name = "coop-agent"
-version.workspace = true
 edition.workspace = true
 license.workspace = true
+name = "coop-agent"
+version.workspace = true
+
+[lints]
+workspace = true
 
 [dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
 coop-core = { path = "../coop-core" }
-tokio = { workspace = true }
+goose = { workspace = true }
+# reqwest with multipart — needed because goose uses reqwest::multipart
+# but doesn't declare the feature in its Cargo.toml (goose bug)
+reqwest = { workspace = true, features = ["multipart"] }
+rmcp = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-async-trait = { workspace = true }
+tokio = { workspace = true }
 tracing = { workspace = true }
-anyhow = { workspace = true }
