@@ -7,7 +7,8 @@ mod trust;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use coop_agent::GooseProvider;
+use coop_agent::{AnthropicProvider, GooseProvider};
+use coop_core::Provider;
 use coop_tui::{App, DisplayMessage, InputAction, handle_key_event, poll_event};
 use crossterm::{
     event::{Event, KeyEvent},
@@ -102,11 +103,20 @@ async fn cmd_chat(config_path: Option<&str>) -> Result<()> {
 
     let system_prompt = config.build_system_prompt(&config_dir)?;
 
-    // Create the provider (Goose library integration)
-    let provider = GooseProvider::new(&config.provider.name, &config.agent.model)
-        .await
-        .context("failed to initialize provider")?;
-    let provider = Arc::new(provider);
+    // Create the provider
+    // Use AnthropicProvider for Anthropic (supports OAuth tokens), Goose for others
+    let provider: Arc<dyn Provider> = if config.provider.name == "anthropic" {
+        Arc::new(
+            AnthropicProvider::from_env(&config.agent.model)
+                .context("failed to initialize Anthropic provider")?,
+        )
+    } else {
+        Arc::new(
+            GooseProvider::new(&config.provider.name, &config.agent.model)
+                .await
+                .context("failed to initialize provider")?,
+        )
+    };
 
     let gw = Arc::new(Gateway::new(config.clone(), system_prompt, provider));
     let session_key = gw.default_session_key();

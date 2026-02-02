@@ -1,9 +1,11 @@
+mod anthropic_provider;
 mod convert;
 mod goose_provider;
 mod goose_subprocess;
 #[cfg(test)]
 mod smoke_test;
 
+pub use anthropic_provider::AnthropicProvider;
 pub use goose_provider::GooseProvider;
 
 // Keep the subprocess runtime available as a fallback
