@@ -8,6 +8,17 @@ use ratatui::{
 
 use crate::app::{App, DisplayRole};
 
+/// Icon for a tool name.
+fn tool_icon(name: &str) -> &'static str {
+    match name {
+        "bash" => "⚡",
+        "read_file" => "📄",
+        "write_file" => "✏️",
+        "list_directory" => "📂",
+        _ => "🔧",
+    }
+}
+
 /// Render the entire TUI.
 pub fn draw(frame: &mut Frame, app: &App) {
     let chunks = Layout::default()
@@ -26,6 +37,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     draw_status_line2(frame, app, chunks[3]);
 }
 
+#[allow(clippy::too_many_lines)]
 fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
 
@@ -35,28 +47,55 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
         }
 
         match &msg.role {
-            DisplayRole::ToolCall { name } => {
+            DisplayRole::ToolCall { name, .. } => {
                 if !lines.is_empty() {
                     lines.push(Line::raw(""));
                 }
-                lines.push(Line::from(Span::styled(
-                    format!("  ✨ Exec {name}"),
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                )));
-            }
-            DisplayRole::ToolOutput { .. } => {
-                for content_line in msg.content.lines() {
-                    lines.push(Line::from(Span::styled(
-                        format!("    {content_line}"),
+                let icon = tool_icon(name);
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("  {icon} {name}"),
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        if msg.content.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" {}", msg.content)
+                        },
                         Style::default().fg(Color::DarkGray),
+                    ),
+                ]));
+            }
+            DisplayRole::ToolOutput { is_error, .. } => {
+                let style = if *is_error {
+                    Style::default().fg(Color::Red)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                };
+                // Truncate long output, show first/last few lines
+                let content_lines: Vec<&str> = msg.content.lines().collect();
+                let max_lines = 20;
+                if content_lines.len() > max_lines {
+                    for line in &content_lines[..max_lines / 2] {
+                        lines.push(Line::from(Span::styled(format!("    {line}"), style)));
+                    }
+                    lines.push(Line::from(Span::styled(
+                        format!("    … ({} lines hidden)", content_lines.len() - max_lines),
+                        Style::default()
+                            .fg(Color::DarkGray)
+                            .add_modifier(Modifier::ITALIC),
                     )));
+                    for line in &content_lines[content_lines.len() - max_lines / 2..] {
+                        lines.push(Line::from(Span::styled(format!("    {line}"), style)));
+                    }
+                } else {
+                    for line in &content_lines {
+                        lines.push(Line::from(Span::styled(format!("    {line}"), style)));
+                    }
                 }
-                lines.push(Line::from(Span::styled(
-                    "  ===",
-                    Style::default().fg(Color::DarkGray),
-                )));
             }
             role => {
                 let (prefix, style) = match role {

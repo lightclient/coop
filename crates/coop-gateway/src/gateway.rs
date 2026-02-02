@@ -141,6 +141,7 @@ impl Gateway {
                     .send(TurnEvent::ToolStart {
                         id: req.id.clone(),
                         name: req.name.clone(),
+                        arguments: req.arguments.clone(),
                     })
                     .await;
 

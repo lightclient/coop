@@ -13,4 +13,5 @@ chrono = { workspace = true }
 coop-core = { path = "../coop-core" }
 crossterm = { workspace = true }
 ratatui = { workspace = true }
+serde_json.workspace = true
 tokio = { workspace = true }

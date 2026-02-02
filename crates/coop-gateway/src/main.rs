@@ -159,17 +159,31 @@ fn cmd_chat(config_path: Option<&str>) -> Result<()> {
                     app.append_or_create_assistant(&text);
                 }
                 TurnEvent::AssistantMessage(_) => {}
-                TurnEvent::ToolStart { id, name } => {
+                TurnEvent::ToolStart {
+                    id,
+                    name,
+                    arguments,
+                } => {
                     tool_names.insert(id, name.clone());
-                    app.push_message(DisplayMessage::tool_call(&name));
+                    app.push_message(DisplayMessage::tool_call(&name, &arguments));
                 }
                 TurnEvent::ToolResult { id, message } => {
                     let name = tool_names
                         .get(&id)
                         .cloned()
                         .unwrap_or_else(|| "unknown".to_string());
-                    let output = message.text();
-                    app.push_message(DisplayMessage::tool_output(&name, output));
+                    // Extract output and error state from tool result content
+                    let (output, is_error) = message
+                        .content
+                        .iter()
+                        .find_map(|c| match c {
+                            coop_core::Content::ToolResult {
+                                output, is_error, ..
+                            } => Some((output.clone(), *is_error)),
+                            _ => None,
+                        })
+                        .unwrap_or_else(|| (message.text(), false));
+                    app.push_message(DisplayMessage::tool_output(&name, output, is_error));
                 }
                 TurnEvent::Done(result) => {
                     app.end_turn(result.usage.total_tokens());

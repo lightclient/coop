@@ -339,6 +339,7 @@ dependencies = [
  "coop-core",
  "crossterm",
  "ratatui",
+ "serde_json",
  "tokio",
 ]
 

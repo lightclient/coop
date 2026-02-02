@@ -508,7 +508,11 @@ pub enum TurnEvent {
     /// A complete assistant message (may contain tool calls).
     AssistantMessage(Message),
     /// A tool execution started.
-    ToolStart { id: String, name: String },
+    ToolStart {
+        id: String,
+        name: String,
+        arguments: serde_json::Value,
+    },
     /// A tool execution completed.
     ToolResult { id: String, message: Message },
     /// Turn complete.

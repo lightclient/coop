@@ -1,4 +1,5 @@
 use chrono::{DateTime, Local, Utc};
+use serde_json::Value;
 use std::time::Instant;
 
 /// Role for display messages in the TUI.
@@ -7,8 +8,8 @@ pub enum DisplayRole {
     User,
     Assistant,
     System,
-    ToolCall { name: String },
-    ToolOutput { name: String },
+    ToolCall { name: String, arguments: Value },
+    ToolOutput { name: String, is_error: bool },
 }
 
 /// A message to display in the TUI.
@@ -48,21 +49,24 @@ impl DisplayMessage {
         }
     }
 
-    pub fn tool_call(name: &str) -> Self {
+    pub fn tool_call(name: &str, arguments: &Value) -> Self {
+        let content = format_tool_args(name, arguments);
         Self {
             role: DisplayRole::ToolCall {
                 name: name.to_string(),
+                arguments: arguments.clone(),
             },
-            content: String::new(),
+            content,
             timestamp: Utc::now(),
             is_tool: true,
         }
     }
 
-    pub fn tool_output(name: &str, output: impl Into<String>) -> Self {
+    pub fn tool_output(name: &str, output: impl Into<String>, is_error: bool) -> Self {
         Self {
             role: DisplayRole::ToolOutput {
                 name: name.to_string(),
+                is_error,
             },
             content: output.into(),
             timestamp: Utc::now(),
@@ -75,6 +79,55 @@ impl DisplayMessage {
             .with_timezone(&Local)
             .format("%H:%M")
             .to_string()
+    }
+}
+
+/// Format tool arguments into a human-readable summary line.
+fn format_tool_args(name: &str, args: &Value) -> String {
+    match name {
+        "bash" => {
+            let cmd = args.get("command").and_then(Value::as_str).unwrap_or("");
+            // Show first line, truncate if long
+            let first_line = cmd.lines().next().unwrap_or(cmd);
+            if first_line.len() > 120 {
+                format!("{}…", &first_line[..120])
+            } else if cmd.lines().count() > 1 {
+                format!("{first_line} …")
+            } else {
+                first_line.to_string()
+            }
+        }
+        "read_file" => {
+            let path = args.get("path").and_then(Value::as_str).unwrap_or("?");
+            let offset = args.get("offset").and_then(Value::as_u64);
+            let limit = args.get("limit").and_then(Value::as_u64);
+            match (offset, limit) {
+                (Some(o), Some(l)) => format!("{path} (lines {o}–{})", o + l),
+                (Some(o), None) => format!("{path} (from line {o})"),
+                _ => path.to_string(),
+            }
+        }
+        "write_file" => {
+            let path = args.get("path").and_then(Value::as_str).unwrap_or("?");
+            let len = args
+                .get("content")
+                .and_then(Value::as_str)
+                .map_or(0, |s| s.lines().count());
+            format!("{path} ({len} lines)")
+        }
+        "list_directory" => {
+            let path = args.get("path").and_then(Value::as_str).unwrap_or(".");
+            path.to_string()
+        }
+        _ => {
+            // Generic: show compact JSON of arguments
+            let s = serde_json::to_string(args).unwrap_or_default();
+            if s.len() > 120 {
+                format!("{}…", &s[..120])
+            } else {
+                s
+            }
+        }
     }
 }
 
