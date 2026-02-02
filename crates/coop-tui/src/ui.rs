@@ -3,7 +3,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Paragraph, Wrap},
 };
 
 use crate::app::{App, DisplayRole};
@@ -13,107 +13,106 @@ pub fn draw(frame: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // header
             Constraint::Min(1),    // messages
-            Constraint::Length(3), // input
+            Constraint::Length(1), // input
+            Constraint::Length(1), // status line 1
+            Constraint::Length(1), // status line 2
         ])
         .split(frame.area());
 
-    draw_header(frame, app, chunks[0]);
-    draw_messages(frame, app, chunks[1]);
-    draw_input(frame, app, chunks[2]);
-}
-
-fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
-    let status = if app.is_loading {
-        format!(" {} thinking...", app.loading_text())
-    } else {
-        String::new()
-    };
-
-    let header = Line::from(vec![
-        Span::styled(
-            "🐔 Coop",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" │ "),
-        Span::styled(&app.agent_name, Style::default().fg(Color::Cyan)),
-        Span::raw(" │ "),
-        Span::styled(&app.model_name, Style::default().fg(Color::DarkGray)),
-        Span::styled(status, Style::default().fg(Color::Yellow)),
-    ]);
-
-    frame.render_widget(Paragraph::new(header), area);
+    draw_messages(frame, app, chunks[0]);
+    draw_input(frame, app, chunks[1]);
+    draw_status_line1(frame, app, chunks[2]);
+    draw_status_line2(frame, app, chunks[3]);
 }
 
 fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
 
     for msg in &app.messages {
-        let (prefix, style) = match msg.role {
-            DisplayRole::User => (
-                format!("{} you: ", msg.local_time()),
-                Style::default().fg(Color::Cyan),
-            ),
-            DisplayRole::Assistant => (
-                format!("{} {}: ", msg.local_time(), app.agent_name),
-                Style::default().fg(Color::White),
-            ),
-            DisplayRole::System => (
-                format!("{} ", msg.local_time()),
-                Style::default()
-                    .fg(Color::DarkGray)
-                    .add_modifier(Modifier::ITALIC),
-            ),
-        };
-
-        // Add blank line between messages
-        if !lines.is_empty() {
-            lines.push(Line::raw(""));
+        if msg.is_tool && !app.verbose {
+            continue;
         }
 
-        // Render message with prefix on first line
-        let content_lines: Vec<&str> = msg.content.lines().collect();
-        let prefix_len = prefix.len();
-        if content_lines.is_empty() {
-            lines.push(Line::from(Span::styled(prefix, style)));
-        } else {
-            for (i, content_line) in content_lines.iter().enumerate() {
-                if i == 0 {
-                    lines.push(Line::from(vec![
-                        Span::styled(prefix.clone(), style),
-                        Span::styled(content_line.to_string(), style),
-                    ]));
+        match &msg.role {
+            DisplayRole::ToolCall { name } => {
+                if !lines.is_empty() {
+                    lines.push(Line::raw(""));
+                }
+                lines.push(Line::from(Span::styled(
+                    format!("  ✨ Exec {name}"),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )));
+            }
+            DisplayRole::ToolOutput { .. } => {
+                for content_line in msg.content.lines() {
+                    lines.push(Line::from(Span::styled(
+                        format!("    {content_line}"),
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
+                lines.push(Line::from(Span::styled(
+                    "  ===",
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+            role => {
+                let (prefix, style) = match role {
+                    DisplayRole::User => (
+                        format!("{} you: ", msg.local_time()),
+                        Style::default().fg(Color::Cyan),
+                    ),
+                    DisplayRole::Assistant => (
+                        format!("{} {}: ", msg.local_time(), app.agent_name),
+                        Style::default().fg(Color::White),
+                    ),
+                    DisplayRole::System => (
+                        format!("{} ", msg.local_time()),
+                        Style::default()
+                            .fg(Color::DarkGray)
+                            .add_modifier(Modifier::ITALIC),
+                    ),
+                    DisplayRole::ToolCall { .. } | DisplayRole::ToolOutput { .. } => {
+                        unreachable!()
+                    }
+                };
+
+                if !lines.is_empty() {
+                    lines.push(Line::raw(""));
+                }
+
+                let content_lines: Vec<&str> = msg.content.lines().collect();
+                let prefix_len = prefix.len();
+                if content_lines.is_empty() {
+                    lines.push(Line::from(Span::styled(prefix, style)));
                 } else {
-                    let indent = " ".repeat(prefix_len);
-                    lines.push(Line::from(vec![
-                        Span::raw(indent),
-                        Span::styled(content_line.to_string(), style),
-                    ]));
+                    for (i, content_line) in content_lines.iter().enumerate() {
+                        if i == 0 {
+                            lines.push(Line::from(vec![
+                                Span::styled(prefix.clone(), style),
+                                Span::styled(content_line.to_string(), style),
+                            ]));
+                        } else {
+                            let indent = " ".repeat(prefix_len);
+                            lines.push(Line::from(vec![
+                                Span::raw(indent),
+                                Span::styled(content_line.to_string(), style),
+                            ]));
+                        }
+                    }
                 }
             }
         }
     }
 
-    // If loading, show spinner at the end
-    if app.is_loading {
-        lines.push(Line::raw(""));
-        lines.push(Line::from(Span::styled(
-            format!("  {} thinking...", app.loading_text()),
-            Style::default().fg(Color::Yellow),
-        )));
-    }
-
-    // Calculate scroll position
-    let visible_height = area.height.saturating_sub(2) as usize; // account for borders
+    let visible_height = area.height as usize;
     let total_lines = lines.len();
     let max_scroll = total_lines.saturating_sub(visible_height);
     let scroll = (app.scroll as usize).min(max_scroll);
 
     let messages = Paragraph::new(Text::from(lines))
-        .block(Block::default().borders(Borders::ALL).title("Messages"))
         .wrap(Wrap { trim: false })
         .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0));
 
@@ -121,19 +120,62 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
-    let input = Paragraph::new(app.input.as_str())
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Input (Enter to send, Ctrl-C to quit)"),
-        )
-        .style(Style::default().fg(Color::White));
+    let input_line = Line::from(vec![
+        Span::styled("> ", Style::default().fg(Color::Cyan)),
+        Span::raw(&app.input),
+    ]);
+
+    let input = Paragraph::new(input_line).style(Style::default().fg(Color::White));
 
     frame.render_widget(input, area);
 
-    // Position cursor
-    #[allow(clippy::cast_possible_truncation)] // cursor_pos is bounded by terminal width
-    let cursor_x = area.x + 1 + app.cursor_pos as u16;
-    let cursor_y = area.y + 1;
+    #[allow(clippy::cast_possible_truncation)]
+    let cursor_x = area.x + 2 + app.cursor_pos as u16;
+    let cursor_y = area.y;
     frame.set_cursor_position((cursor_x, cursor_y));
+}
+
+fn draw_status_line1(frame: &mut Frame, app: &App, area: Rect) {
+    let style = Style::default().fg(Color::Yellow);
+
+    let mut spans = Vec::new();
+
+    if app.is_loading {
+        spans.push(Span::styled(
+            format!(" {} streaming", app.loading_text()),
+            style,
+        ));
+        let elapsed = app.elapsed_text();
+        if !elapsed.is_empty() {
+            spans.push(Span::styled(format!(" {elapsed}"), style));
+        }
+    } else {
+        spans.push(Span::styled(" idle", style));
+    }
+
+    if !app.connection_status.is_empty() {
+        spans.push(Span::styled(format!(" | {}", app.connection_status), style));
+    }
+
+    let line = Line::from(spans);
+    let status = Paragraph::new(line).style(Style::default().bg(Color::DarkGray));
+    frame.render_widget(status, area);
+}
+
+fn draw_status_line2(frame: &mut Frame, app: &App, area: Rect) {
+    let style = Style::default().fg(Color::Gray);
+
+    let token_k = app.context_limit / 1000;
+    let pct = app.token_percent();
+
+    let line = Line::from(vec![Span::styled(
+        format!(
+            " agent {} | session {} | {} | tokens {}/{token_k}k ({pct:.0}%)",
+            app.agent_name, app.session_name, app.model_name, app.token_count,
+        ),
+        style,
+    )]);
+
+    let status = Paragraph::new(line).style(Style::default().bg(Color::Black));
+    frame.render_widget(status, area);
 }

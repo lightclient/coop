@@ -18,6 +18,7 @@ use crossterm::{
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -132,11 +133,16 @@ fn cmd_chat(config_path: Option<&str>) -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new(&config.agent.id, &config.agent.model);
+    let session_name = format!("{:?}", session_key.kind).to_lowercase();
+    let mut app = App::new(&config.agent.id, &config.agent.model, session_name, 200_000);
+    app.connection_status = "connected".to_string();
     app.push_message(DisplayMessage::system(format!(
         "Connected to {} ({}). Type a message or /quit to exit.",
         config.agent.id, config.agent.model
     )));
+
+    // Track tool names by ID for correlating ToolResult events
+    let mut tool_names: HashMap<String, String> = HashMap::new();
 
     // Channel for async turn events
     let (event_tx, mut event_rx) = mpsc::channel::<TurnEvent>(64);
@@ -152,27 +158,25 @@ fn cmd_chat(config_path: Option<&str>) -> Result<()> {
                 TurnEvent::TextDelta(text) => {
                     app.append_or_create_assistant(&text);
                 }
-                TurnEvent::AssistantMessage(msg) => {
-                    // Text was already streamed via TextDelta; only show tool calls
-                    if msg.has_tool_requests() {
-                        for req in msg.tool_requests() {
-                            app.push_message(DisplayMessage::system(format!(
-                                "[calling tool: {}]",
-                                req.name
-                            )));
-                        }
-                    }
+                TurnEvent::AssistantMessage(_) => {}
+                TurnEvent::ToolStart { id, name } => {
+                    tool_names.insert(id, name.clone());
+                    app.push_message(DisplayMessage::tool_call(&name));
                 }
-                TurnEvent::ToolStart { name, .. } => {
-                    app.push_message(DisplayMessage::system(format!("[executing: {name}...]")));
+                TurnEvent::ToolResult { id, message } => {
+                    let name = tool_names
+                        .get(&id)
+                        .cloned()
+                        .unwrap_or_else(|| "unknown".to_string());
+                    let output = message.text();
+                    app.push_message(DisplayMessage::tool_output(&name, output));
                 }
-                TurnEvent::ToolResult { .. } => {}
-                TurnEvent::Done(_) => {
-                    app.is_loading = false;
+                TurnEvent::Done(result) => {
+                    app.end_turn(result.usage.total_tokens());
                 }
                 TurnEvent::Error(err) => {
                     app.push_message(DisplayMessage::system(format!("Error: {err}")));
-                    app.is_loading = false;
+                    app.end_turn(0);
                 }
             }
         }
@@ -188,7 +192,7 @@ fn cmd_chat(config_path: Option<&str>) -> Result<()> {
                 match handle_key_event(&mut app, key_event) {
                     InputAction::Submit(input) => {
                         app.push_message(DisplayMessage::user(&input));
-                        app.is_loading = true;
+                        app.start_turn();
 
                         // Spawn async task for agent turn
                         let gw = gw.clone();
@@ -205,6 +209,9 @@ fn cmd_chat(config_path: Option<&str>) -> Result<()> {
                     }
                     InputAction::Clear => {
                         app.clear();
+                    }
+                    InputAction::ToggleVerbose => {
+                        app.toggle_verbose();
                     }
                     InputAction::None => {}
                 }

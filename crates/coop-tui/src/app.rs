@@ -1,4 +1,5 @@
 use chrono::{DateTime, Local, Utc};
+use std::time::Instant;
 
 /// Role for display messages in the TUI.
 #[derive(Debug, Clone, PartialEq)]
@@ -6,6 +7,8 @@ pub enum DisplayRole {
     User,
     Assistant,
     System,
+    ToolCall { name: String },
+    ToolOutput { name: String },
 }
 
 /// A message to display in the TUI.
@@ -14,6 +17,7 @@ pub struct DisplayMessage {
     pub role: DisplayRole,
     pub content: String,
     pub timestamp: DateTime<Utc>,
+    pub is_tool: bool,
 }
 
 impl DisplayMessage {
@@ -22,6 +26,7 @@ impl DisplayMessage {
             role: DisplayRole::User,
             content: content.into(),
             timestamp: Utc::now(),
+            is_tool: false,
         }
     }
 
@@ -30,6 +35,7 @@ impl DisplayMessage {
             role: DisplayRole::Assistant,
             content: content.into(),
             timestamp: Utc::now(),
+            is_tool: false,
         }
     }
 
@@ -38,6 +44,29 @@ impl DisplayMessage {
             role: DisplayRole::System,
             content: content.into(),
             timestamp: Utc::now(),
+            is_tool: false,
+        }
+    }
+
+    pub fn tool_call(name: &str) -> Self {
+        Self {
+            role: DisplayRole::ToolCall {
+                name: name.to_string(),
+            },
+            content: String::new(),
+            timestamp: Utc::now(),
+            is_tool: true,
+        }
+    }
+
+    pub fn tool_output(name: &str, output: impl Into<String>) -> Self {
+        Self {
+            role: DisplayRole::ToolOutput {
+                name: name.to_string(),
+            },
+            content: output.into(),
+            timestamp: Utc::now(),
+            is_tool: true,
         }
     }
 
@@ -70,10 +99,27 @@ pub struct App {
     pub loading_frame: usize,
     /// Should the app exit?
     pub should_quit: bool,
+    /// Whether to show tool call output.
+    pub verbose: bool,
+    /// Cumulative token count for the session.
+    pub token_count: u32,
+    /// Model context window limit.
+    pub context_limit: u32,
+    /// When the current turn started.
+    pub turn_started: Option<Instant>,
+    /// Session name for display.
+    pub session_name: String,
+    /// Connection status text.
+    pub connection_status: String,
 }
 
 impl App {
-    pub fn new(agent_name: impl Into<String>, model_name: impl Into<String>) -> Self {
+    pub fn new(
+        agent_name: impl Into<String>,
+        model_name: impl Into<String>,
+        session_name: impl Into<String>,
+        context_limit: u32,
+    ) -> Self {
         Self {
             messages: Vec::new(),
             input: String::new(),
@@ -84,6 +130,12 @@ impl App {
             is_loading: false,
             loading_frame: 0,
             should_quit: false,
+            verbose: false,
+            token_count: 0,
+            context_limit,
+            turn_started: None,
+            session_name: session_name.into(),
+            connection_status: String::new(),
         }
     }
 
@@ -187,5 +239,44 @@ impl App {
         if self.is_loading {
             self.loading_frame = self.loading_frame.wrapping_add(1);
         }
+    }
+
+    /// Toggle verbose mode (show/hide tool call output).
+    pub fn toggle_verbose(&mut self) {
+        self.verbose = !self.verbose;
+        let state = if self.verbose { "on" } else { "off" };
+        self.push_message(DisplayMessage::system(format!("Verbose mode {state}.")));
+    }
+
+    /// Mark the start of a new agent turn.
+    pub fn start_turn(&mut self) {
+        self.is_loading = true;
+        self.turn_started = Some(Instant::now());
+    }
+
+    /// Mark the end of an agent turn and update token count.
+    pub fn end_turn(&mut self, tokens: u32) {
+        self.is_loading = false;
+        self.turn_started = None;
+        self.token_count = tokens;
+    }
+
+    /// Elapsed time text for the current turn.
+    pub fn elapsed_text(&self) -> String {
+        match self.turn_started {
+            Some(start) => {
+                let secs = start.elapsed().as_secs();
+                format!("{secs}s")
+            }
+            None => String::new(),
+        }
+    }
+
+    /// Token usage as a percentage of the context limit.
+    pub fn token_percent(&self) -> f64 {
+        if self.context_limit == 0 {
+            return 0.0;
+        }
+        f64::from(self.token_count) / f64::from(self.context_limit) * 100.0
     }
 }

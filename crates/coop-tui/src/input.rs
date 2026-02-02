@@ -13,6 +13,8 @@ pub enum InputAction {
     Quit,
     /// User wants to clear the session.
     Clear,
+    /// User wants to toggle verbose mode.
+    ToggleVerbose,
 }
 
 /// Handle a key event, updating app state and returning any action.
@@ -41,6 +43,7 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent) -> InputAction {
             match trimmed.as_str() {
                 "/quit" | "/exit" | "/q" => InputAction::Quit,
                 "/clear" | "/reset" => InputAction::Clear,
+                "/verbose" | "/v" => InputAction::ToggleVerbose,
                 _ => InputAction::Submit(trimmed),
             }
         }

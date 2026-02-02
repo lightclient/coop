@@ -51,9 +51,7 @@ impl AnthropicProvider {
             .context("failed to create HTTP client")?;
 
         // Strip provider prefix (e.g. "anthropic/claude-sonnet-4-20250514" -> "claude-sonnet-4-20250514")
-        let api_model = model_name
-            .strip_prefix("anthropic/")
-            .unwrap_or(model_name);
+        let api_model = model_name.strip_prefix("anthropic/").unwrap_or(model_name);
 
         let model = ModelInfo {
             name: api_model.to_string(),
@@ -115,11 +113,7 @@ impl AnthropicProvider {
     }
 
     /// Send a request with retry on transient errors (429, 500, 502, 503).
-    async fn send_with_retry(
-        &self,
-        body: &Value,
-        has_tools: bool,
-    ) -> Result<reqwest::Response> {
+    async fn send_with_retry(&self, body: &Value, has_tools: bool) -> Result<reqwest::Response> {
         let mut last_err = None;
 
         for attempt in 0..=MAX_RETRIES {
@@ -134,10 +128,7 @@ impl AnthropicProvider {
                 return Ok(response);
             }
 
-            let is_retryable = matches!(
-                status.as_u16(),
-                429 | 500 | 502 | 503
-            );
+            let is_retryable = matches!(status.as_u16(), 429 | 500 | 502 | 503);
 
             if !is_retryable || attempt == MAX_RETRIES {
                 let error_text = response.text().await.unwrap_or_default();
@@ -307,9 +298,7 @@ impl AnthropicProvider {
                 }
                 ContentBlock::ToolUse { id, name, input } => {
                     let coop_name = if strip_prefix {
-                        name.strip_prefix(TOOL_PREFIX)
-                            .unwrap_or(name)
-                            .to_string()
+                        name.strip_prefix(TOOL_PREFIX).unwrap_or(name).to_string()
                     } else {
                         name.clone()
                     };
@@ -332,7 +321,6 @@ impl AnthropicProvider {
             ..Default::default()
         }
     }
-
 }
 
 impl std::fmt::Debug for AnthropicProvider {
@@ -563,8 +551,7 @@ where
                     SseAction::YieldDelta(text)
                 }
                 SseDelta::InputJson { partial_json } => {
-                    if let Some(BlockAccumulator::ToolUse { json_buf, .. }) =
-                        self.blocks.last_mut()
+                    if let Some(BlockAccumulator::ToolUse { json_buf, .. }) = self.blocks.last_mut()
                     {
                         json_buf.push_str(&partial_json);
                     }
@@ -590,20 +577,13 @@ where
                                 msg = msg.with_text(text);
                             }
                         }
-                        BlockAccumulator::ToolUse {
-                            id,
-                            name,
-                            json_buf,
-                        } => {
+                        BlockAccumulator::ToolUse { id, name, json_buf } => {
                             let coop_name = if is_oauth {
-                                name.strip_prefix(TOOL_PREFIX)
-                                    .unwrap_or(&name)
-                                    .to_string()
+                                name.strip_prefix(TOOL_PREFIX).unwrap_or(&name).to_string()
                             } else {
                                 name
                             };
-                            let input: Value =
-                                serde_json::from_str(&json_buf).unwrap_or(json!({}));
+                            let input: Value = serde_json::from_str(&json_buf).unwrap_or(json!({}));
                             msg = msg.with_tool_request(id, coop_name, input);
                         }
                         BlockAccumulator::Thinking => {}
