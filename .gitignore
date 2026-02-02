@@ -2,3 +2,5 @@
 *.swp
 *.swo
 .DS_Store
+/root/workspace/
+workspace/

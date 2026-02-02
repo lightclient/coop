@@ -14,9 +14,8 @@ use std::time::SystemTime;
 // Token counting
 // ---------------------------------------------------------------------------
 
-static BPE: LazyLock<tiktoken_rs::CoreBPE> = LazyLock::new(|| {
-    tiktoken_rs::cl100k_base().expect("failed to load cl100k_base BPE")
-});
+static BPE: LazyLock<tiktoken_rs::CoreBPE> =
+    LazyLock::new(|| tiktoken_rs::cl100k_base().expect("failed to load cl100k_base BPE"));
 
 /// Count tokens in a string using cl100k_base encoding.
 pub fn count_tokens(text: &str) -> usize {
@@ -101,7 +100,6 @@ impl BuiltPrompt {
             .collect::<Vec<_>>()
             .join("\n\n")
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -220,9 +218,7 @@ impl WorkspaceIndex {
                 None => true,
             };
 
-            if needs_update
-                && let Some(indexed) = Self::index_file(&full_path, cfg)?
-            {
+            if needs_update && let Some(indexed) = Self::index_file(&full_path, cfg)? {
                 self.files.insert(cfg.path.clone(), indexed);
                 changed = true;
             }
@@ -268,8 +264,7 @@ impl WorkspaceIndex {
             Ok(m) => m,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => {
-                return Err(e)
-                    .with_context(|| format!("failed to stat {}", full_path.display()))
+                return Err(e).with_context(|| format!("failed to stat {}", full_path.display()));
             }
         };
 
@@ -304,7 +299,10 @@ impl WorkspaceIndex {
 fn truncate_to_budget(content: &str, path: &str, budget: usize) -> Counted {
     let tokens = count_tokens(content);
     if tokens <= budget {
-        return Counted { content: content.to_string(), tokens };
+        return Counted {
+            content: content.to_string(),
+            tokens,
+        };
     }
 
     // Binary-search-ish: take lines until we exceed budget, leaving room for the marker.
@@ -533,7 +531,8 @@ impl PromptBuilder {
         let overflow_paths: Vec<&str> = overflow.iter().map(|e| e.path.as_str()).collect();
         for entry in index.entries_for_trust(self.trust) {
             let layer_name = Self::layer_name(&entry.path);
-            if !inlined_names.contains(&layer_name) && !overflow_paths.contains(&entry.path.as_str())
+            if !inlined_names.contains(&layer_name)
+                && !overflow_paths.contains(&entry.path.as_str())
             {
                 menu.push(entry.clone());
             }
@@ -621,7 +620,10 @@ mod tests {
             .unwrap();
 
         let flat = prompt.to_flat_string();
-        assert!(flat.contains("I am an agent."), "SOUL.md should be included");
+        assert!(
+            flat.contains("I am an agent."),
+            "SOUL.md should be included"
+        );
         assert!(
             flat.contains("Alice's birthday"),
             "MEMORY.md should be included at full trust"
@@ -648,7 +650,10 @@ mod tests {
             .unwrap();
 
         let flat = prompt.to_flat_string();
-        assert!(flat.contains("I am an agent."), "SOUL.md visible at familiar");
+        assert!(
+            flat.contains("I am an agent."),
+            "SOUL.md visible at familiar"
+        );
         assert!(
             !flat.contains("Alice's birthday"),
             "MEMORY.md should NOT be visible at familiar"
@@ -663,7 +668,11 @@ mod tests {
         );
 
         // Private files should not appear in the available_via_tool menu either.
-        let menu_paths: Vec<&str> = prompt.available_via_tool.iter().map(|e| e.path.as_str()).collect();
+        let menu_paths: Vec<&str> = prompt
+            .available_via_tool
+            .iter()
+            .map(|e| e.path.as_str())
+            .collect();
         assert!(
             !menu_paths.contains(&"MEMORY.md"),
             "MEMORY.md should NOT appear in menu at familiar trust"
@@ -693,10 +702,7 @@ mod tests {
     fn overflow_files_appear_in_tool_menu() {
         // Create a file that exceeds a tiny budget.
         let big_content = "word ".repeat(5000); // ~5000 tokens
-        let dir = setup_workspace(&[
-            ("SOUL.md", "I am an agent."),
-            ("MEMORY.md", &big_content),
-        ]);
+        let dir = setup_workspace(&[("SOUL.md", "I am an agent."), ("MEMORY.md", &big_content)]);
 
         let index = WorkspaceIndex::scan(dir.path(), &default_file_configs()).unwrap();
         let prompt = PromptBuilder::new(dir.path().to_path_buf(), "test".into())
@@ -706,7 +712,11 @@ mod tests {
             .unwrap();
 
         // SOUL.md might fit (it's tiny), but MEMORY.md should overflow.
-        let menu_paths: Vec<&str> = prompt.available_via_tool.iter().map(|e| e.path.as_str()).collect();
+        let menu_paths: Vec<&str> = prompt
+            .available_via_tool
+            .iter()
+            .map(|e| e.path.as_str())
+            .collect();
         assert!(
             menu_paths.contains(&"MEMORY.md"),
             "MEMORY.md should be in the tool menu when budget is exceeded"
@@ -745,10 +755,7 @@ mod tests {
     fn budget_enforcement() {
         let content_a = "a ".repeat(100); // ~100 tokens
         let content_b = "b ".repeat(100);
-        let dir = setup_workspace(&[
-            ("SOUL.md", &content_a),
-            ("AGENTS.md", &content_b),
-        ]);
+        let dir = setup_workspace(&[("SOUL.md", &content_a), ("AGENTS.md", &content_b)]);
 
         let index = WorkspaceIndex::scan(dir.path(), &default_file_configs()).unwrap();
         let prompt = PromptBuilder::new(dir.path().to_path_buf(), "test".into())
@@ -782,7 +789,11 @@ mod tests {
 
         // Modify the file.
         std::thread::sleep(std::time::Duration::from_millis(50));
-        fs::write(dir.path().join("SOUL.md"), "version 2 with more content added").unwrap();
+        fs::write(
+            dir.path().join("SOUL.md"),
+            "version 2 with more content added",
+        )
+        .unwrap();
 
         let changed = index.refresh(dir.path(), &configs).unwrap();
         assert!(changed, "refresh should detect mtime change");
@@ -793,10 +804,7 @@ mod tests {
 
     #[test]
     fn public_trust_sees_nothing() {
-        let dir = setup_workspace(&[
-            ("SOUL.md", "soul"),
-            ("MEMORY.md", "private"),
-        ]);
+        let dir = setup_workspace(&[("SOUL.md", "soul"), ("MEMORY.md", "private")]);
 
         let index = WorkspaceIndex::scan(dir.path(), &default_file_configs()).unwrap();
         let prompt = PromptBuilder::new(dir.path().to_path_buf(), "test".into())
@@ -825,7 +833,10 @@ mod tests {
 
     #[test]
     fn truncation_adds_marker() {
-        let content = (0..200).map(|i| format!("Line {i}: some content here")).collect::<Vec<_>>().join("\n");
+        let content = (0..200)
+            .map(|i| format!("Line {i}: some content here"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let tokens = count_tokens(&content);
         assert!(tokens > 100, "test content should be large enough");
 

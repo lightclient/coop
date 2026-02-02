@@ -7,8 +7,9 @@ mod trust;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use coop_agent::{AnthropicProvider, GooseProvider};
-use coop_core::Provider;
+use coop_agent::AnthropicProvider;
+use coop_core::tools::DefaultExecutor;
+use coop_core::{Provider, TurnEvent};
 use coop_tui::{App, DisplayMessage, InputAction, handle_key_event, poll_event};
 use crossterm::{
     event::{Event, KeyEvent},
@@ -63,7 +64,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Start => cmd_start(cli.config.as_deref()).await,
-        Commands::Chat => cmd_chat(cli.config.as_deref()).await,
+        Commands::Chat => cmd_chat(cli.config.as_deref()),
         Commands::Version => {
             println!("🐔 coop {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -89,7 +90,8 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_chat(config_path: Option<&str>) -> Result<()> {
+#[allow(clippy::too_many_lines)]
+fn cmd_chat(config_path: Option<&str>) -> Result<()> {
     let config_file = Config::find_config_path(config_path);
 
     // Resolve config file relative to its directory for system prompt paths
@@ -104,21 +106,23 @@ async fn cmd_chat(config_path: Option<&str>) -> Result<()> {
     let system_prompt = config.build_system_prompt(&config_dir)?;
 
     // Create the provider
-    // Use AnthropicProvider for Anthropic (supports OAuth tokens), Goose for others
-    let provider: Arc<dyn Provider> = if config.provider.name == "anthropic" {
-        Arc::new(
-            AnthropicProvider::from_env(&config.agent.model)
-                .context("failed to initialize Anthropic provider")?,
-        )
-    } else {
-        Arc::new(
-            GooseProvider::new(&config.provider.name, &config.agent.model)
-                .await
-                .context("failed to initialize provider")?,
-        )
-    };
+    anyhow::ensure!(
+        config.provider.name == "anthropic",
+        "only the 'anthropic' provider is supported (got '{}')",
+        config.provider.name
+    );
+    let provider: Arc<dyn Provider> = Arc::new(
+        AnthropicProvider::from_env(&config.agent.model)
+            .context("failed to initialize Anthropic provider")?,
+    );
 
-    let gw = Arc::new(Gateway::new(config.clone(), system_prompt, provider));
+    let executor = Arc::new(DefaultExecutor::new());
+    let gw = Arc::new(Gateway::new(
+        config.clone(),
+        system_prompt,
+        provider,
+        executor,
+    ));
     let session_key = gw.default_session_key();
 
     // Set up TUI
@@ -134,23 +138,41 @@ async fn cmd_chat(config_path: Option<&str>) -> Result<()> {
         config.agent.id, config.agent.model
     )));
 
-    // Channel for async responses
-    let (response_tx, mut response_rx) = mpsc::channel::<Result<String, String>>(16);
+    // Channel for async turn events
+    let (event_tx, mut event_rx) = mpsc::channel::<TurnEvent>(64);
 
     // Main event loop
     loop {
         // Draw
         terminal.draw(|f| coop_tui::ui::draw(f, &app))?;
 
-        // Check for async responses
-        while let Ok(result) = response_rx.try_recv() {
-            app.is_loading = false;
-            match result {
-                Ok(content) => {
-                    app.push_message(DisplayMessage::assistant(content));
+        // Check for async turn events
+        while let Ok(turn_event) = event_rx.try_recv() {
+            match turn_event {
+                TurnEvent::TextDelta(text) => {
+                    app.append_or_create_assistant(&text);
                 }
-                Err(err) => {
+                TurnEvent::AssistantMessage(msg) => {
+                    // Text was already streamed via TextDelta; only show tool calls
+                    if msg.has_tool_requests() {
+                        for req in msg.tool_requests() {
+                            app.push_message(DisplayMessage::system(format!(
+                                "[calling tool: {}]",
+                                req.name
+                            )));
+                        }
+                    }
+                }
+                TurnEvent::ToolStart { name, .. } => {
+                    app.push_message(DisplayMessage::system(format!("[executing: {name}...]")));
+                }
+                TurnEvent::ToolResult { .. } => {}
+                TurnEvent::Done(_) => {
+                    app.is_loading = false;
+                }
+                TurnEvent::Error(err) => {
                     app.push_message(DisplayMessage::system(format!("Error: {err}")));
+                    app.is_loading = false;
                 }
             }
         }
@@ -171,10 +193,11 @@ async fn cmd_chat(config_path: Option<&str>) -> Result<()> {
                         // Spawn async task for agent turn
                         let gw = gw.clone();
                         let sk = session_key.clone();
-                        let tx = response_tx.clone();
+                        let tx = event_tx.clone();
                         tokio::spawn(async move {
-                            let result = gw.handle_message(&sk, &input).await;
-                            let _ = tx.send(result.map_err(|e| format!("{e:#}"))).await;
+                            if let Err(e) = gw.run_turn(&sk, &input, tx.clone()).await {
+                                let _ = tx.send(TurnEvent::Error(format!("{e:#}"))).await;
+                            }
                         });
                     }
                     InputAction::Quit => {

@@ -157,6 +157,18 @@ impl App {
         self.scroll = self.scroll.saturating_add(n);
     }
 
+    /// Append text to the last assistant message, or create a new one.
+    pub fn append_or_create_assistant(&mut self, text: &str) {
+        if let Some(last) = self.messages.last_mut()
+            && last.role == DisplayRole::Assistant
+        {
+            last.content.push_str(text);
+            self.scroll_to_bottom();
+            return;
+        }
+        self.push_message(DisplayMessage::assistant(text));
+    }
+
     /// Clear all messages and reset session.
     pub fn clear(&mut self) {
         self.messages.clear();

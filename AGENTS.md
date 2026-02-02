@@ -50,30 +50,40 @@ cargo test -p coop-gateway
 
 ### Lint/Format
 ```bash
-cargo fmt
-cargo clippy -- -D warnings
+cargo fmt                     # also: taplo fmt for TOML files
+cargo clippy --all-targets --all-features -- -D warnings
+just check                    # full CI: fmt, toml, lint, deny, test
+just fix                      # auto-fix formatting + clippy
 ```
 
 ## Structure
 ```
 crates/
-├── coop-agent        # agent logic & provider interaction
-├── coop-channels     # channel adapters (CLI, webhooks, etc.)
-├── coop-core         # shared types, config, message routing
-├── coop-gateway      # gateway server, session management
+├── coop-agent        # provider integration (Anthropic, Goose)
+├── coop-channels     # channel adapters (terminal, future: Signal, etc.)
+├── coop-core         # shared types, traits, prompt builder, test fakes
+├── coop-gateway      # gateway server, CLI entry, session management
 └── coop-tui          # terminal UI (ratatui)
 
 docs/                 # design docs
-workspaces/           # workspace data
+workspaces/           # agent workspace data (personality, instructions)
 ```
+
+## Entry Points
+- CLI/TUI: crates/coop-gateway/src/main.rs
+- Gateway: crates/coop-gateway/src/gateway.rs
+- Traits: crates/coop-core/src/traits.rs
+- Types: crates/coop-core/src/types.rs
+- Prompt: crates/coop-core/src/prompt.rs
+- Test fakes: crates/coop-core/src/fakes.rs
 
 ## Development Loop
 ```bash
 # 1. Make changes
-# 2. cargo fmt
+# 2. just fmt (or: cargo fmt && taplo fmt)
 # 3. cargo build
 # 4. cargo test -p <crate>
-# 5. cargo clippy -- -D warnings
+# 5. just lint (or: cargo clippy --all-targets --all-features -- -D warnings)
 ```
 
 ## Rules
@@ -81,19 +91,103 @@ workspaces/           # workspace data
 Error: Use `anyhow::Result` for error handling
 Test: Prefer `tests/` folders within each crate
 Test: Use fake/placeholder data only — never real PII
+Test: Use fakes from coop-core/src/fakes.rs for trait boundaries
+Provider: Implement `Provider` trait — see crates/coop-core/src/traits.rs
+Channel: Implement `Channel` trait — see crates/coop-core/src/traits.rs
 
 ## Code Quality
 
 Comments: Write self-documenting code — prefer clear names over comments
+Comments: Never add comments that restate what code does
 Comments: Only comment for complex algorithms, non-obvious logic, or "why" not "what"
+Comments: Never comment self-evident operations, getters/setters, constructors, or standard Rust idioms
 Simplicity: Don't over-abstract early. Trust Rust's type system.
-Errors: Don't add redundant error context
+Simplicity: Don't make things optional that don't need to be — the compiler will enforce
+Simplicity: Booleans should default to false, not be optional
+Errors: Don't add error context that doesn't add useful information (e.g., `.context("Failed to X")` when error already says it failed)
 Logging: Use tracing. Don't over-log — errors and key state transitions only.
+
+## Anthropic OAuth (Claude Code Tokens)
+
+Coop supports Anthropic OAuth tokens (`sk-ant-oat*`) from Claude Code subscriptions (Pro/Max). These require a specific calling convention that differs from regular API keys. The implementation lives in `crates/coop-agent/src/anthropic_provider.rs`.
+
+**Token detection:** Tokens containing `sk-ant-oat` are treated as OAuth. Regular `sk-ant-api*` keys use the standard API path.
+
+### Required Headers (OAuth only)
+
+```
+authorization: Bearer <token>
+anthropic-beta: <see below>
+user-agent: claude-cli/<VERSION> (external, cli)
+x-app: cli
+```
+
+Do NOT send `x-api-key` (that's for regular API keys) or `anthropic-dangerous-direct-browser-access` (that's for browser CORS only, not server-side).
+
+### Beta Flags
+
+The `anthropic-beta` header value depends on whether tools are in the request:
+
+- **Without tools:** `oauth-2025-04-20,interleaved-thinking-2025-05-14`
+- **With tools:** `claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14`
+
+The `claude-code-20250219` flag is required when tools are present. The `fine-grained-tool-streaming-2025-05-14` flag is **incompatible** with OAuth and must not be sent.
+
+### URL Query Parameter
+
+OAuth requests must append `?beta=true` to the messages endpoint:
+
+```
+POST https://api.anthropic.com/v1/messages?beta=true
+```
+
+### Tool Name Prefixing
+
+All tool names must be prefixed with `mcp_` before sending to the API, and the prefix must be stripped from tool names in responses:
+
+- Outbound: `bash` → `mcp_bash`, `read_file` → `mcp_read_file`
+- Inbound: `mcp_bash` → `bash`, `mcp_read_file` → `read_file`
+
+This applies to tool definitions, `tool_use` blocks in messages, and `tool_use` blocks in responses.
+
+### System Prompt Identity
+
+The first system block must be the Claude Code identity string:
+
+```json
+[
+  {
+    "type": "text",
+    "text": "You are Claude Code, Anthropic's official CLI for Claude.",
+    "cache_control": { "type": "ephemeral" }
+  },
+  {
+    "type": "text",
+    "text": "<your actual system prompt>",
+    "cache_control": { "type": "ephemeral" }
+  }
+]
+```
+
+### Model Name
+
+Strip the `anthropic/` prefix before sending. The API expects bare model IDs like `claude-sonnet-4-20250514`, not `anthropic/claude-sonnet-4-20250514`.
+
+### Thinking Blocks
+
+The `interleaved-thinking` beta may return `{"type": "thinking", "thinking": "..."}` content blocks in responses. These must be handled (deserialized and skipped) without error.
+
+### Version String
+
+The `user-agent` header must contain a plausible Claude Code CLI version. Update `CLAUDE_CODE_VERSION` in `anthropic_provider.rs` when upgrading. Check with `claude --version`.
+
+### Reference
+
+This calling convention was derived from the [opencode-anthropic-auth](https://github.com/anomalyco/opencode-anthropic-auth) project and the [OpenClaw](https://github.com/openclaw/openclaw) codebase, which reverse-engineered the Claude Code OAuth flow.
 
 ## Never
 
 Never: Commit personal information, real names, real credentials, or PII
 Never: Skip `cargo fmt`
-Never: Merge without `cargo clippy -- -D warnings` passing
-Never: Comment self-evident operations
+Never: Merge without `cargo clippy --all-targets --all-features -- -D warnings` passing
 Never: Edit `Cargo.toml` dependency versions manually when `cargo add` works

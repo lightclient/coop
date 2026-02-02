@@ -37,15 +37,13 @@ pub trait Channel: Send + Sync {
 /// Yields `(Option<Message>, Option<Usage>)` tuples. Partial messages contain
 /// text deltas; the final message is complete. Usage is typically present on
 /// the final yield.
-pub type ProviderStream = Pin<
-    Box<dyn futures::Stream<Item = Result<(Option<Message>, Option<Usage>)>> + Send>,
->;
+pub type ProviderStream =
+    Pin<Box<dyn futures::Stream<Item = Result<(Option<Message>, Option<Usage>)>> + Send>>;
 
 /// An LLM provider that can complete conversations.
 ///
-/// This is Coop's provider abstraction. The Goose integration implements this
-/// by wrapping `goose::providers::base::Provider`, converting between Coop's
-/// `Message`/`ToolDef` types and Goose's at the boundary.
+/// Implementations convert between Coop's `Message`/`ToolDef` types and the
+/// provider's wire format at the boundary.
 #[async_trait]
 pub trait Provider: Send + Sync {
     /// Provider name (e.g., "anthropic", "openai").
@@ -107,11 +105,7 @@ pub trait Tool: Send + Sync {
     fn definition(&self) -> ToolDef;
 
     /// Execute the tool with the given arguments.
-    async fn execute(
-        &self,
-        arguments: serde_json::Value,
-        ctx: &ToolContext,
-    ) -> Result<ToolOutput>;
+    async fn execute(&self, arguments: serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput>;
 }
 
 /// Dispatches tool calls to the right handler.

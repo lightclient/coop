@@ -17,6 +17,7 @@ async-trait = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
 coop-agent = { path = "../coop-agent" }
+futures = { workspace = true }
 coop-channels = { path = "../coop-channels" }
 coop-core = { path = "../coop-core" }
 coop-tui = { path = "../coop-tui" }

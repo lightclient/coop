@@ -1,7 +1,7 @@
 //! Core types for Coop.
 //!
-//! These are Coop's first-class types. The goose integration layer in `coop-agent`
-//! converts between these and Goose's types at the boundary.
+//! These are Coop's first-class types. Provider implementations in `coop-agent`
+//! convert between these and the provider's wire format at the boundary.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -485,9 +485,7 @@ pub struct TurnConfig {
 
 impl Default for TurnConfig {
     fn default() -> Self {
-        Self {
-            max_iterations: 25,
-        }
+        Self { max_iterations: 25 }
     }
 }
 
@@ -537,9 +535,7 @@ mod tests {
 
     #[test]
     fn message_builder() {
-        let msg = Message::user()
-            .with_text("hello")
-            .with_text(" world");
+        let msg = Message::user().with_text("hello").with_text(" world");
 
         assert_eq!(msg.role, Role::User);
         assert_eq!(msg.text(), "hello world");
@@ -550,7 +546,11 @@ mod tests {
     fn message_tool_requests() {
         let msg = Message::assistant()
             .with_text("Let me check that.")
-            .with_tool_request("call_1", "read_file", serde_json::json!({"path": "foo.txt"}));
+            .with_tool_request(
+                "call_1",
+                "read_file",
+                serde_json::json!({"path": "foo.txt"}),
+            );
 
         assert!(msg.has_tool_requests());
         let reqs = msg.tool_requests();
@@ -561,8 +561,7 @@ mod tests {
 
     #[test]
     fn message_tool_result() {
-        let msg = Message::user()
-            .with_tool_result("call_1", "file contents here", false);
+        let msg = Message::user().with_tool_result("call_1", "file contents here", false);
 
         assert!(msg.has_tool_results());
         assert!(!msg.has_tool_requests());
@@ -570,9 +569,11 @@ mod tests {
 
     #[test]
     fn message_serialization_roundtrip() {
-        let msg = Message::assistant()
-            .with_text("hello")
-            .with_tool_request("id1", "bash", serde_json::json!({"cmd": "ls"}));
+        let msg = Message::assistant().with_text("hello").with_tool_request(
+            "id1",
+            "bash",
+            serde_json::json!({"cmd": "ls"}),
+        );
 
         let json = serde_json::to_string(&msg).unwrap();
         let roundtrip: Message = serde_json::from_str(&json).unwrap();

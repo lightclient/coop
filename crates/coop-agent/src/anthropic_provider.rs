@@ -1,20 +1,28 @@
 //! Direct Anthropic API provider with OAuth token support.
 //!
 //! Uses Bearer auth and Claude Code identity headers for OAuth tokens (sk-ant-oat01-*).
+//! OAuth calling convention derived from the opencode-anthropic-auth project.
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use futures::StreamExt;
 use reqwest::Client;
 use serde::Deserialize;
-use serde_json::{json, Value};
-use tracing::debug;
+use serde_json::{Value, json};
+use tracing::{debug, warn};
 
 use coop_core::traits::{Provider, ProviderStream};
 use coop_core::types::{Content, Message, ModelInfo, Role, ToolDef, Usage};
 
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
-const CLAUDE_CODE_VERSION: &str = "2.1.2";
+const CLAUDE_CODE_VERSION: &str = "2.1.29";
+
+/// Tool name prefix required by Claude Code OAuth calling convention.
+const TOOL_PREFIX: &str = "mcp_";
+
+/// Max retry attempts for transient errors.
+const MAX_RETRIES: u32 = 3;
 
 /// Direct Anthropic provider with OAuth support.
 pub struct AnthropicProvider {
@@ -42,8 +50,13 @@ impl AnthropicProvider {
             .build()
             .context("failed to create HTTP client")?;
 
+        // Strip provider prefix (e.g. "anthropic/claude-sonnet-4-20250514" -> "claude-sonnet-4-20250514")
+        let api_model = model_name
+            .strip_prefix("anthropic/")
+            .unwrap_or(model_name);
+
         let model = ModelInfo {
-            name: model_name.to_string(),
+            name: api_model.to_string(),
             context_limit: 200_000,
         };
 
@@ -63,34 +76,100 @@ impl AnthropicProvider {
     }
 
     /// Build request with appropriate auth headers.
-    fn build_request(&self, body: Value) -> reqwest::RequestBuilder {
+    fn build_request(&self, body: &Value, has_tools: bool) -> reqwest::RequestBuilder {
+        let url = if self.is_oauth {
+            // OAuth requires ?beta=true query parameter
+            format!("{ANTHROPIC_API_URL}?beta=true")
+        } else {
+            ANTHROPIC_API_URL.to_string()
+        };
+
         let mut req = self
             .client
-            .post(ANTHROPIC_API_URL)
+            .post(&url)
             .header("anthropic-version", ANTHROPIC_VERSION)
-            .header("content-type", "application/json")
-            .header("accept", "application/json");
+            .header("content-type", "application/json");
 
         if self.is_oauth {
-            // OAuth tokens: mimic Claude Code's headers exactly
+            // Build beta flags: always need oauth + interleaved-thinking,
+            // add claude-code flag only when tools are present
+            let beta = if has_tools {
+                "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14"
+            } else {
+                "oauth-2025-04-20,interleaved-thinking-2025-05-14"
+            };
+
             req = req
                 .header("authorization", format!("Bearer {}", self.api_key))
-                .header("anthropic-dangerous-direct-browser-access", "true")
-                .header(
-                    "anthropic-beta",
-                    "claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14",
-                )
+                .header("anthropic-beta", beta)
                 .header(
                     "user-agent",
-                    format!("claude-cli/{} (external, cli)", CLAUDE_CODE_VERSION),
+                    format!("claude-cli/{CLAUDE_CODE_VERSION} (external, cli)"),
                 )
                 .header("x-app", "cli");
         } else {
-            // Regular API keys use x-api-key
             req = req.header("x-api-key", &self.api_key);
         }
 
-        req.json(&body)
+        req.json(body)
+    }
+
+    /// Send a request with retry on transient errors (429, 500, 502, 503).
+    async fn send_with_retry(
+        &self,
+        body: &Value,
+        has_tools: bool,
+    ) -> Result<reqwest::Response> {
+        let mut last_err = None;
+
+        for attempt in 0..=MAX_RETRIES {
+            let response = self
+                .build_request(body, has_tools)
+                .send()
+                .await
+                .context("failed to send request to Anthropic")?;
+
+            let status = response.status();
+            if status.is_success() {
+                return Ok(response);
+            }
+
+            let is_retryable = matches!(
+                status.as_u16(),
+                429 | 500 | 502 | 503
+            );
+
+            if !is_retryable || attempt == MAX_RETRIES {
+                let error_text = response.text().await.unwrap_or_default();
+                anyhow::bail!("Anthropic API error: {status} - {error_text}");
+            }
+
+            let error_text = response.text().await.unwrap_or_default();
+            warn!(
+                attempt = attempt + 1,
+                max = MAX_RETRIES,
+                status = %status,
+                "retryable Anthropic error, backing off: {error_text}"
+            );
+
+            let base_ms = 1000u64 * 2u64.pow(attempt);
+            // Simple jitter without rand crate
+            let jitter_ms = u64::from(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .subsec_nanos()
+                    % 500,
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(base_ms + jitter_ms)).await;
+
+            last_err = Some(format!("{status} - {error_text}"));
+        }
+
+        anyhow::bail!(
+            "Anthropic API error after retries: {}",
+            last_err.unwrap_or_default()
+        );
     }
 
     /// Build system prompt array with Claude Code identity for OAuth tokens.
@@ -110,13 +189,39 @@ impl AnthropicProvider {
                 }
             ])
         } else {
-            // Regular API keys can use string or array
             json!(system)
         }
     }
 
+    /// Build the request body shared between complete() and stream().
+    fn build_body(
+        &self,
+        system: &str,
+        messages: &[Message],
+        tools: &[ToolDef],
+        stream: bool,
+    ) -> Value {
+        let has_tools = !tools.is_empty();
+        let mut body = json!({
+            "model": self.model.name,
+            "max_tokens": 8192,
+            "system": self.build_system_blocks(system),
+            "messages": Self::format_messages(messages, self.is_oauth),
+        });
+
+        if has_tools {
+            body["tools"] = json!(Self::format_tools(tools, self.is_oauth));
+        }
+
+        if stream {
+            body["stream"] = json!(true);
+        }
+
+        body
+    }
+
     /// Convert Coop messages to Anthropic API format.
-    fn format_messages(messages: &[Message]) -> Vec<Value> {
+    fn format_messages(messages: &[Message], prefix_tools: bool) -> Vec<Value> {
         messages
             .iter()
             .map(|m| {
@@ -133,12 +238,23 @@ impl AnthropicProvider {
                             "type": "text",
                             "text": text
                         })),
-                        Content::ToolRequest { id, name, arguments } => Some(json!({
-                            "type": "tool_use",
-                            "id": id,
-                            "name": name,
-                            "input": arguments
-                        })),
+                        Content::ToolRequest {
+                            id,
+                            name,
+                            arguments,
+                        } => {
+                            let api_name = if prefix_tools {
+                                format!("{TOOL_PREFIX}{name}")
+                            } else {
+                                name.clone()
+                            };
+                            Some(json!({
+                                "type": "tool_use",
+                                "id": id,
+                                "name": api_name,
+                                "input": arguments
+                            }))
+                        }
                         Content::ToolResult {
                             id,
                             output,
@@ -162,12 +278,17 @@ impl AnthropicProvider {
     }
 
     /// Convert Coop tools to Anthropic API format.
-    fn format_tools(tools: &[ToolDef]) -> Vec<Value> {
+    fn format_tools(tools: &[ToolDef], prefix: bool) -> Vec<Value> {
         tools
             .iter()
             .map(|t| {
+                let name = if prefix {
+                    format!("{TOOL_PREFIX}{}", t.name)
+                } else {
+                    t.name.clone()
+                };
                 json!({
-                    "name": t.name,
+                    "name": name,
                     "description": t.description,
                     "input_schema": t.parameters
                 })
@@ -175,8 +296,8 @@ impl AnthropicProvider {
             .collect()
     }
 
-    /// Parse Anthropic response into Coop message.
-    fn parse_response(response: &AnthropicResponse) -> Message {
+    /// Parse Anthropic response into Coop message, stripping tool name prefixes.
+    fn parse_response(response: &AnthropicResponse, strip_prefix: bool) -> Message {
         let mut msg = Message::assistant();
 
         for block in &response.content {
@@ -185,7 +306,17 @@ impl AnthropicProvider {
                     msg = msg.with_text(text);
                 }
                 ContentBlock::ToolUse { id, name, input } => {
-                    msg = msg.with_tool_request(id, name, input.clone());
+                    let coop_name = if strip_prefix {
+                        name.strip_prefix(TOOL_PREFIX)
+                            .unwrap_or(name)
+                            .to_string()
+                    } else {
+                        name.clone()
+                    };
+                    msg = msg.with_tool_request(id, coop_name, input.clone());
+                }
+                ContentBlock::Thinking { .. } => {
+                    // Skip thinking blocks from interleaved-thinking beta
                 }
             }
         }
@@ -201,6 +332,7 @@ impl AnthropicProvider {
             ..Default::default()
         }
     }
+
 }
 
 impl std::fmt::Debug for AnthropicProvider {
@@ -214,7 +346,7 @@ impl std::fmt::Debug for AnthropicProvider {
 
 #[async_trait]
 impl Provider for AnthropicProvider {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "anthropic"
     }
 
@@ -228,35 +360,17 @@ impl Provider for AnthropicProvider {
         messages: &[Message],
         tools: &[ToolDef],
     ) -> Result<(Message, Usage)> {
-        let mut body = json!({
-            "model": self.model.name,
-            "max_tokens": 8192,
-            "system": self.build_system_blocks(system),
-            "messages": Self::format_messages(messages),
-        });
+        let has_tools = !tools.is_empty();
+        let body = self.build_body(system, messages, tools, false);
 
-        if !tools.is_empty() {
-            body["tools"] = json!(Self::format_tools(tools));
-        }
-
-        let response = self
-            .build_request(body)
-            .send()
-            .await
-            .context("failed to send request to Anthropic")?;
-
-        let status = response.status();
-        if !status.is_success() {
-            let error_text = response.text().await.unwrap_or_default();
-            anyhow::bail!("Anthropic API error: {} - {}", status, error_text);
-        }
+        let response = self.send_with_retry(&body, has_tools).await?;
 
         let api_response: AnthropicResponse = response
             .json()
             .await
             .context("failed to parse Anthropic response")?;
 
-        let message = Self::parse_response(&api_response);
+        let message = Self::parse_response(&api_response, self.is_oauth);
         let usage = Self::parse_usage(&api_response);
 
         Ok((message, usage))
@@ -272,10 +386,56 @@ impl Provider for AnthropicProvider {
         messages: &[Message],
         tools: &[ToolDef],
     ) -> Result<ProviderStream> {
-        // For now, fall back to non-streaming
-        // TODO: Implement SSE streaming
-        let (message, usage) = self.complete(system, messages, tools).await?;
-        let stream = futures::stream::once(async move { Ok((Some(message), Some(usage))) });
+        let has_tools = !tools.is_empty();
+        let body = self.build_body(system, messages, tools, true);
+
+        let response = self.send_with_retry(&body, has_tools).await?;
+
+        let byte_stream = response.bytes_stream();
+        let is_oauth = self.is_oauth;
+
+        let stream = futures::stream::unfold(
+            SseState::new(byte_stream, is_oauth),
+            |mut state| async move {
+                loop {
+                    let line = match state.next_line().await {
+                        Ok(Some(line)) => line,
+                        Ok(None) => return None,
+                        Err(e) => return Some((Err(e), state)),
+                    };
+
+                    // SSE protocol: lines starting with "data: "
+                    let Some(data) = line.strip_prefix("data: ") else {
+                        continue;
+                    };
+
+                    if data == "[DONE]" {
+                        return None;
+                    }
+
+                    let event: SseEvent = match serde_json::from_str(data) {
+                        Ok(ev) => ev,
+                        Err(e) => {
+                            debug!(error = %e, data = data, "skipping unparseable SSE event");
+                            continue;
+                        }
+                    };
+
+                    match state.handle_event(event) {
+                        SseAction::YieldDelta(text) => {
+                            let msg = Message::assistant().with_text(&text);
+                            return Some((Ok((Some(msg), None)), state));
+                        }
+                        SseAction::YieldFinal(msg, usage) => {
+                            return Some((Ok((Some(msg), Some(usage))), state));
+                        }
+                        SseAction::Continue => {}
+                        SseAction::Error(e) => return Some((Err(e), state)),
+                    }
+                }
+            },
+        );
+
         Ok(Box::pin(stream))
     }
 
@@ -285,12 +445,182 @@ impl Provider for AnthropicProvider {
         messages: &[Message],
         tools: &[ToolDef],
     ) -> Result<(Message, Usage)> {
-        // Same as complete for now
         self.complete(system, messages, tools).await
     }
 }
 
-// --- Anthropic API response types ---
+// --- SSE streaming state machine ---
+
+/// Tracks an in-progress content block during SSE streaming.
+enum BlockAccumulator {
+    Text(String),
+    ToolUse {
+        id: String,
+        name: String,
+        json_buf: String,
+    },
+    Thinking,
+}
+
+/// What to do after processing an SSE event.
+enum SseAction {
+    Continue,
+    YieldDelta(String),
+    YieldFinal(Message, Usage),
+    Error(anyhow::Error),
+}
+
+/// State for the SSE unfold stream.
+struct SseState<S> {
+    byte_stream: S,
+    line_buf: String,
+    blocks: Vec<BlockAccumulator>,
+    usage: Usage,
+    is_oauth: bool,
+}
+
+impl<S> SseState<S>
+where
+    S: futures::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin,
+{
+    fn new(byte_stream: S, is_oauth: bool) -> Self {
+        Self {
+            byte_stream,
+            line_buf: String::new(),
+            blocks: Vec::new(),
+            usage: Usage::default(),
+            is_oauth,
+        }
+    }
+
+    /// Read the next complete SSE line from the byte stream.
+    async fn next_line(&mut self) -> Result<Option<String>> {
+        loop {
+            if let Some(pos) = self.line_buf.find('\n') {
+                let line = self.line_buf[..pos].trim_end_matches('\r').to_string();
+                self.line_buf = self.line_buf[pos + 1..].to_string();
+                if line.is_empty() {
+                    continue;
+                }
+                return Ok(Some(line));
+            }
+
+            match self.byte_stream.next().await {
+                Some(Ok(chunk)) => {
+                    let text = String::from_utf8_lossy(&chunk);
+                    self.line_buf.push_str(&text);
+                }
+                Some(Err(e)) => return Err(anyhow::anyhow!("SSE stream error: {e}")),
+                None => {
+                    if self.line_buf.is_empty() {
+                        return Ok(None);
+                    }
+                    let remaining = std::mem::take(&mut self.line_buf);
+                    let trimmed = remaining.trim().to_string();
+                    if trimmed.is_empty() {
+                        return Ok(None);
+                    }
+                    return Ok(Some(trimmed));
+                }
+            }
+        }
+    }
+
+    fn handle_event(&mut self, event: SseEvent) -> SseAction {
+        match event {
+            SseEvent::MessageStart { message } => {
+                if let Some(u) = message.usage {
+                    self.usage.input_tokens = Some(u.input_tokens);
+                    if let Some(out) = u.output_tokens {
+                        self.usage.output_tokens = Some(out);
+                    }
+                }
+                SseAction::Continue
+            }
+            SseEvent::ContentBlockStart { content_block, .. } => {
+                match content_block {
+                    SseContentBlock::Text { .. } => {
+                        self.blocks.push(BlockAccumulator::Text(String::new()));
+                    }
+                    SseContentBlock::ToolUse { id, name } => {
+                        self.blocks.push(BlockAccumulator::ToolUse {
+                            id,
+                            name,
+                            json_buf: String::new(),
+                        });
+                    }
+                    SseContentBlock::Thinking => {
+                        self.blocks.push(BlockAccumulator::Thinking);
+                    }
+                }
+                SseAction::Continue
+            }
+            SseEvent::ContentBlockDelta { delta, .. } => match delta {
+                SseDelta::Text { text } => {
+                    if let Some(BlockAccumulator::Text(buf)) = self.blocks.last_mut() {
+                        buf.push_str(&text);
+                    }
+                    SseAction::YieldDelta(text)
+                }
+                SseDelta::InputJson { partial_json } => {
+                    if let Some(BlockAccumulator::ToolUse { json_buf, .. }) =
+                        self.blocks.last_mut()
+                    {
+                        json_buf.push_str(&partial_json);
+                    }
+                    SseAction::Continue
+                }
+                SseDelta::Thinking { .. } | SseDelta::Signature { .. } => SseAction::Continue,
+            },
+            SseEvent::ContentBlockStop { .. } | SseEvent::Ping => SseAction::Continue,
+            SseEvent::MessageDelta { usage, .. } => {
+                if let Some(out) = usage.output_tokens {
+                    self.usage.output_tokens = Some(out);
+                }
+                SseAction::Continue
+            }
+            SseEvent::MessageStop => {
+                let is_oauth = self.is_oauth;
+                let blocks: Vec<_> = self.blocks.drain(..).collect();
+                let mut msg = Message::assistant();
+                for block in blocks {
+                    match block {
+                        BlockAccumulator::Text(text) => {
+                            if !text.is_empty() {
+                                msg = msg.with_text(text);
+                            }
+                        }
+                        BlockAccumulator::ToolUse {
+                            id,
+                            name,
+                            json_buf,
+                        } => {
+                            let coop_name = if is_oauth {
+                                name.strip_prefix(TOOL_PREFIX)
+                                    .unwrap_or(&name)
+                                    .to_string()
+                            } else {
+                                name
+                            };
+                            let input: Value =
+                                serde_json::from_str(&json_buf).unwrap_or(json!({}));
+                            msg = msg.with_tool_request(id, coop_name, input);
+                        }
+                        BlockAccumulator::Thinking => {}
+                    }
+                }
+                SseAction::YieldFinal(msg, self.usage)
+            }
+            SseEvent::Error { error } => SseAction::Error(anyhow::anyhow!(
+                "Anthropic SSE error: {} - {}",
+                error.error_type,
+                error.message
+            )),
+        }
+    }
+}
+
+// --- Anthropic API response types (non-streaming) ---
 
 #[derive(Debug, Deserialize)]
 struct AnthropicResponse {
@@ -311,10 +641,109 @@ enum ContentBlock {
         name: String,
         input: Value,
     },
+    #[serde(rename = "thinking")]
+    Thinking {
+        #[allow(dead_code)]
+        thinking: String,
+    },
 }
 
 #[derive(Debug, Deserialize)]
 struct ApiUsage {
     input_tokens: u32,
     output_tokens: u32,
+}
+
+// --- SSE event types ---
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+enum SseEvent {
+    #[serde(rename = "message_start")]
+    MessageStart { message: SseMessageStart },
+    #[serde(rename = "content_block_start")]
+    ContentBlockStart {
+        #[allow(dead_code)]
+        index: u32,
+        content_block: SseContentBlock,
+    },
+    #[serde(rename = "content_block_delta")]
+    ContentBlockDelta {
+        #[allow(dead_code)]
+        index: u32,
+        delta: SseDelta,
+    },
+    #[serde(rename = "content_block_stop")]
+    ContentBlockStop {
+        #[allow(dead_code)]
+        index: u32,
+    },
+    #[serde(rename = "message_delta")]
+    MessageDelta {
+        #[allow(dead_code)]
+        delta: Value,
+        usage: SseMessageDeltaUsage,
+    },
+    #[serde(rename = "message_stop")]
+    MessageStop,
+    #[serde(rename = "ping")]
+    Ping,
+    #[serde(rename = "error")]
+    Error { error: SseError },
+}
+
+#[derive(Debug, Deserialize)]
+struct SseMessageStart {
+    usage: Option<SseMessageStartUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SseMessageStartUsage {
+    input_tokens: u32,
+    output_tokens: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SseMessageDeltaUsage {
+    output_tokens: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+enum SseContentBlock {
+    #[serde(rename = "text")]
+    Text {
+        #[allow(dead_code)]
+        text: String,
+    },
+    #[serde(rename = "tool_use")]
+    ToolUse { id: String, name: String },
+    #[serde(rename = "thinking")]
+    Thinking,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+enum SseDelta {
+    #[serde(rename = "text_delta")]
+    Text { text: String },
+    #[serde(rename = "input_json_delta")]
+    InputJson { partial_json: String },
+    #[serde(rename = "thinking_delta")]
+    Thinking {
+        #[allow(dead_code)]
+        thinking: String,
+    },
+    #[serde(rename = "signature_delta")]
+    Signature {
+        #[allow(dead_code)]
+        signature: String,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+struct SseError {
+    #[serde(rename = "type")]
+    error_type: String,
+    message: String,
 }

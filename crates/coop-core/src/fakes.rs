@@ -1,9 +1,11 @@
 //! Fake implementations for testing.
 
-use crate::traits::{Channel, Provider, ProviderStream, SessionStore, Tool, ToolContext, ToolExecutor};
+use crate::traits::{
+    Channel, Provider, ProviderStream, SessionStore, Tool, ToolContext, ToolExecutor,
+};
 use crate::types::{
-    ChannelHealth, InboundMessage, Message, ModelInfo, OutboundMessage, SessionKey,
-    ToolDef, ToolOutput, Usage,
+    ChannelHealth, InboundMessage, Message, ModelInfo, OutboundMessage, SessionKey, ToolDef,
+    ToolOutput, Usage,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -146,11 +148,7 @@ impl FakeTool {
     pub fn new(name: impl Into<String>, output: impl Into<String>) -> Self {
         let name = name.into();
         Self {
-            def: ToolDef::new(
-                name,
-                "A fake tool",
-                serde_json::json!({"type": "object"}),
-            ),
+            def: ToolDef::new(name, "A fake tool", serde_json::json!({"type": "object"})),
             output: Mutex::new(ToolOutput::success(output)),
         }
     }

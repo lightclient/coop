@@ -10,13 +10,10 @@ workspace = true
 [dependencies]
 anyhow = { workspace = true }
 async-trait = { workspace = true }
+bytes = "1.11.0"
 coop-core = { path = "../coop-core" }
 futures = { workspace = true }
-goose = { workspace = true }
-# reqwest with multipart — needed because goose uses reqwest::multipart
-# but doesn't declare the feature in its Cargo.toml (goose bug)
-reqwest = { workspace = true, features = ["multipart"] }
-rmcp = { workspace = true }
+reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
