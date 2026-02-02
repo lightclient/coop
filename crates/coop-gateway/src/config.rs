@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Config {
+pub(crate) struct Config {
     pub agent: AgentConfig,
     #[serde(default)]
     pub users: Vec<UserConfig>,
@@ -13,7 +13,7 @@ pub struct Config {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentConfig {
+pub(crate) struct AgentConfig {
     pub id: String,
     pub model: String,
     #[serde(default)]
@@ -29,7 +29,7 @@ fn default_workspace() -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UserConfig {
+pub(crate) struct UserConfig {
     pub name: String,
     pub trust: TrustLevel,
     #[serde(default)]
@@ -37,7 +37,7 @@ pub struct UserConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ProviderConfig {
+pub(crate) struct ProviderConfig {
     #[serde(default = "default_provider")]
     pub name: String,
 }
@@ -48,7 +48,7 @@ fn default_provider() -> String {
 
 impl Config {
     /// Load config from a YAML file.
-    pub fn load(path: &Path) -> Result<Self> {
+    pub(crate) fn load(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read config file: {}", path.display()))?;
         let config: Config = serde_yaml::from_str(&content)
@@ -57,14 +57,15 @@ impl Config {
     }
 
     /// Build the system prompt from personality + instructions files.
-    pub fn build_system_prompt(&self, base_dir: &Path) -> Result<String> {
+    pub(crate) fn build_system_prompt(&self, base_dir: &Path) -> Result<String> {
         let mut parts = Vec::new();
 
         if let Some(personality_path) = &self.agent.personality {
             let path = base_dir.join(personality_path);
             if path.exists() {
-                let content = std::fs::read_to_string(&path)
-                    .with_context(|| format!("failed to read personality file: {}", path.display()))?;
+                let content = std::fs::read_to_string(&path).with_context(|| {
+                    format!("failed to read personality file: {}", path.display())
+                })?;
                 parts.push(content);
             }
         }
@@ -72,8 +73,9 @@ impl Config {
         if let Some(instructions_path) = &self.agent.instructions {
             let path = base_dir.join(instructions_path);
             if path.exists() {
-                let content = std::fs::read_to_string(&path)
-                    .with_context(|| format!("failed to read instructions file: {}", path.display()))?;
+                let content = std::fs::read_to_string(&path).with_context(|| {
+                    format!("failed to read instructions file: {}", path.display())
+                })?;
                 parts.push(content);
             }
         }
@@ -86,7 +88,7 @@ impl Config {
     }
 
     /// Resolve config path: check arg, then default locations.
-    pub fn find_config_path(explicit: Option<&str>) -> PathBuf {
+    pub(crate) fn find_config_path(explicit: Option<&str>) -> PathBuf {
         if let Some(p) = explicit {
             return PathBuf::from(p);
         }
@@ -124,11 +126,11 @@ mod tests {
 
     #[test]
     fn parse_minimal_config() {
-        let yaml = r#"
+        let yaml = r"
 agent:
   id: test
   model: anthropic/claude-sonnet-4-20250514
-"#;
+";
         let config: Config = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.agent.id, "test");
         assert_eq!(config.agent.model, "anthropic/claude-sonnet-4-20250514");
@@ -137,7 +139,7 @@ agent:
 
     #[test]
     fn parse_full_config() {
-        let yaml = r#"
+        let yaml = r"
 agent:
   id: reid
   model: anthropic/claude-sonnet-4-20250514
@@ -148,14 +150,14 @@ agent:
 users:
   - name: alice
     trust: full
-    match: ["terminal:default"]
+    match: ['terminal:default']
   - name: bob
     trust: inner
-    match: ["signal:+15555550101"]
+    match: ['signal:+15555550101']
 
 provider:
   name: anthropic
-"#;
+";
         let config: Config = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.agent.id, "reid");
         assert_eq!(config.users.len(), 2);

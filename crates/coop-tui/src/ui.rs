@@ -13,7 +13,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),  // header
+            Constraint::Length(1), // header
             Constraint::Min(1),    // messages
             Constraint::Length(3), // input
         ])
@@ -32,7 +32,12 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     };
 
     let header = Line::from(vec![
-        Span::styled("🐔 Coop", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "🐔 Coop",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw(" │ "),
         Span::styled(&app.agent_name, Style::default().fg(Color::Cyan)),
         Span::raw(" │ "),
@@ -58,7 +63,9 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
             ),
             DisplayRole::System => (
                 format!("{} ", msg.local_time()),
-                Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::ITALIC),
             ),
         };
 
@@ -108,7 +115,7 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
     let messages = Paragraph::new(Text::from(lines))
         .block(Block::default().borders(Borders::ALL).title("Messages"))
         .wrap(Wrap { trim: false })
-        .scroll((scroll as u16, 0));
+        .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0));
 
     frame.render_widget(messages, area);
 }
@@ -125,6 +132,7 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(input, area);
 
     // Position cursor
+    #[allow(clippy::cast_possible_truncation)] // cursor_pos is bounded by terminal width
     let cursor_x = area.x + 1 + app.cursor_pos as u16;
     let cursor_y = area.y + 1;
     frame.set_cursor_position((cursor_x, cursor_y));

@@ -186,6 +186,132 @@ Not every component needs the same reliability. Prioritize:
 
 ---
 
+## 5. Token Sensitivity: Every Token Earns Its Place
+
+Context windows are finite and expensive. Coop treats token budget the way embedded systems treat memory — every allocation is deliberate, every byte justified.
+
+**The principle:** The agent should always know the cost of bringing something into context, and the gateway should make that cost visible at every decision point.
+
+### Progressive Disclosure
+
+Nothing enters the context window by default. The prompt gives the agent a **menu with prices**, and the agent chooses what to fetch:
+
+```
+## Available Context
+- memory/MEMORY.md        (3,847 tok) — long-term facts, people, dates
+- memory/RECENT.md        (1,102 tok) — rolling 7-day context
+- memory/PEOPLE.md          (814 tok) — public-safe people info
+- workspace/TOOLS.md        (422 tok) — tool setup notes
+- workspace/HEARTBEAT.md     (38 tok) — periodic check tasks
+
+Use memory_get to load what you need. Budget: ~120k remaining.
+```
+
+The agent sees token counts before deciding to load anything. A birthday lookup doesn't need to pull 4k tokens of MEMORY.md — it can search first, then fetch just the relevant lines.
+
+### Token Accounting
+
+Every operation that touches the context window reports its token cost:
+
+- **Prompt builder:** logs per-layer token counts (`identity: 850 tok, behavior: 1200 tok, runtime: 340 tok`)
+- **memory_search results:** include estimated tokens per result (`3 results, ~280 tok total`)
+- **memory_get:** returns content with actual token count in metadata
+- **Tool responses:** include token cost of the response payload
+- **Turn summary:** total input tokens, cached tokens, output tokens, cost
+
+This data feeds into the observability layer (event log) and is available to the agent via `coop_status`.
+
+### Context Window Management
+
+- **Token budget:** Each turn starts with a known budget (model max minus system prompt minus reserved output). The gateway tracks consumed budget across tool calls within a turn.
+- **Truncation with annotation:** When content must be truncated, include a marker with what was cut and how to get the rest: `[truncated at 2000/8400 tokens — use memory_get(path, offset=80) for remainder]`
+- **Compaction signals:** When a session approaches 80% of the context window, inject a system note suggesting the agent summarize or compact. At 90%, force compaction (summarize older messages, keep recent).
+
+### What This Means for Code
+
+- Every function that produces prompt content returns `(String, usize)` — the content and its token count.
+- Token counting uses `tiktoken-rs` (cl100k_base for Anthropic models), not character-based estimation.
+- The prompt builder has a hard token ceiling per layer, with overflow going to "available via tool" instead.
+- Memory search results are ranked by relevance but also annotated with token cost, so the agent can make informed retrieval decisions.
+
+### Anti-Pattern: The Context Dump
+
+OpenClaw loads MEMORY.md (often 5-10k tokens), AGENTS.md, TOOLS.md, IDENTITY.md, USER.md, and more into every single prompt — even for a simple "what time is it?" question. This is the equivalent of `SELECT *` on every query. Coop never does this. The base prompt is lean, and everything else is on-demand.
+
+---
+
+## 6. Identity Resolution: One Person, Many Handles
+
+When integrating multiple channels (Signal, WhatsApp, iMessage, Discord, etc.), the agent **must** reliably recognize the same person across all of them. Failure here is catastrophic — it breaks the illusion of a single cohesive agent and makes the agent appear confused or forgetful.
+
+**The problem:** A single human might appear as:
+- `+1-555-555-0100` (E.164 phone)
+- `555.555.0100` (formatted phone)
+- `alice@example.com` (email)
+- `@alice-dev` (GitHub/Twitter handle)
+- `U03ABC123XYZ` (Slack user ID)
+- `123456789012345678` (Discord snowflake)
+- `alice.example.55` (WhatsApp ID)
+- `Matt` (display name)
+- A UUID from the gateway's internal contact registry
+
+If the agent sees `+15555550100` on Signal and `alice.example.55` on WhatsApp and doesn't recognize these as the same person, it will:
+- Greet someone like a stranger when they've been talking for months
+- Fail to recall context from previous conversations on other channels
+- Potentially leak information ("you said X" to the wrong identity)
+- Generally appear broken
+
+### Requirements
+
+1. **Canonical identity layer.** Every contact has a single internal UUID. All channel-specific identifiers map to this UUID. The agent always sees the canonical identity, never raw channel IDs.
+
+2. **Robust phone normalization.** Phones are the primary cross-channel identifier. Must handle:
+   - All E.164 formats (`+13035551234`, `13035551234`)
+   - Regional formatting (`303-555-1234`, `(303) 555-1234`, `303.555.1234`)
+   - Country code variations (`+1`, `1`, or omitted for US)
+   - WhatsApp-specific formats (`13035551234@s.whatsapp.net`)
+   - Leading zeros, spaces, dashes, parentheses, dots
+
+3. **Alias table.** One person can have multiple identifiers. The identity layer maintains:
+   ```sql
+   CREATE TABLE contact_aliases (
+       contact_id  UUID NOT NULL REFERENCES contacts(id),
+       channel     TEXT NOT NULL,  -- "signal", "whatsapp", "discord", etc.
+       identifier  TEXT NOT NULL,  -- channel-specific ID
+       normalized  TEXT NOT NULL,  -- canonical form (e.g., E.164 for phones)
+       PRIMARY KEY (channel, identifier)
+   );
+   ```
+
+4. **Fuzzy matching with confirmation.** When a new identifier appears that *might* match an existing contact (e.g., same phone, different format), the system should:
+   - Auto-link if confidence is high (exact phone match after normalization)
+   - Flag for user confirmation if ambiguous (same first name, different number)
+   - Never silently create duplicate contacts for the same person
+
+5. **Agent-visible identity.** The agent's prompt should show the canonical name and note which channel the message came from:
+   ```
+   Alice via Signal] hey what's the wifi password?
+   ```
+   Not:
+   ```
+   [+15555550100] hey what's the wifi password?
+   ```
+
+6. **Identity in memory.** Memory entries should reference canonical contact IDs, not raw channel identifiers. When the agent writes "Alice mentioned X", it should be retrievable regardless of which channel Matt uses next.
+
+### What This Means for Code
+
+- **Phone parsing is not optional.** Use `phonenumber` crate with full validation. Test against a battery of real-world formats.
+- **Identity resolution happens at the channel adapter layer.** By the time a message reaches the router, it should have a resolved `contact_id`, not a raw channel ID.
+- **Display names are hints, not identifiers.** Display names can change, collide, or be spoofed. Never use them as primary keys.
+- **Test with multi-channel scenarios.** Integration tests should verify that sending a message from Signal, then WhatsApp, then iMessage, all resolve to the same conversation with the same person.
+
+### Anti-Pattern: Channel-Scoped Identity
+
+OpenClaw currently routes by channel-specific identifiers. If you message from Signal, you're a Signal session. From WhatsApp, you're a different WhatsApp session. The memory search might find the Signal history, but it's fragile and the session context is split. Coop should have one session per *person*, with messages from all channels feeding into it.
+
+---
+
 ## Anti-Patterns (Things We Will Not Do)
 
 - **Config sprawl.** One config file. One format. No env var overrides that shadow file config. No "merge 5 sources" priority chains.
@@ -199,10 +325,12 @@ Not every component needs the same reliability. Prioritize:
 ## Summary
 
 ```
-Simple   → small codebase, flat structure, no premature abstraction
-Robust   → validate-before-apply, auto-rollback, crash recovery
-Observable → the agent can diagnose itself
-Reliable → prioritize message persistence and config safety above all
+Simple          → small codebase, flat structure, no premature abstraction
+Robust          → validate-before-apply, auto-rollback, crash recovery
+Observable      → the agent can diagnose itself
+Reliable        → prioritize message persistence and config safety above all
+Token-sensitive → every context token is deliberate, costs are visible
+Identity-aware  → one person across all channels, never confused about who you're talking to
 ```
 
 If a feature conflicts with these principles, the feature loses.

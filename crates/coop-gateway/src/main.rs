@@ -1,19 +1,21 @@
 mod config;
 mod gateway;
+#[allow(dead_code)]
 mod router;
+#[allow(dead_code)]
 mod trust;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use coop_agent::GooseRuntime;
+use coop_agent::GooseProvider;
 use coop_tui::{App, DisplayMessage, InputAction, handle_key_event, poll_event};
 use crossterm::{
     event::{Event, KeyEvent},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -100,13 +102,13 @@ async fn cmd_chat(config_path: Option<&str>) -> Result<()> {
 
     let system_prompt = config.build_system_prompt(&config_dir)?;
 
-    // Create the Goose runtime (subprocess for now, library integration later)
-    let runtime = Arc::new(
-        GooseRuntime::new(&config.agent.model, &config.provider.name)
-            .context("failed to initialize Goose runtime")?,
-    );
+    // Create the provider (Goose library integration)
+    let provider = GooseProvider::new(&config.provider.name, &config.agent.model)
+        .await
+        .context("failed to initialize provider")?;
+    let provider = Arc::new(provider);
 
-    let gw = Arc::new(Gateway::new(config.clone(), system_prompt, runtime));
+    let gw = Arc::new(Gateway::new(config.clone(), system_prompt, provider));
     let session_key = gw.default_session_key();
 
     // Set up TUI
@@ -138,49 +140,41 @@ async fn cmd_chat(config_path: Option<&str>) -> Result<()> {
                     app.push_message(DisplayMessage::assistant(content));
                 }
                 Err(err) => {
-                    app.push_message(DisplayMessage::system(format!("Error: {}", err)));
+                    app.push_message(DisplayMessage::system(format!("Error: {err}")));
                 }
             }
         }
 
         // Poll for input events
         if let Some(event) = poll_event(Duration::from_millis(50)) {
-            match event {
-                Event::Key(key_event) => {
-                    // Don't accept input while loading
-                    if app.is_loading && !is_quit_key(&key_event) {
-                        continue;
-                    }
-
-                    match handle_key_event(&mut app, key_event) {
-                        InputAction::Submit(input) => {
-                            app.push_message(DisplayMessage::user(&input));
-                            app.is_loading = true;
-
-                            // Spawn async task for agent turn
-                            let gw = gw.clone();
-                            let sk = session_key.clone();
-                            let tx = response_tx.clone();
-                            tokio::spawn(async move {
-                                let result = gw.handle_message(&sk, &input).await;
-                                let _ = tx
-                                    .send(result.map_err(|e| format!("{:#}", e)))
-                                    .await;
-                            });
-                        }
-                        InputAction::Quit => {
-                            app.should_quit = true;
-                        }
-                        InputAction::Clear => {
-                            app.clear();
-                        }
-                        InputAction::None => {}
-                    }
+            if let Event::Key(key_event) = event {
+                // Don't accept input while loading
+                if app.is_loading && !is_quit_key(&key_event) {
+                    continue;
                 }
-                Event::Resize(_, _) => {
-                    // Terminal will re-render on next loop
+
+                match handle_key_event(&mut app, key_event) {
+                    InputAction::Submit(input) => {
+                        app.push_message(DisplayMessage::user(&input));
+                        app.is_loading = true;
+
+                        // Spawn async task for agent turn
+                        let gw = gw.clone();
+                        let sk = session_key.clone();
+                        let tx = response_tx.clone();
+                        tokio::spawn(async move {
+                            let result = gw.handle_message(&sk, &input).await;
+                            let _ = tx.send(result.map_err(|e| format!("{e:#}"))).await;
+                        });
+                    }
+                    InputAction::Quit => {
+                        app.should_quit = true;
+                    }
+                    InputAction::Clear => {
+                        app.clear();
+                    }
+                    InputAction::None => {}
                 }
-                _ => {}
             }
         } else {
             // Tick loading animation
@@ -204,6 +198,9 @@ async fn cmd_chat(config_path: Option<&str>) -> Result<()> {
 fn is_quit_key(key: &KeyEvent) -> bool {
     matches!(
         (key.modifiers, key.code),
-        (crossterm::event::KeyModifiers::CONTROL, crossterm::event::KeyCode::Char('c'))
+        (
+            crossterm::event::KeyModifiers::CONTROL,
+            crossterm::event::KeyCode::Char('c')
+        )
     )
 }

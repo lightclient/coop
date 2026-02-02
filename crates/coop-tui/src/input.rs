@@ -3,6 +3,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crate::app::App;
 
 /// Result of handling input.
+#[derive(Debug)]
 pub enum InputAction {
     /// No action needed.
     None,
@@ -59,8 +60,12 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent) -> InputAction {
             // Delete word backwards
             let before = &app.input[..app.cursor_pos];
             let trimmed = before.trim_end();
-            let last_space = trimmed.rfind(' ').map(|i| i + 1).unwrap_or(0);
-            app.input = format!("{}{}", &app.input[..last_space], &app.input[app.cursor_pos..]);
+            let last_space = trimmed.rfind(' ').map_or(0, |i| i + 1);
+            app.input = format!(
+                "{}{}",
+                &app.input[..last_space],
+                &app.input[app.cursor_pos..]
+            );
             app.cursor_pos = last_space;
             InputAction::None
         }

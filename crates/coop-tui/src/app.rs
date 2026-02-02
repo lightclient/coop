@@ -50,6 +50,7 @@ impl DisplayMessage {
 }
 
 /// Application state for the TUI.
+#[derive(Debug)]
 pub struct App {
     /// Chat messages to display.
     pub messages: Vec<DisplayMessage>,
@@ -98,8 +99,7 @@ impl App {
             let prev = self.input[..self.cursor_pos]
                 .chars()
                 .last()
-                .map(|c| c.len_utf8())
-                .unwrap_or(0);
+                .map_or(0, char::len_utf8);
             self.cursor_pos -= prev;
             self.input.remove(self.cursor_pos);
         }
@@ -111,8 +111,7 @@ impl App {
             let prev = self.input[..self.cursor_pos]
                 .chars()
                 .last()
-                .map(|c| c.len_utf8())
-                .unwrap_or(0);
+                .map_or(0, char::len_utf8);
             self.cursor_pos -= prev;
         }
     }
@@ -123,8 +122,7 @@ impl App {
             let next = self.input[self.cursor_pos..]
                 .chars()
                 .next()
-                .map(|c| c.len_utf8())
-                .unwrap_or(0);
+                .map_or(0, char::len_utf8);
             self.cursor_pos += next;
         }
     }

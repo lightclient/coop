@@ -11,6 +11,7 @@ workspace = true
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 coop-core = { path = "../coop-core" }
+futures = { workspace = true }
 goose = { workspace = true }
 # reqwest with multipart — needed because goose uses reqwest::multipart
 # but doesn't declare the feature in its Cargo.toml (goose bug)

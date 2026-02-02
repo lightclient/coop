@@ -138,18 +138,24 @@ Files are loaded from `{workspace}/` with fallback to defaults. Missing files ar
 
 ### Memory: Index, Not Dump
 
-Unlike OpenClaw (which injects full MEMORY.md), the prompt includes only a memory index:
+Unlike OpenClaw (which injects full MEMORY.md into every prompt), Coop gives the agent a **priced menu** — a lightweight index showing what's available and what it costs to load:
 
 ```
-## Available Memory
-- private/MEMORY.md (4.2k tokens) — long-term facts, people, dates
-- shared/RECENT.md (1.1k tokens) — rolling 7-day context
-- social/PEOPLE.md (800 tokens) — public-safe people info
+## Available Memory (trust: full)
+- private/MEMORY.md   (3,847 tok) — long-term facts, people, dates, preferences
+- private/FINANCE.md    (920 tok) — financial profile
+- shared/RECENT.md    (1,102 tok) — rolling 7-day context
+- social/PEOPLE.md      (814 tok) — public-safe people info
 
-Use memory_search / memory_get tools to access content.
+Remaining budget: ~118k tokens. Use memory_search to find specific facts,
+or memory_get(path, from, lines) to load sections.
 ```
 
-The agent fetches detail on demand via tools, scoped by trust level. A `familiar` trust session's memory_search only queries the `social` store.
+The agent decides what to pull based on the question. "What's Carol's birthday?" → `memory_search("Carol birthday")` returns a 50-token snippet, not 4k tokens of MEMORY.md. The token cost of each search result is shown so the agent can decide whether to fetch more or stop.
+
+A `familiar` trust session sees only social stores in the index. A `public` session sees no memory index at all.
+
+This is the **progressive disclosure** model: the agent always knows what's available and what it costs, and makes informed decisions about what enters the context window.
 
 ### Situation Overlays
 
@@ -193,7 +199,21 @@ fn build_prompt(workspace: &Path, trust: TrustLevel) -> String {
 
 ### Phase 2: Caching
 
-Split into multiple Anthropic system blocks with cache breakpoints. Identity + behavior = cached block (stable across turns). User context + workspace = second block. Runtime = uncached.
+#### How Anthropic prompt caching actually works
+
+Anthropic's API accepts `system` as an array of content blocks, each with optional `cache_control`. The **only** cache type is `"ephemeral"` — despite the name, it means "cache this for ~5 minutes." There is no "stable" or "permanent" cache option.
+
+Goose already uses this: `format_system()` in `providers/formats/anthropic.rs` wraps the entire system string as **one block** with `cache_control: {"type": "ephemeral"}`. Anthropic then automatically caches **prefix bytes** — identical leading content across API calls gets a ~90% input token discount within the TTL window.
+
+**What this means for us:**
+- Our layer ordering (Stable identity/behavior first → Session context → Volatile runtime last) is already getting cache hits on the stable prefix, with zero extra work.
+- `CacheHint::Stable/Session/Volatile` in our code describes *how often we expect content to change*, not anything in Anthropic's API. It drives layer ordering, which drives prefix cache hit rates.
+- To get **explicit multi-block breakpoints** (e.g., separate cache entries for identity vs. session context), we'd need to patch Goose's `format_system()` to accept multiple blocks instead of one string. This is a possible upstream PR but not blocking — prefix caching already covers the common case.
+- Other providers (OpenAI, Bedrock, etc.) have different or no caching semantics. Our ordering is a net positive regardless.
+
+#### Original plan (deferred)
+
+Split into multiple Anthropic system blocks with cache breakpoints. Identity + behavior = cached block (stable across turns). User context + workspace = second block. Runtime = uncached. **Blocked on Goose accepting multi-block system prompts** — currently `format_system()` takes a single `&str`.
 
 ### Phase 3: Memory Index
 
@@ -366,4 +386,4 @@ We may add opt-in anonymous usage stats later, but the default is zero external 
 
 3. **Token budgeting.** Goose includes `tiktoken-rs` — we should use it for token-aware file truncation instead of OpenClaw's character-based approach.
 
-4. **Memory index format.** What's the right level of detail for the TOC? File names + token counts? Or include first-line summaries?
+4. **Memory index format.** ~~What's the right level of detail for the TOC?~~ **Decided:** File name + token count + one-line description. Token counts are mandatory — the agent needs to know the cost of loading each file to make informed retrieval decisions. This is core to our token sensitivity principle.

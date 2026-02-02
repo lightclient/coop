@@ -1,0 +1,33 @@
+[advisories]
+ignore = [
+    # paste is unmaintained but still widely used (transitive via ratatui)
+    # ratatui will migrate to pastey eventually
+    "RUSTSEC-2024-0436",
+]
+version = 2
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "OpenSSL",
+]
+confidence-threshold = 0.8
+version = 2
+
+[bans]
+highlight = "all"
+multiple-versions = "warn"
+wildcards = "allow"        # workspace path deps use implicit wildcards
+
+[sources]
+allow-git = []
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+unknown-git = "warn"
+unknown-registry = "deny"

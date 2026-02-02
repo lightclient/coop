@@ -1,13 +1,16 @@
 [package]
-name = "coop-tui"
-version.workspace = true
 edition.workspace = true
 license.workspace = true
+name = "coop-tui"
+version.workspace = true
+
+[lints]
+workspace = true
 
 [dependencies]
-coop-core = { path = "../coop-core" }
-tokio = { workspace = true }
-ratatui = { workspace = true }
-crossterm = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }
+coop-core = { path = "../coop-core" }
+crossterm = { workspace = true }
+ratatui = { workspace = true }
+tokio = { workspace = true }

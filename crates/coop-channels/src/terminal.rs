@@ -5,6 +5,7 @@ use coop_core::{Channel, ChannelHealth, InboundMessage, OutboundMessage};
 use tokio::sync::mpsc;
 
 /// Terminal channel that bridges between a TUI and the gateway via mpsc channels.
+#[allow(missing_debug_implementations)] // contains mpsc channels
 pub struct TerminalChannel {
     id: String,
     rx: mpsc::Receiver<String>,
@@ -12,6 +13,7 @@ pub struct TerminalChannel {
 }
 
 /// Handle for the TUI side to send/receive messages.
+#[allow(missing_debug_implementations)] // contains mpsc channels
 pub struct TerminalHandle {
     pub tx: mpsc::Sender<String>,
     pub rx: mpsc::Receiver<String>,

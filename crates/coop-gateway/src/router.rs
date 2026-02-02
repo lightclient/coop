@@ -5,23 +5,26 @@ use crate::trust::resolve_trust;
 
 /// Result of routing an inbound message.
 #[derive(Debug)]
-pub struct RouteDecision {
+pub(crate) struct RouteDecision {
     pub session_key: SessionKey,
     pub trust: TrustLevel,
 }
 
 /// Route an inbound message to the appropriate session.
 /// Phase 1: everything goes to the single agent's main session with full trust.
-pub fn route_message(msg: &InboundMessage, config: &Config) -> RouteDecision {
+pub(crate) fn route_message(msg: &InboundMessage, config: &Config) -> RouteDecision {
     let agent_id = config.agent.id.clone();
 
     // Look up user trust
     let user_trust = config
         .users
         .iter()
-        .find(|u| u.r#match.iter().any(|m| m == &msg.channel || m == &msg.sender))
-        .map(|u| u.trust)
-        .unwrap_or(TrustLevel::Public);
+        .find(|u| {
+            u.r#match
+                .iter()
+                .any(|m| m == &msg.channel || m == &msg.sender)
+        })
+        .map_or(TrustLevel::Public, |u| u.trust);
 
     // Determine situation ceiling
     let ceiling = if msg.is_group {
@@ -51,15 +54,15 @@ mod tests {
 
     fn test_config() -> Config {
         serde_yaml::from_str(
-            r#"
+            r"
 agent:
   id: reid
   model: test
 users:
   - name: alice
     trust: full
-    match: ["terminal:default"]
-"#,
+    match: ['terminal:default']
+",
         )
         .unwrap()
     }

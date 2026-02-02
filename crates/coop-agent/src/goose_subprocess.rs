@@ -1,19 +1,21 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use coop_core::{AgentResponse, AgentRuntime, Message, Role};
+use coop_core::traits::{Provider, ProviderStream};
+use coop_core::types::{Message, ModelInfo, Role, ToolDef, Usage};
 use serde_json::Value;
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tracing::{debug, error, warn};
 
-/// Goose subprocess-based agent runtime.
+/// Goose subprocess-based agent runtime (fallback).
 #[derive(Debug)]
 pub struct GooseRuntime {
     pub model: String,
     pub provider: String,
     pub goose_bin: String,
     api_key: String,
+    model_info: ModelInfo,
 }
 
 impl GooseRuntime {
@@ -21,11 +23,17 @@ impl GooseRuntime {
         let api_key = std::env::var("ANTHROPIC_API_KEY")
             .context("ANTHROPIC_API_KEY must be set in the environment")?;
 
+        let model = model.into();
+        let model_info = ModelInfo {
+            name: model.clone(),
+            context_limit: 128_000,
+        };
         Ok(Self {
-            model: model.into(),
+            model,
             provider: provider.into(),
             goose_bin: "/opt/homebrew/bin/goose".to_string(),
             api_key,
+            model_info,
         })
     }
 
@@ -35,7 +43,7 @@ impl GooseRuntime {
             .iter()
             .rev()
             .find(|m| m.role == Role::User)
-            .map(|m| m.content.clone())
+            .map(Message::text)
             .unwrap_or_default()
     }
 
@@ -91,8 +99,21 @@ impl GooseRuntime {
 }
 
 #[async_trait]
-impl AgentRuntime for GooseRuntime {
-    async fn turn(&self, messages: &[Message], system_prompt: &str) -> Result<AgentResponse> {
+impl Provider for GooseRuntime {
+    fn name(&self) -> &str {
+        &self.provider
+    }
+
+    fn model_info(&self) -> &ModelInfo {
+        &self.model_info
+    }
+
+    async fn complete(
+        &self,
+        system: &str,
+        messages: &[Message],
+        _tools: &[ToolDef],
+    ) -> Result<(Message, Usage)> {
         let user_message = Self::extract_user_message(messages);
         if user_message.is_empty() {
             anyhow::bail!("no user message found in conversation history");
@@ -110,7 +131,7 @@ impl AgentRuntime for GooseRuntime {
             .arg("-t")
             .arg(&user_message)
             .arg("--system")
-            .arg(system_prompt)
+            .arg(system)
             .arg("--no-session")
             .arg("--quiet")
             .arg("--output-format")
@@ -181,7 +202,19 @@ impl AgentRuntime for GooseRuntime {
             );
         }
 
-        Ok(AgentResponse::text(content))
+        Ok((
+            Message::assistant().with_text(content),
+            Usage::default(),
+        ))
+    }
+
+    async fn stream(
+        &self,
+        _system: &str,
+        _messages: &[Message],
+        _tools: &[ToolDef],
+    ) -> Result<ProviderStream> {
+        anyhow::bail!("GooseRuntime subprocess does not support streaming")
     }
 }
 
@@ -216,10 +249,9 @@ mod tests {
     #[test]
     fn test_extract_user_message() {
         let messages = vec![
-            Message::system("system prompt"),
-            Message::user("hello"),
-            Message::assistant("hi there"),
-            Message::user("how are you"),
+            Message::user().with_text("hello"),
+            Message::assistant().with_text("hi there"),
+            Message::user().with_text("how are you"),
         ];
         let result = GooseRuntime::extract_user_message(&messages);
         assert_eq!(result, "how are you");

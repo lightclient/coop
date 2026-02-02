@@ -1,13 +1,16 @@
 [package]
-name = "coop-channels"
-version.workspace = true
 edition.workspace = true
 license.workspace = true
+name = "coop-channels"
+version.workspace = true
+
+[lints]
+workspace = true
 
 [dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
 coop-core = { path = "../coop-core" }
 tokio = { workspace = true }
-async-trait = { workspace = true }
-anyhow = { workspace = true }
 tracing = { workspace = true }
-chrono = { workspace = true }
