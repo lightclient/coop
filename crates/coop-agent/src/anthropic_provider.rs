@@ -1,6 +1,6 @@
 //! Direct Anthropic API provider with OAuth token support.
 //!
-//! Uses Bearer auth instead of x-api-key to support OAuth tokens (sk-ant-oat01-*).
+//! Uses Bearer auth and Claude Code identity headers for OAuth tokens (sk-ant-oat01-*).
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -14,6 +14,7 @@ use coop_core::types::{Content, Message, ModelInfo, Role, ToolDef, Usage};
 
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
+const CLAUDE_CODE_VERSION: &str = "2.1.2";
 
 /// Direct Anthropic provider with OAuth support.
 pub struct AnthropicProvider {
@@ -26,9 +27,9 @@ pub struct AnthropicProvider {
 impl AnthropicProvider {
     /// Create a new Anthropic provider.
     ///
-    /// Automatically detects OAuth tokens (sk-ant-oat01-*) vs regular API keys.
+    /// Automatically detects OAuth tokens (sk-ant-oat*) vs regular API keys.
     pub fn new(api_key: String, model_name: &str) -> Result<Self> {
-        let is_oauth = api_key.starts_with("sk-ant-oat01-");
+        let is_oauth = api_key.contains("sk-ant-oat");
 
         debug!(
             model = model_name,
@@ -67,19 +68,51 @@ impl AnthropicProvider {
             .client
             .post(ANTHROPIC_API_URL)
             .header("anthropic-version", ANTHROPIC_VERSION)
-            .header("content-type", "application/json");
+            .header("content-type", "application/json")
+            .header("accept", "application/json");
 
         if self.is_oauth {
-            // OAuth tokens use Bearer auth
+            // OAuth tokens: mimic Claude Code's headers exactly
             req = req
                 .header("authorization", format!("Bearer {}", self.api_key))
-                .header("anthropic-beta", "oauth-2025-04-20");
+                .header("anthropic-dangerous-direct-browser-access", "true")
+                .header(
+                    "anthropic-beta",
+                    "claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14",
+                )
+                .header(
+                    "user-agent",
+                    format!("claude-cli/{} (external, cli)", CLAUDE_CODE_VERSION),
+                )
+                .header("x-app", "cli");
         } else {
             // Regular API keys use x-api-key
             req = req.header("x-api-key", &self.api_key);
         }
 
         req.json(&body)
+    }
+
+    /// Build system prompt array with Claude Code identity for OAuth tokens.
+    fn build_system_blocks(&self, system: &str) -> Value {
+        if self.is_oauth {
+            // OAuth tokens MUST include Claude Code identity as first system block
+            json!([
+                {
+                    "type": "text",
+                    "text": "You are Claude Code, Anthropic's official CLI for Claude.",
+                    "cache_control": { "type": "ephemeral" }
+                },
+                {
+                    "type": "text",
+                    "text": system,
+                    "cache_control": { "type": "ephemeral" }
+                }
+            ])
+        } else {
+            // Regular API keys can use string or array
+            json!(system)
+        }
     }
 
     /// Convert Coop messages to Anthropic API format.
@@ -198,7 +231,7 @@ impl Provider for AnthropicProvider {
         let mut body = json!({
             "model": self.model.name,
             "max_tokens": 8192,
-            "system": system,
+            "system": self.build_system_blocks(system),
             "messages": Self::format_messages(messages),
         });
 
@@ -215,11 +248,7 @@ impl Provider for AnthropicProvider {
         let status = response.status();
         if !status.is_success() {
             let error_text = response.text().await.unwrap_or_default();
-            anyhow::bail!(
-                "Anthropic API error: {} - {}",
-                status,
-                error_text
-            );
+            anyhow::bail!("Anthropic API error: {} - {}", status, error_text);
         }
 
         let api_response: AnthropicResponse = response
