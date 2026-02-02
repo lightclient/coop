@@ -1,0 +1,15 @@
+agent:
+  id: reid
+  model: anthropic/claude-sonnet-4-20250514
+  personality: ./workspaces/default/soul.md
+  instructions: ./workspaces/default/agents.md
+  workspace: ./workspaces/default
+
+users:
+  - name: alice
+    trust: full
+    match: ["terminal:default"]
+
+provider:
+  name: anthropic
+  # API key from env: ANTHROPIC_API_KEY

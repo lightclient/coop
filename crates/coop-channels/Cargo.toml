@@ -1,0 +1,13 @@
+[package]
+name = "coop-channels"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+coop-core = { path = "../coop-core" }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }

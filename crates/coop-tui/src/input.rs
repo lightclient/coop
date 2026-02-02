@@ -1,0 +1,121 @@
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+
+use crate::app::App;
+
+/// Result of handling input.
+pub enum InputAction {
+    /// No action needed.
+    None,
+    /// User submitted a message.
+    Submit(String),
+    /// User wants to quit.
+    Quit,
+    /// User wants to clear the session.
+    Clear,
+}
+
+/// Handle a key event, updating app state and returning any action.
+pub fn handle_key_event(app: &mut App, key: KeyEvent) -> InputAction {
+    match (key.modifiers, key.code) {
+        // Quit
+        (KeyModifiers::CONTROL, KeyCode::Char('c')) => InputAction::Quit,
+        (KeyModifiers::CONTROL, KeyCode::Char('d')) => {
+            if app.input.is_empty() {
+                InputAction::Quit
+            } else {
+                InputAction::None
+            }
+        }
+
+        // Submit
+        (_, KeyCode::Enter) => {
+            let input = app.take_input();
+            let trimmed = input.trim().to_string();
+
+            if trimmed.is_empty() {
+                return InputAction::None;
+            }
+
+            // Handle commands
+            match trimmed.as_str() {
+                "/quit" | "/exit" | "/q" => InputAction::Quit,
+                "/clear" | "/reset" => InputAction::Clear,
+                _ => InputAction::Submit(trimmed),
+            }
+        }
+
+        // Editing
+        (_, KeyCode::Backspace) => {
+            app.delete_char();
+            InputAction::None
+        }
+        (KeyModifiers::CONTROL, KeyCode::Char('u')) => {
+            // Clear input line
+            app.input.clear();
+            app.cursor_pos = 0;
+            InputAction::None
+        }
+        (KeyModifiers::CONTROL, KeyCode::Char('w')) => {
+            // Delete word backwards
+            let before = &app.input[..app.cursor_pos];
+            let trimmed = before.trim_end();
+            let last_space = trimmed.rfind(' ').map(|i| i + 1).unwrap_or(0);
+            app.input = format!("{}{}", &app.input[..last_space], &app.input[app.cursor_pos..]);
+            app.cursor_pos = last_space;
+            InputAction::None
+        }
+
+        // Cursor movement
+        (_, KeyCode::Left) => {
+            app.cursor_left();
+            InputAction::None
+        }
+        (_, KeyCode::Right) => {
+            app.cursor_right();
+            InputAction::None
+        }
+        (KeyModifiers::CONTROL, KeyCode::Char('a')) | (_, KeyCode::Home) => {
+            app.cursor_pos = 0;
+            InputAction::None
+        }
+        (KeyModifiers::CONTROL, KeyCode::Char('e')) | (_, KeyCode::End) => {
+            app.cursor_pos = app.input.len();
+            InputAction::None
+        }
+
+        // Scrolling
+        (_, KeyCode::PageUp) => {
+            app.scroll_up(10);
+            InputAction::None
+        }
+        (_, KeyCode::PageDown) => {
+            app.scroll_down(10);
+            InputAction::None
+        }
+        (KeyModifiers::SHIFT, KeyCode::Up) => {
+            app.scroll_up(1);
+            InputAction::None
+        }
+        (KeyModifiers::SHIFT, KeyCode::Down) => {
+            app.scroll_down(1);
+            InputAction::None
+        }
+
+        // Regular character input
+        (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c)) => {
+            app.insert_char(c);
+            InputAction::None
+        }
+
+        _ => InputAction::None,
+    }
+}
+
+/// Poll for the next crossterm event with a timeout.
+pub fn poll_event(timeout: std::time::Duration) -> Option<Event> {
+    if event::poll(timeout).ok()? {
+        event::read().ok()
+    } else {
+        None
+    }
+}
