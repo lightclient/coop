@@ -139,18 +139,10 @@ pub struct App {
     pub messages: Vec<DisplayMessage>,
     /// Number of messages already flushed to terminal scrollback.
     pub flushed_count: usize,
-    /// Byte offset into the streaming assistant message already printed.
-    pub streamed_bytes: usize,
-    /// Line buffer for accumulating partial streaming lines.
-    pub stream_line_buf: String,
-    /// Whether the current assistant message was already printed via streaming.
-    pub assistant_streamed: bool,
     /// Current input buffer.
     pub input: String,
     /// Cursor position in input.
     pub cursor_pos: usize,
-    /// Scroll offset for message area.
-    pub scroll: u16,
     /// Agent name for display.
     pub agent_name: String,
     /// Model name for display.
@@ -173,6 +165,12 @@ pub struct App {
     pub session_name: String,
     /// Connection status text.
     pub connection_status: String,
+    /// How many bytes of the streaming assistant message have been consumed.
+    pub streamed_bytes: usize,
+    /// Accumulates streaming text until a newline arrives.
+    pub stream_line_buf: String,
+    /// Whether the current assistant message was already printed via streaming.
+    pub assistant_streamed: bool,
 }
 
 impl App {
@@ -185,12 +183,8 @@ impl App {
         Self {
             messages: Vec::new(),
             flushed_count: 0,
-            streamed_bytes: 0,
-            stream_line_buf: String::new(),
-            assistant_streamed: false,
             input: String::new(),
             cursor_pos: 0,
-            scroll: 0,
             agent_name: agent_name.into(),
             model_name: model_name.into(),
             is_loading: false,
@@ -202,6 +196,9 @@ impl App {
             turn_started: None,
             session_name: session_name.into(),
             connection_status: String::new(),
+            streamed_bytes: 0,
+            stream_line_buf: String::new(),
+            assistant_streamed: false,
         }
     }
 
@@ -317,26 +314,9 @@ impl App {
         input
     }
 
-    /// Add a message and auto-scroll to bottom.
+    /// Add a message.
     pub fn push_message(&mut self, msg: DisplayMessage) {
         self.messages.push(msg);
-        self.scroll_to_bottom();
-    }
-
-    /// Scroll to the bottom of messages.
-    pub fn scroll_to_bottom(&mut self) {
-        // Will be clamped during rendering
-        self.scroll = u16::MAX;
-    }
-
-    /// Scroll up by n lines.
-    pub fn scroll_up(&mut self, n: u16) {
-        self.scroll = self.scroll.saturating_sub(n);
-    }
-
-    /// Scroll down by n lines.
-    pub fn scroll_down(&mut self, n: u16) {
-        self.scroll = self.scroll.saturating_add(n);
     }
 
     /// Append text to the last assistant message, or create a new one.
@@ -345,7 +325,6 @@ impl App {
             && last.role == DisplayRole::Assistant
         {
             last.content.push_str(text);
-            self.scroll_to_bottom();
             return;
         }
         self.push_message(DisplayMessage::assistant(text));
@@ -357,7 +336,7 @@ impl App {
         self.flushed_count = 0;
         self.streamed_bytes = 0;
         self.stream_line_buf.clear();
-        self.scroll = 0;
+        self.assistant_streamed = false;
         self.push_message(DisplayMessage::system("Session cleared."));
     }
 
@@ -366,14 +345,15 @@ impl App {
         &self.messages[self.flushed_count..]
     }
 
-    /// Drain completed messages for flushing to scrollback.
+    /// Drain all completed messages for flushing to scrollback.
     ///
     /// Returns messages from `flushed_count` up to (but not including) the last
-    /// message if it's an in-progress assistant message. Updates `flushed_count`.
+    /// message if it's an in-progress assistant message. If the assistant message
+    /// was already printed via streaming, skips past it without returning it.
     pub fn drain_flushed(&mut self) -> Vec<DisplayMessage> {
         let mut end = self.messages.len();
 
-        // Keep the streaming assistant message in pending (it's printed via deltas)
+        // Keep the streaming assistant message in the viewport
         if self.is_loading
             && self
                 .messages
@@ -383,62 +363,62 @@ impl App {
             end = end.saturating_sub(1);
         }
 
-        // Skip the assistant message if already printed via streaming
-        if self.assistant_streamed
-            && !self.is_loading
-            && end > self.flushed_count
-            && self.messages[end - 1].role == DisplayRole::Assistant
-        {
-            self.assistant_streamed = false;
-            // Mark it as flushed without returning it (already printed)
-            self.flushed_count = end;
-            self.scroll = 0;
-            return Vec::new();
-        }
-
         if end <= self.flushed_count {
             return Vec::new();
         }
 
-        let drained: Vec<DisplayMessage> = self.messages[self.flushed_count..end].to_vec();
+        let mut drained: Vec<DisplayMessage> = Vec::new();
+        for msg in &self.messages[self.flushed_count..end] {
+            // Skip assistant messages already printed via streaming
+            if self.assistant_streamed && msg.role == DisplayRole::Assistant {
+                self.assistant_streamed = false;
+                continue;
+            }
+            drained.push(msg.clone());
+        }
         self.flushed_count = end;
-        self.scroll = 0;
         drained
     }
 
-    /// Get complete lines of new streaming text, keeping partial lines buffered.
-    /// Returns `None` if no new complete lines are available.
-    pub fn take_stream_lines(&mut self) -> Option<String> {
-        if !self.is_loading {
-            return None;
-        }
-        let pending = &self.messages[self.flushed_count..];
-        if let Some(last) = pending.last()
-            && last.role == DisplayRole::Assistant
-            && last.content.len() > self.streamed_bytes
-        {
-            let new_text = &last.content[self.streamed_bytes..];
-            self.streamed_bytes = last.content.len();
-            self.stream_line_buf.push_str(new_text);
-            self.assistant_streamed = true;
+    /// Extract complete lines from the streaming assistant message.
+    ///
+    /// Reads new bytes from the current assistant message since `streamed_bytes`,
+    /// buffers them, and returns complete lines (terminated by `\n`).
+    pub fn take_stream_lines(&mut self) -> Vec<String> {
+        let content = self
+            .messages
+            .last()
+            .filter(|m| m.role == DisplayRole::Assistant)
+            .map_or("", |m| m.content.as_str());
 
-            // Only emit complete lines (up to last newline)
-            if let Some(last_nl) = self.stream_line_buf.rfind('\n') {
-                let complete = self.stream_line_buf[..=last_nl].to_string();
-                self.stream_line_buf = self.stream_line_buf[last_nl + 1..].to_string();
-                return Some(complete);
-            }
+        if self.streamed_bytes >= content.len() {
+            return Vec::new();
         }
-        None
+
+        let new_bytes = &content[self.streamed_bytes..];
+        self.streamed_bytes = content.len();
+        self.stream_line_buf.push_str(new_bytes);
+
+        let mut lines = Vec::new();
+        while let Some(pos) = self.stream_line_buf.find('\n') {
+            let line: String = self.stream_line_buf.drain(..=pos).collect();
+            lines.push(line.trim_end_matches('\n').to_string());
+        }
+        if !lines.is_empty() {
+            self.assistant_streamed = true;
+        }
+        lines
     }
 
-    /// Flush remaining partial line from the stream buffer.
+    /// Flush the remaining partial line from the stream buffer.
+    ///
+    /// Called when a turn ends to emit any text that didn't end with `\n`.
     pub fn flush_stream_buf(&mut self) -> Option<String> {
         if self.stream_line_buf.is_empty() {
-            None
-        } else {
-            Some(std::mem::take(&mut self.stream_line_buf))
+            return None;
         }
+        self.assistant_streamed = true;
+        Some(std::mem::take(&mut self.stream_line_buf))
     }
 
     /// Loading spinner text.
@@ -473,8 +453,6 @@ impl App {
         self.turn_started = None;
         self.token_count = tokens;
         self.streamed_bytes = 0;
-        // Note: stream_line_buf is NOT cleared here — the main loop flushes
-        // remaining partial lines via flush_stream_buf() after the turn ends.
     }
 
     /// Elapsed time text for the current turn.

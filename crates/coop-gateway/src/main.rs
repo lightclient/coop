@@ -16,8 +16,6 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode},
 };
 use ratatui::backend::CrosstermBackend;
-use ratatui::style::{Color, Style};
-use ratatui::text::{Line, Span};
 use ratatui::{Terminal, TerminalOptions, Viewport};
 use std::collections::HashMap;
 use std::io;
@@ -127,7 +125,7 @@ fn cmd_chat(config_path: Option<&str>) -> Result<()> {
     ));
     let session_key = gw.default_session_key();
 
-    // Set up TUI with inline viewport (content persists in scrollback)
+    // Set up TUI with fixed-height inline viewport (input + status bars)
     enable_raw_mode()?;
     let stdout = io::stdout();
     let backend = CrosstermBackend::new(stdout);
@@ -146,18 +144,20 @@ fn cmd_chat(config_path: Option<&str>) -> Result<()> {
         config.agent.id, config.agent.model
     )));
 
-    // Track whether we've printed the assistant prefix for the current streaming message
-    let mut stream_prefix_printed = false;
-
     // Track tool names by ID for correlating ToolResult events
     let mut tool_names: HashMap<String, String> = HashMap::new();
 
     // Channel for async turn events
     let (event_tx, mut event_rx) = mpsc::channel::<TurnEvent>(64);
 
+    // Whether the streaming prefix (timestamp + agent name) has been printed
+    let mut stream_prefix_printed = false;
+    // Whether a turn just ended (signals flush of partial stream line)
+    let mut turn_just_ended = false;
+
     // Main event loop
     loop {
-        // Check for async turn events
+        // 1. Receive async turn events
         while let Ok(turn_event) = event_rx.try_recv() {
             match turn_event {
                 TurnEvent::TextDelta(text) => {
@@ -191,60 +191,67 @@ fn cmd_chat(config_path: Option<&str>) -> Result<()> {
                 }
                 TurnEvent::Done(result) => {
                     app.end_turn(result.usage.total_tokens());
+                    turn_just_ended = true;
                 }
                 TurnEvent::Error(err) => {
                     app.push_message(DisplayMessage::system(format!("Error: {err}")));
                     app.end_turn(0);
+                    turn_just_ended = true;
                 }
             }
         }
 
-        // Print streaming text (complete lines only) above the viewport
-        if let Some(lines_text) = app.take_stream_lines() {
+        // 2. Print streaming text (complete lines only) via insert_before
+        let stream_lines = app.take_stream_lines();
+        for line in &stream_lines {
             if !stream_prefix_printed {
                 print_stream_prefix(&mut terminal, &app)?;
                 stream_prefix_printed = true;
             }
-            let lines: Vec<Line<'static>> = lines_text
-                .lines()
-                .map(|s| {
-                    Line::from(Span::styled(
-                        s.to_string(),
-                        Style::default().fg(Color::White),
-                    ))
-                })
-                .collect();
-            if !lines.is_empty() {
-                print_above(&mut terminal, &lines)?;
-            }
+            terminal.insert_before(1, |buf| {
+                let span = ratatui::text::Line::from(ratatui::text::Span::styled(
+                    format!("  {line}"),
+                    ratatui::style::Style::default().fg(ratatui::style::Color::White),
+                ));
+                ratatui::widgets::Widget::render(
+                    ratatui::widgets::Paragraph::new(span),
+                    buf.area,
+                    buf,
+                );
+            })?;
         }
 
-        // When turn ends, flush remaining partial line before draining messages
-        if !app.is_loading && app.assistant_streamed {
-            if let Some(remainder) = app.flush_stream_buf()
-                && !remainder.is_empty()
-            {
-                if !stream_prefix_printed {
+        // 3. Flush remaining partial line on turn end
+        if turn_just_ended {
+            if let Some(partial) = app.flush_stream_buf() {
+                if !stream_prefix_printed && !partial.is_empty() {
                     print_stream_prefix(&mut terminal, &app)?;
                 }
-                print_above(
-                    &mut terminal,
-                    &[Line::from(Span::styled(
-                        remainder,
-                        Style::default().fg(Color::White),
-                    ))],
-                )?;
+                if !partial.is_empty() {
+                    terminal.insert_before(1, |buf| {
+                        let span = ratatui::text::Line::from(ratatui::text::Span::styled(
+                            format!("  {partial}"),
+                            ratatui::style::Style::default().fg(ratatui::style::Color::White),
+                        ));
+                        ratatui::widgets::Widget::render(
+                            ratatui::widgets::Paragraph::new(span),
+                            buf.area,
+                            buf,
+                        );
+                    })?;
+                }
             }
             stream_prefix_printed = false;
+            turn_just_ended = false;
         }
 
-        // Flush completed messages to scrollback above the viewport
+        // 4. Drain completed messages to scrollback via insert_before
         flush_to_scrollback(&mut terminal, &mut app)?;
 
-        // Draw the viewport (input + status bars only)
+        // 5. Draw the viewport (input + status bars only)
         terminal.draw(|f| coop_tui::ui::draw(f, &app))?;
 
-        // Poll for input events
+        // 6. Poll for keyboard/mouse events
         if let Some(event) = poll_event(Duration::from_millis(50)) {
             if let Event::Key(key_event) = event {
                 // Don't accept input while loading
@@ -289,7 +296,7 @@ fn cmd_chat(config_path: Option<&str>) -> Result<()> {
         }
     }
 
-    // Flush remaining messages before exit
+    // Drain any remaining messages to scrollback
     flush_to_scrollback(&mut terminal, &mut app)?;
 
     // Restore terminal (no LeaveAlternateScreen — content is already in scrollback)
@@ -300,7 +307,10 @@ fn cmd_chat(config_path: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// Flush completed messages from the app into terminal scrollback via `insert_before`.
+/// Drain completed messages to terminal scrollback.
+///
+/// Uses `insert_before` to push formatted messages above the viewport
+/// so they become native terminal scrollback.
 fn flush_to_scrollback(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
@@ -309,49 +319,34 @@ fn flush_to_scrollback(
     if drained.is_empty() {
         return Ok(());
     }
-
     let lines = coop_tui::ui::format_messages(&drained, &app.agent_name, app.verbose);
     if lines.is_empty() {
         return Ok(());
     }
-
-    print_above(terminal, &lines)
-}
-
-/// Print styled lines above the viewport via `insert_before`.
-fn print_above(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    lines: &[Line<'static>],
-) -> Result<()> {
     let width = terminal.size()?.width;
     #[allow(clippy::cast_possible_truncation)]
     let height = lines.len() as u16;
     terminal.insert_before(height, |buf| {
-        coop_tui::ui::render_scrollback(lines, width, buf);
+        coop_tui::ui::render_scrollback(&lines, width, buf);
     })?;
     Ok(())
 }
 
-/// Print the assistant name prefix before streamed content.
+/// Print the streaming prefix line (timestamp + agent name) before the first streamed line.
 fn print_stream_prefix(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &App,
 ) -> Result<()> {
-    let prefix = format!(
-        "\n{} {}: ",
-        app.messages
-            .last()
-            .map(DisplayMessage::local_time)
-            .unwrap_or_default(),
-        app.agent_name
-    );
-    print_above(
-        terminal,
-        &[Line::from(Span::styled(
+    let time = chrono::Local::now().format("%H:%M").to_string();
+    let prefix = format!("\n{time} {}: ", app.agent_name);
+    terminal.insert_before(1, |buf| {
+        let span = ratatui::text::Line::from(ratatui::text::Span::styled(
             prefix,
-            Style::default().fg(Color::White),
-        ))],
-    )
+            ratatui::style::Style::default().fg(ratatui::style::Color::White),
+        ));
+        ratatui::widgets::Widget::render(ratatui::widgets::Paragraph::new(span), buf.area, buf);
+    })?;
+    Ok(())
 }
 
 fn is_quit_key(key: &KeyEvent) -> bool {

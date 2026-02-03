@@ -98,39 +98,18 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent) -> InputAction {
             InputAction::None
         }
 
-        // Scrolling (Shift+Arrow always scrolls messages, must come before bare arrows)
-        (KeyModifiers::SHIFT, KeyCode::Up) => {
-            app.scroll_up(1);
-            InputAction::None
-        }
-        (KeyModifiers::SHIFT, KeyCode::Down) => {
-            app.scroll_down(1);
-            InputAction::None
-        }
-        (_, KeyCode::PageUp) => {
-            app.scroll_up(10);
-            InputAction::None
-        }
-        (_, KeyCode::PageDown) => {
-            app.scroll_down(10);
-            InputAction::None
-        }
+        // Scrolling is handled by the terminal (native scrollback), not the app.
+        // Shift+Arrow and PageUp/Down are no-ops.
+        (KeyModifiers::SHIFT, KeyCode::Up | KeyCode::Down)
+        | (_, KeyCode::PageUp | KeyCode::PageDown) => InputAction::None,
 
-        // Up/Down: navigate within multi-line input, or scroll messages
+        // Up/Down: navigate within multi-line input
         (_, KeyCode::Up) => {
-            if app.input_line_count() > 1 {
-                app.cursor_up();
-            } else {
-                app.scroll_up(1);
-            }
+            app.cursor_up();
             InputAction::None
         }
         (_, KeyCode::Down) => {
-            if app.input_line_count() > 1 {
-                app.cursor_down();
-            } else {
-                app.scroll_down(1);
-            }
+            app.cursor_down();
             InputAction::None
         }
 

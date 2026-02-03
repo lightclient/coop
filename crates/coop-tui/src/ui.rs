@@ -23,11 +23,13 @@ fn tool_label(name: &str) -> (&'static str, &'static str) {
 /// Maximum lines the input area can grow to before it stops expanding.
 const MAX_INPUT_HEIGHT: u16 = 10;
 
-/// Fixed viewport height: input + 2 status bars.
-pub const VIEWPORT_HEIGHT: u16 = 3;
+/// Fixed viewport height: input (1 line min) + 2 status bars.
+pub const VIEWPORT_HEIGHT: u16 = 1 + MAX_INPUT_HEIGHT + 2;
 
-/// Render the inline viewport: input + status bars only.
-/// All message content is printed above the viewport via `insert_before`.
+/// Render the fixed viewport: input + status bars only.
+///
+/// Messages are not rendered in the viewport — they live in terminal
+/// scrollback via `insert_before`.
 pub fn draw(frame: &mut Frame, app: &App) {
     #[allow(clippy::cast_possible_truncation)]
     let input_lines = app.input_line_count() as u16;
