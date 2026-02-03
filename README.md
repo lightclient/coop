@@ -11,13 +11,22 @@
 
 A personal agent gateway in Rust. Coop routes messages between channels (Signal, Telegram, Discord, terminal, webhooks) and AI agent sessions running on your machine. It enforces trust-based access control, persists conversations, and manages agent lifecycles.
 
-**Status:** Phase 1 — gateway + terminal TUI.
+Phase 1 — gateway + terminal TUI.
+Phase 2 - separate gateway + telemetry = dogfooding, tight LLM loop
+Phase 3 - chat channel integration
+Phase 4 - user and permissions
 
 ## Quick start
 
+Coop needs `ANTHROPIC_API_KEY` in your environment. You can use a standard API key from [console.anthropic.com](https://console.anthropic.com/), or reuse your Claude Code OAuth token:
+
 ```bash
-cp coop.example.yaml coop.yaml   # configure your agent + provider
-just run                          # launch the TUI
+export ANTHROPIC_API_KEY=$(jq -r '.claudeAiOauth.accessToken' ~/.claude/.credentials.json)
+```
+
+```bash
+# edit coop.yaml with your agent config
+just run    # launch the TUI
 ```
 
 ## Architecture

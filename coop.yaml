@@ -1,6 +1,6 @@
 agent:
-  id: reid
-  model: anthropic/claude-sonnet-4-20250514
+  id: coop
+  model: anthropic/claude-opus-4-5-20251101
   personality: ./workspaces/default/soul.md
   instructions: ./workspaces/default/agents.md
   workspace: ./workspaces/default
