@@ -16,6 +16,8 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode},
 };
 use ratatui::backend::CrosstermBackend;
+use ratatui::style::{Color, Style};
+use ratatui::text::{Line, Span};
 use ratatui::{Terminal, TerminalOptions, Viewport};
 use std::collections::HashMap;
 use std::io;
@@ -129,11 +131,10 @@ fn cmd_chat(config_path: Option<&str>) -> Result<()> {
     enable_raw_mode()?;
     let stdout = io::stdout();
     let backend = CrosstermBackend::new(stdout);
-    let (_, rows) = crossterm::terminal::size()?;
     let mut terminal = Terminal::with_options(
         backend,
         TerminalOptions {
-            viewport: Viewport::Inline(rows),
+            viewport: Viewport::Inline(coop_tui::ui::VIEWPORT_HEIGHT),
         },
     )?;
 
@@ -144,6 +145,9 @@ fn cmd_chat(config_path: Option<&str>) -> Result<()> {
         "Connected to {} ({}). Type a message or /quit to exit.",
         config.agent.id, config.agent.model
     )));
+
+    // Track whether we've printed the assistant prefix for the current streaming message
+    let mut stream_prefix_printed = false;
 
     // Track tool names by ID for correlating ToolResult events
     let mut tool_names: HashMap<String, String> = HashMap::new();
@@ -187,17 +191,57 @@ fn cmd_chat(config_path: Option<&str>) -> Result<()> {
                 }
                 TurnEvent::Done(result) => {
                     app.end_turn(result.usage.total_tokens());
-                    flush_to_scrollback(&mut terminal, &mut app)?;
                 }
                 TurnEvent::Error(err) => {
                     app.push_message(DisplayMessage::system(format!("Error: {err}")));
                     app.end_turn(0);
-                    flush_to_scrollback(&mut terminal, &mut app)?;
                 }
             }
         }
 
-        // Draw after processing events so state changes are immediately visible
+        // Print streaming text (complete lines only) above the viewport
+        if let Some(lines_text) = app.take_stream_lines() {
+            if !stream_prefix_printed {
+                print_stream_prefix(&mut terminal, &app)?;
+                stream_prefix_printed = true;
+            }
+            let lines: Vec<Line<'static>> = lines_text
+                .lines()
+                .map(|s| {
+                    Line::from(Span::styled(
+                        s.to_string(),
+                        Style::default().fg(Color::White),
+                    ))
+                })
+                .collect();
+            if !lines.is_empty() {
+                print_above(&mut terminal, &lines)?;
+            }
+        }
+
+        // When turn ends, flush remaining partial line before draining messages
+        if !app.is_loading && app.assistant_streamed {
+            if let Some(remainder) = app.flush_stream_buf()
+                && !remainder.is_empty()
+            {
+                if !stream_prefix_printed {
+                    print_stream_prefix(&mut terminal, &app)?;
+                }
+                print_above(
+                    &mut terminal,
+                    &[Line::from(Span::styled(
+                        remainder,
+                        Style::default().fg(Color::White),
+                    ))],
+                )?;
+            }
+            stream_prefix_printed = false;
+        }
+
+        // Flush completed messages to scrollback above the viewport
+        flush_to_scrollback(&mut terminal, &mut app)?;
+
+        // Draw the viewport (input + status bars only)
         terminal.draw(|f| coop_tui::ui::draw(f, &app))?;
 
         // Poll for input events
@@ -211,7 +255,6 @@ fn cmd_chat(config_path: Option<&str>) -> Result<()> {
                 match handle_key_event(&mut app, key_event) {
                     InputAction::Submit(input) => {
                         app.push_message(DisplayMessage::user(&input));
-                        flush_to_scrollback(&mut terminal, &mut app)?;
                         app.start_turn();
 
                         // Spawn async task for agent turn
@@ -272,14 +315,43 @@ fn flush_to_scrollback(
         return Ok(());
     }
 
+    print_above(terminal, &lines)
+}
+
+/// Print styled lines above the viewport via `insert_before`.
+fn print_above(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    lines: &[Line<'static>],
+) -> Result<()> {
     let width = terminal.size()?.width;
     #[allow(clippy::cast_possible_truncation)]
     let height = lines.len() as u16;
     terminal.insert_before(height, |buf| {
-        coop_tui::ui::render_scrollback(&lines, width, buf);
+        coop_tui::ui::render_scrollback(lines, width, buf);
     })?;
-
     Ok(())
+}
+
+/// Print the assistant name prefix before streamed content.
+fn print_stream_prefix(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &App,
+) -> Result<()> {
+    let prefix = format!(
+        "\n{} {}: ",
+        app.messages
+            .last()
+            .map(DisplayMessage::local_time)
+            .unwrap_or_default(),
+        app.agent_name
+    );
+    print_above(
+        terminal,
+        &[Line::from(Span::styled(
+            prefix,
+            Style::default().fg(Color::White),
+        ))],
+    )
 }
 
 fn is_quit_key(key: &KeyEvent) -> bool {

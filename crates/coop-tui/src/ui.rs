@@ -23,23 +23,26 @@ fn tool_label(name: &str) -> (&'static str, &'static str) {
 /// Maximum lines the input area can grow to before it stops expanding.
 const MAX_INPUT_HEIGHT: u16 = 10;
 
-/// Render the entire TUI.
+/// Fixed viewport height: input + 2 status bars.
+pub const VIEWPORT_HEIGHT: u16 = 3;
+
+/// Render the inline viewport: input + status bars only.
+/// All message content is printed above the viewport via `insert_before`.
 pub fn draw(frame: &mut Frame, app: &App) {
-    #[allow(clippy::cast_possible_truncation)] // input_line_count capped by MAX_INPUT_HEIGHT
+    #[allow(clippy::cast_possible_truncation)]
     let input_lines = app.input_line_count() as u16;
     let input_height = input_lines.clamp(1, MAX_INPUT_HEIGHT);
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(1),               // messages
+            Constraint::Min(0),               // padding (absorbs unused space)
             Constraint::Length(input_height), // input
             Constraint::Length(1),            // status line 1
             Constraint::Length(1),            // status line 2
         ])
         .split(frame.area());
 
-    draw_messages(frame, app, chunks[0]);
     draw_input(frame, app, chunks[1]);
     draw_status_line1(frame, app, chunks[2]);
     draw_status_line2(frame, app, chunks[3]);
@@ -161,21 +164,6 @@ pub fn format_messages(
     }
 
     lines
-}
-
-fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
-    let lines = format_messages(app.pending_messages(), &app.agent_name, app.verbose);
-
-    let visible_height = area.height as usize;
-    let total_lines = lines.len();
-    let max_scroll = total_lines.saturating_sub(visible_height);
-    let scroll = (app.scroll as usize).min(max_scroll);
-
-    let messages = Paragraph::new(Text::from(lines))
-        .wrap(Wrap { trim: false })
-        .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0));
-
-    frame.render_widget(messages, area);
 }
 
 /// Render lines into a buffer for `Terminal::insert_before` scrollback output.
