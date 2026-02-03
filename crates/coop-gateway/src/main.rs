@@ -20,6 +20,7 @@ use ratatui::{Terminal, TerminalOptions, Viewport};
 use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -139,10 +140,45 @@ fn cmd_chat(config_path: Option<&str>) -> Result<()> {
     let session_name = format!("{:?}", session_key.kind).to_lowercase();
     let mut app = App::new(&config.agent.id, &config.agent.model, session_name, 200_000);
     app.connection_status = "connected".to_string();
-    app.push_message(DisplayMessage::system(format!(
-        "Connected to {} ({}). Type a message or /quit to exit.",
-        config.agent.id, config.agent.model
-    )));
+    app.version = env!("CARGO_PKG_VERSION").to_string();
+
+    // Gather working directory
+    let cwd = std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    let home = std::env::var("HOME").unwrap_or_default();
+    app.working_dir = if !home.is_empty() && cwd.starts_with(&home) {
+        format!("~{}", &cwd[home.len()..])
+    } else {
+        cwd
+    };
+
+    // Gather git info
+    if let Ok(out) = Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        && out.status.success()
+    {
+        app.git_branch = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    }
+    if let Ok(out) = Command::new("git").args(["status", "--porcelain"]).output()
+        && out.status.success()
+    {
+        app.git_uncommitted = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|l| !l.is_empty())
+            .count();
+    }
+
+    // Render welcome header to scrollback
+    let welcome_lines =
+        coop_tui::ui::format_welcome_header(&app.version, &app.model_name, &app.working_dir);
+    let welcome_width = terminal.size()?.width;
+    #[allow(clippy::cast_possible_truncation)]
+    let welcome_height = welcome_lines.len() as u16;
+    terminal.insert_before(welcome_height, |buf| {
+        coop_tui::ui::render_scrollback(&welcome_lines, welcome_width, buf);
+    })?;
 
     // Track tool names by ID for correlating ToolResult events
     let mut tool_names: HashMap<String, String> = HashMap::new();

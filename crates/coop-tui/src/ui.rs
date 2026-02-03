@@ -20,34 +20,24 @@ fn tool_label(name: &str) -> (&'static str, &'static str) {
     }
 }
 
-/// Maximum lines the input area can grow to before it stops expanding.
-const MAX_INPUT_HEIGHT: u16 = 10;
+/// Fixed viewport height: input (1 line) + 1 status bar.
+pub const VIEWPORT_HEIGHT: u16 = 1 + 1;
 
-/// Fixed viewport height: input (1 line min) + 2 status bars.
-pub const VIEWPORT_HEIGHT: u16 = 1 + MAX_INPUT_HEIGHT + 2;
-
-/// Render the fixed viewport: input + status bars only.
+/// Render the fixed viewport: input + status bar only.
 ///
 /// Messages are not rendered in the viewport — they live in terminal
 /// scrollback via `insert_before`.
 pub fn draw(frame: &mut Frame, app: &App) {
-    #[allow(clippy::cast_possible_truncation)]
-    let input_lines = app.input_line_count() as u16;
-    let input_height = input_lines.clamp(1, MAX_INPUT_HEIGHT);
-
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(0),               // padding (absorbs unused space)
-            Constraint::Length(input_height), // input
-            Constraint::Length(1),            // status line 1
-            Constraint::Length(1),            // status line 2
+            Constraint::Length(1), // input
+            Constraint::Length(1), // status bar
         ])
         .split(frame.area());
 
-    draw_input(frame, app, chunks[1]);
-    draw_status_line1(frame, app, chunks[2]);
-    draw_status_line2(frame, app, chunks[3]);
+    draw_input(frame, app, chunks[0]);
+    draw_status_bar(frame, app, chunks[1]);
 }
 
 /// Format a slice of display messages into styled lines for rendering.
@@ -191,7 +181,7 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
         .map(|(i, line)| {
             if i == 0 {
                 Line::from(vec![
-                    Span::styled("> ", prompt_style),
+                    Span::styled("❯ ", prompt_style),
                     Span::styled(*line, text_style),
                 ])
             } else {
@@ -220,7 +210,7 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
 
     frame.render_widget(input, area);
 
-    // Position cursor: +2 for the "> " prefix
+    // Position cursor: +2 for the "❯ " prefix
     #[allow(clippy::cast_possible_truncation)]
     let cursor_x = area.x + 2 + cursor_col as u16;
     #[allow(clippy::cast_possible_truncation)]
@@ -228,47 +218,109 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
     frame.set_cursor_position((cursor_x, cursor_y));
 }
 
-fn draw_status_line1(frame: &mut Frame, app: &App, area: Rect) {
-    let style = Style::default().fg(Color::Yellow);
+fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
+    let style = Style::default().fg(Color::Gray);
+    let sep = Span::styled(" | ", style);
 
-    let mut spans = Vec::new();
+    let mut spans: Vec<Span> = Vec::new();
 
-    if app.is_loading {
+    // Model name
+    spans.push(Span::styled(format!(" {}", app.model_name), style));
+
+    // Folder name
+    let folder = app
+        .working_dir
+        .rsplit('/')
+        .next()
+        .unwrap_or(&app.working_dir);
+    spans.push(sep.clone());
+    spans.push(Span::styled(format!("\u{1F4C1}{folder}"), style));
+
+    // Git branch + uncommitted count
+    if !app.git_branch.is_empty() {
+        spans.push(sep.clone());
         spans.push(Span::styled(
-            format!(" {} streaming", app.loading_text()),
+            format!(
+                "\u{1F500}{} ({} files uncommitted)",
+                app.git_branch, app.git_uncommitted
+            ),
             style,
         ));
-        let elapsed = app.elapsed_text();
-        if !elapsed.is_empty() {
-            spans.push(Span::styled(format!(" {elapsed}"), style));
-        }
-    } else {
-        spans.push(Span::styled(" idle", style));
     }
 
-    if !app.connection_status.is_empty() {
-        spans.push(Span::styled(format!(" | {}", app.connection_status), style));
-    }
+    // Token progress bar
+    let pct = app.token_percent();
+    let token_k = app.context_limit / 1000;
+    let bar_width: usize = 10;
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )]
+    let filled = ((pct / 100.0) * bar_width as f64).round() as usize;
+    let empty = bar_width.saturating_sub(filled);
+    let bar_filled = "\u{2588}".repeat(filled);
+    let bar_empty = "\u{2591}".repeat(empty);
+
+    spans.push(sep);
+    spans.push(Span::styled(
+        bar_filled,
+        Style::default().fg(Color::LightBlue),
+    ));
+    spans.push(Span::styled(
+        bar_empty,
+        Style::default().fg(Color::DarkGray),
+    ));
+    spans.push(Span::styled(
+        format!(" ~{pct:.0}% of {token_k}k tokens"),
+        style,
+    ));
 
     let line = Line::from(spans);
     let status = Paragraph::new(line).style(Style::default().bg(Color::DarkGray));
     frame.render_widget(status, area);
 }
 
-fn draw_status_line2(frame: &mut Frame, app: &App, area: Rect) {
-    let style = Style::default().fg(Color::Gray);
+/// Format the welcome header as styled lines for insert_before scrollback output.
+pub fn format_welcome_header(
+    version: &str,
+    model_name: &str,
+    working_dir: &str,
+) -> Vec<Line<'static>> {
+    let pink = Style::default().fg(Color::LightYellow);
+    let bold_white = Style::default()
+        .fg(Color::White)
+        .add_modifier(Modifier::BOLD);
+    let gray = Style::default().fg(Color::Gray);
 
-    let token_k = app.context_limit / 1000;
-    let pct = app.token_percent();
+    // ASCII pixel-art robot face (Coop mascot)
+    let art = [
+        "    ████████       ",
+        "  ██▓▓▓▓▓▓▓▓██     ",
+        "  ██▓▓▓▓▓▓▓▓██     ",
+        "  ██▓▓██▓▓██▓▓██   ",
+        "  ██▓▓▓▓▓▓▓▓██     ",
+        "    ████████       ",
+    ];
 
-    let line = Line::from(vec![Span::styled(
-        format!(
-            " agent {} | session {} | {} | tokens {}/{token_k}k ({pct:.0}%)",
-            app.agent_name, app.session_name, app.model_name, app.token_count,
-        ),
-        style,
-    )]);
+    let text_line0 = format!("Coop v{version}");
+    let text_line1 = model_name.to_string();
+    let text_line2 = working_dir.to_string();
 
-    let status = Paragraph::new(line).style(Style::default().bg(Color::Black));
-    frame.render_widget(status, area);
+    let mut lines = Vec::new();
+    lines.push(Line::raw(""));
+
+    for (i, art_line) in art.iter().enumerate() {
+        let mut spans = vec![Span::styled((*art_line).to_string(), pink)];
+        match i {
+            1 => spans.push(Span::styled(text_line0.clone(), bold_white)),
+            2 => spans.push(Span::styled(text_line1.clone(), gray)),
+            3 => spans.push(Span::styled(text_line2.clone(), gray)),
+            _ => {}
+        }
+        lines.push(Line::from(spans));
+    }
+
+    lines.push(Line::raw(""));
+    lines
 }

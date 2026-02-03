@@ -165,6 +165,14 @@ pub struct App {
     pub session_name: String,
     /// Connection status text.
     pub connection_status: String,
+    /// Current working directory for display.
+    pub working_dir: String,
+    /// Current git branch name.
+    pub git_branch: String,
+    /// Count of uncommitted files.
+    pub git_uncommitted: usize,
+    /// Application version string.
+    pub version: String,
     /// How many bytes of the streaming assistant message have been consumed.
     pub streamed_bytes: usize,
     /// Accumulates streaming text until a newline arrives.
@@ -196,6 +204,10 @@ impl App {
             turn_started: None,
             session_name: session_name.into(),
             connection_status: String::new(),
+            working_dir: String::new(),
+            git_branch: String::new(),
+            git_uncommitted: 0,
+            version: String::new(),
             streamed_bytes: 0,
             stream_line_buf: String::new(),
             assistant_streamed: false,
