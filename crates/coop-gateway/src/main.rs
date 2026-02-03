@@ -20,7 +20,6 @@ use ratatui::{Terminal, TerminalOptions, Viewport};
 use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -152,23 +151,6 @@ fn cmd_chat(config_path: Option<&str>) -> Result<()> {
     } else {
         cwd
     };
-
-    // Gather git info
-    if let Ok(out) = Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .output()
-        && out.status.success()
-    {
-        app.git_branch = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    }
-    if let Ok(out) = Command::new("git").args(["status", "--porcelain"]).output()
-        && out.status.success()
-    {
-        app.git_uncommitted = String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .filter(|l| !l.is_empty())
-            .count();
-    }
 
     // Render welcome header to scrollback
     let welcome_lines =

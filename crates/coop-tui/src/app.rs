@@ -167,10 +167,6 @@ pub struct App {
     pub connection_status: String,
     /// Current working directory for display.
     pub working_dir: String,
-    /// Current git branch name.
-    pub git_branch: String,
-    /// Count of uncommitted files.
-    pub git_uncommitted: usize,
     /// Application version string.
     pub version: String,
     /// Transient error message displayed on the spinner line.
@@ -209,8 +205,6 @@ impl App {
             session_name: session_name.into(),
             connection_status: String::new(),
             working_dir: String::new(),
-            git_branch: String::new(),
-            git_uncommitted: 0,
             version: String::new(),
             error_message: None,
             error_ticks: 0,
