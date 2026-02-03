@@ -173,6 +173,10 @@ pub struct App {
     pub git_uncommitted: usize,
     /// Application version string.
     pub version: String,
+    /// Transient error message displayed on the spinner line.
+    pub error_message: Option<String>,
+    /// Remaining ticks before the error message is cleared.
+    pub error_ticks: u16,
     /// How many bytes of the streaming assistant message have been consumed.
     pub streamed_bytes: usize,
     /// Accumulates streaming text until a newline arrives.
@@ -208,6 +212,8 @@ impl App {
             git_branch: String::new(),
             git_uncommitted: 0,
             version: String::new(),
+            error_message: None,
+            error_ticks: 0,
             streamed_bytes: 0,
             stream_line_buf: String::new(),
             assistant_streamed: false,
@@ -444,6 +450,28 @@ impl App {
         if self.is_loading {
             self.loading_frame = self.loading_frame.wrapping_add(1);
         }
+    }
+
+    /// Set a transient error message that auto-clears after ~2 seconds (40 ticks at 50ms).
+    pub fn set_error(&mut self, msg: impl Into<String>) {
+        self.error_message = Some(msg.into());
+        self.error_ticks = 40;
+    }
+
+    /// Tick the error message countdown; clears when expired.
+    pub fn tick_error(&mut self) {
+        if self.error_ticks > 0 {
+            self.error_ticks -= 1;
+            if self.error_ticks == 0 {
+                self.error_message = None;
+            }
+        }
+    }
+
+    /// Clear the error message immediately (e.g. on next keypress).
+    pub fn clear_error(&mut self) {
+        self.error_message = None;
+        self.error_ticks = 0;
     }
 
     /// Toggle verbose mode (show/hide tool call output).

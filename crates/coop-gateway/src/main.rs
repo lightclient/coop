@@ -12,7 +12,7 @@ use coop_core::tools::DefaultExecutor;
 use coop_core::{Provider, TurnEvent};
 use coop_tui::{App, DisplayMessage, InputAction, handle_key_event, poll_event};
 use crossterm::{
-    event::{Event, KeyEvent},
+    event::Event,
     terminal::{disable_raw_mode, enable_raw_mode},
 };
 use ratatui::backend::CrosstermBackend;
@@ -288,31 +288,38 @@ fn cmd_chat(config_path: Option<&str>) -> Result<()> {
         // 6. Poll for keyboard/mouse events
         if let Some(event) = poll_event(Duration::from_millis(50)) {
             if let Event::Key(key_event) = event {
-                // Don't accept input while loading
-                if app.is_loading && !is_quit_key(&key_event) {
-                    continue;
-                }
+                // Clear error message on any keypress
+                app.clear_error();
 
                 match handle_key_event(&mut app, key_event) {
                     InputAction::Submit(input) => {
-                        app.push_message(DisplayMessage::user(&input));
-                        app.start_turn();
+                        if app.is_loading {
+                            // Re-insert the text the user typed (take_input consumed it)
+                            app.input = input;
+                            app.cursor_pos = app.input.len();
+                            app.set_error("Cannot send while agent is responding");
+                        } else {
+                            app.push_message(DisplayMessage::user(&input));
+                            app.start_turn();
 
-                        // Spawn async task for agent turn
-                        let gw = gw.clone();
-                        let sk = session_key.clone();
-                        let tx = event_tx.clone();
-                        tokio::spawn(async move {
-                            if let Err(e) = gw.run_turn(&sk, &input, tx.clone()).await {
-                                let _ = tx.send(TurnEvent::Error(format!("{e:#}"))).await;
-                            }
-                        });
+                            // Spawn async task for agent turn
+                            let gw = gw.clone();
+                            let sk = session_key.clone();
+                            let tx = event_tx.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = gw.run_turn(&sk, &input, tx.clone()).await {
+                                    let _ = tx.send(TurnEvent::Error(format!("{e:#}"))).await;
+                                }
+                            });
+                        }
                     }
                     InputAction::Quit => {
                         app.should_quit = true;
                     }
                     InputAction::Clear => {
-                        app.clear();
+                        if !app.is_loading {
+                            app.clear();
+                        }
                     }
                     InputAction::ToggleVerbose => {
                         app.toggle_verbose();
@@ -321,8 +328,9 @@ fn cmd_chat(config_path: Option<&str>) -> Result<()> {
                 }
             }
         } else {
-            // Tick loading animation
+            // Tick loading animation and error countdown
             app.tick_loading();
+            app.tick_error();
         }
 
         if app.should_quit {
@@ -382,16 +390,6 @@ fn print_stream_prefix(
         ratatui::widgets::Widget::render(ratatui::widgets::Paragraph::new(span), area, buf);
     })?;
     Ok(())
-}
-
-fn is_quit_key(key: &KeyEvent) -> bool {
-    matches!(
-        (key.modifiers, key.code),
-        (
-            crossterm::event::KeyModifiers::CONTROL,
-            crossterm::event::KeyCode::Char('c')
-        )
-    )
 }
 
 /// Apply horizontal side padding to a buffer area for scrollback rendering.

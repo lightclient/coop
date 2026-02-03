@@ -32,8 +32,8 @@ const BOTTOM_PADDING: u16 = 1;
 /// Vertical gap between input and status bar.
 const STATUS_GAP: u16 = 1;
 
-/// Fixed viewport height: top padding + input + gap + status bar + bottom padding.
-pub const VIEWPORT_HEIGHT: u16 = TOP_PADDING + 1 + STATUS_GAP + 1 + BOTTOM_PADDING;
+/// Fixed viewport height: top padding + spinner + input + gap + status bar + bottom padding.
+pub const VIEWPORT_HEIGHT: u16 = TOP_PADDING + 1 + 1 + STATUS_GAP + 1 + BOTTOM_PADDING;
 
 /// Render the fixed viewport: input + status bar + bottom padding.
 ///
@@ -46,6 +46,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(TOP_PADDING),    // spacing above input
+            Constraint::Length(1),              // spinner + elapsed time
             Constraint::Length(1),              // input
             Constraint::Length(STATUS_GAP),     // gap
             Constraint::Length(1),              // status bar (full-width background)
@@ -53,15 +54,22 @@ pub fn draw(frame: &mut Frame, app: &App) {
         ])
         .split(full);
 
+    // Spinner row gets horizontal padding
+    let spinner_area = rows[1].inner(Margin {
+        horizontal: SIDE_PADDING,
+        vertical: 0,
+    });
+    draw_spinner(frame, app, spinner_area);
+
     // Input gets horizontal padding
-    let input_area = rows[1].inner(Margin {
+    let input_area = rows[2].inner(Margin {
         horizontal: SIDE_PADDING,
         vertical: 0,
     });
     draw_input(frame, app, input_area);
 
     // Status bar: full-width background, padded text
-    draw_status_bar(frame, app, rows[3]);
+    draw_status_bar(frame, app, rows[4]);
 }
 
 /// Format a slice of display messages into styled lines for rendering.
@@ -194,6 +202,21 @@ pub fn render_scrollback(lines: &[Line<'_>], width: u16, buf: &mut Buffer) {
     paragraph.render(area, buf);
 }
 
+fn draw_spinner(frame: &mut Frame, app: &App, area: Rect) {
+    if let Some(ref err) = app.error_message {
+        let line = Line::from(Span::styled(err.clone(), Style::default().fg(Color::Red)));
+        frame.render_widget(Paragraph::new(line), area);
+    } else if app.is_loading {
+        let spinner = app.loading_text();
+        let elapsed = app.elapsed_text();
+        let line = Line::from(vec![
+            Span::styled(spinner, Style::default().fg(Color::Cyan)),
+            Span::styled(format!(" {elapsed}"), Style::default().fg(Color::Gray)),
+        ]);
+        frame.render_widget(Paragraph::new(line), area);
+    }
+}
+
 fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
     let prompt_style = Style::default().fg(Color::Cyan);
     let text_style = Style::default().fg(Color::White);
@@ -248,41 +271,32 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
-    let style = Style::default().fg(Color::Gray);
-    let sep = Span::styled(" | ", style);
-
-    let mut spans: Vec<Span> = Vec::new();
-
-    // Left padding + model name
-    let pad = " ".repeat(SIDE_PADDING as usize);
-    spans.push(Span::styled(format!("{pad}{}", app.model_name), style));
-
-    // Token progress bar
     let pct = app.token_percent();
     let token_k = app.context_limit / 1000;
-    let bar_width: usize = 10;
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        clippy::cast_precision_loss
-    )]
-    let filled = ((pct / 100.0) * bar_width as f64).round() as usize;
-    let empty = bar_width.saturating_sub(filled);
-    let bar_filled = "\u{2588}".repeat(filled);
-    let bar_empty = "\u{2591}".repeat(empty);
+    let pad = " ".repeat(SIDE_PADDING as usize);
 
-    spans.push(sep);
+    let mut spans: Vec<Span> = vec![Span::styled(&pad, Style::default())];
+
+    // 10-segment bar: each segment = 10% of context
+    for i in 0..10 {
+        let seg_start = f64::from(i) * 10.0;
+        let fill_in_seg = (pct - seg_start).clamp(0.0, 10.0);
+        let seg_pct = fill_in_seg / 10.0 * 100.0;
+
+        let (ch, color) = if seg_pct >= 8.0 {
+            ("\u{2588}", Color::LightBlue) // █ full block
+        } else if seg_pct >= 3.0 {
+            ("\u{2584}", Color::LightBlue) // ▄ lower half block
+        } else {
+            ("\u{2591}", Color::DarkGray) // ░ light shade
+        };
+
+        spans.push(Span::styled(ch, Style::default().fg(color)));
+    }
+
     spans.push(Span::styled(
-        bar_filled,
-        Style::default().fg(Color::LightBlue),
-    ));
-    spans.push(Span::styled(
-        bar_empty,
-        Style::default().fg(Color::DarkGray),
-    ));
-    spans.push(Span::styled(
-        format!(" ~{pct:.0}% of {token_k}k tokens"),
-        style,
+        format!(" {pct:.0}% of {token_k}k tokens"),
+        Style::default().fg(Color::Gray),
     ));
 
     let line = Line::from(spans);
