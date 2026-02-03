@@ -252,7 +252,7 @@ When integrating multiple channels (Signal, WhatsApp, iMessage, Discord, etc.), 
 - `U03ABC123XYZ` (Slack user ID)
 - `123456789012345678` (Discord snowflake)
 - `alice.example.55` (WhatsApp ID)
-- `Matt` (display name)
+- `Alice` (display name)
 - A UUID from the gateway's internal contact registry
 
 If the agent sees `+15555550100` on Signal and `alice.example.55` on WhatsApp and doesn't recognize these as the same person, it will:
@@ -290,14 +290,14 @@ If the agent sees `+15555550100` on Signal and `alice.example.55` on WhatsApp an
 
 5. **Agent-visible identity.** The agent's prompt should show the canonical name and note which channel the message came from:
    ```
-   Alice via Signal] hey what's the wifi password?
+   [Alice via Signal] hey what's the wifi password?
    ```
    Not:
    ```
    [+15555550100] hey what's the wifi password?
    ```
 
-6. **Identity in memory.** Memory entries should reference canonical contact IDs, not raw channel identifiers. When the agent writes "Alice mentioned X", it should be retrievable regardless of which channel Matt uses next.
+6. **Identity in memory.** Memory entries should reference canonical contact IDs, not raw channel identifiers. When the agent writes "Alice mentioned X", it should be retrievable regardless of which channel Alice uses next.
 
 ### What This Means for Code
 
