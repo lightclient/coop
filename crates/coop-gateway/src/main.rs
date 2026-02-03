@@ -245,15 +245,12 @@ fn cmd_chat(config_path: Option<&str>) -> Result<()> {
                 stream_prefix_printed = true;
             }
             terminal.insert_before(1, |buf| {
+                let area = padded_area(buf.area);
                 let span = ratatui::text::Line::from(ratatui::text::Span::styled(
                     format!("  {line}"),
                     ratatui::style::Style::default().fg(ratatui::style::Color::White),
                 ));
-                ratatui::widgets::Widget::render(
-                    ratatui::widgets::Paragraph::new(span),
-                    buf.area,
-                    buf,
-                );
+                ratatui::widgets::Widget::render(ratatui::widgets::Paragraph::new(span), area, buf);
             })?;
         }
 
@@ -265,13 +262,14 @@ fn cmd_chat(config_path: Option<&str>) -> Result<()> {
                 }
                 if !partial.is_empty() {
                     terminal.insert_before(1, |buf| {
+                        let area = padded_area(buf.area);
                         let span = ratatui::text::Line::from(ratatui::text::Span::styled(
                             format!("  {partial}"),
                             ratatui::style::Style::default().fg(ratatui::style::Color::White),
                         ));
                         ratatui::widgets::Widget::render(
                             ratatui::widgets::Paragraph::new(span),
-                            buf.area,
+                            area,
                             buf,
                         );
                     })?;
@@ -376,11 +374,12 @@ fn print_stream_prefix(
     let time = chrono::Local::now().format("%H:%M").to_string();
     let prefix = format!("\n{time} {}: ", app.agent_name);
     terminal.insert_before(1, |buf| {
+        let area = padded_area(buf.area);
         let span = ratatui::text::Line::from(ratatui::text::Span::styled(
             prefix,
             ratatui::style::Style::default().fg(ratatui::style::Color::White),
         ));
-        ratatui::widgets::Widget::render(ratatui::widgets::Paragraph::new(span), buf.area, buf);
+        ratatui::widgets::Widget::render(ratatui::widgets::Paragraph::new(span), area, buf);
     })?;
     Ok(())
 }
@@ -393,4 +392,10 @@ fn is_quit_key(key: &KeyEvent) -> bool {
             crossterm::event::KeyCode::Char('c')
         )
     )
+}
+
+/// Apply horizontal side padding to a buffer area for scrollback rendering.
+fn padded_area(area: ratatui::layout::Rect) -> ratatui::layout::Rect {
+    let pad = coop_tui::ui::SIDE_PADDING;
+    ratatui::layout::Rect::new(pad, area.y, area.width.saturating_sub(pad * 2), area.height)
 }

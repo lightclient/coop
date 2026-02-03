@@ -457,6 +457,9 @@ impl App {
     pub fn start_turn(&mut self) {
         self.is_loading = true;
         self.turn_started = Some(Instant::now());
+        self.streamed_bytes = 0;
+        self.stream_line_buf.clear();
+        self.assistant_streamed = false;
     }
 
     /// Mark the end of an agent turn and update token count.
@@ -464,7 +467,6 @@ impl App {
         self.is_loading = false;
         self.turn_started = None;
         self.token_count = tokens;
-        self.streamed_bytes = 0;
     }
 
     /// Elapsed time text for the current turn.

@@ -1,7 +1,7 @@
 use ratatui::{
     Frame,
     buffer::Buffer,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Paragraph, Widget, Wrap},
@@ -20,24 +20,48 @@ fn tool_label(name: &str) -> (&'static str, &'static str) {
     }
 }
 
-/// Fixed viewport height: input (1 line) + 1 status bar.
-pub const VIEWPORT_HEIGHT: u16 = 1 + 1;
+/// Horizontal padding on each side of the TUI content.
+pub const SIDE_PADDING: u16 = 2;
 
-/// Render the fixed viewport: input + status bar only.
+/// Spacing above the input (separates scrollback from viewport).
+const TOP_PADDING: u16 = 1;
+
+/// Bottom padding below the status bar.
+const BOTTOM_PADDING: u16 = 1;
+
+/// Vertical gap between input and status bar.
+const STATUS_GAP: u16 = 1;
+
+/// Fixed viewport height: top padding + input + gap + status bar + bottom padding.
+pub const VIEWPORT_HEIGHT: u16 = TOP_PADDING + 1 + STATUS_GAP + 1 + BOTTOM_PADDING;
+
+/// Render the fixed viewport: input + status bar + bottom padding.
 ///
 /// Messages are not rendered in the viewport — they live in terminal
 /// scrollback via `insert_before`.
 pub fn draw(frame: &mut Frame, app: &App) {
-    let chunks = Layout::default()
+    let full = frame.area();
+
+    let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // input
-            Constraint::Length(1), // status bar
+            Constraint::Length(TOP_PADDING),    // spacing above input
+            Constraint::Length(1),              // input
+            Constraint::Length(STATUS_GAP),     // gap
+            Constraint::Length(1),              // status bar (full-width background)
+            Constraint::Length(BOTTOM_PADDING), // bottom padding
         ])
-        .split(frame.area());
+        .split(full);
 
-    draw_input(frame, app, chunks[0]);
-    draw_status_bar(frame, app, chunks[1]);
+    // Input gets horizontal padding
+    let input_area = rows[1].inner(Margin {
+        horizontal: SIDE_PADDING,
+        vertical: 0,
+    });
+    draw_input(frame, app, input_area);
+
+    // Status bar: full-width background, padded text
+    draw_status_bar(frame, app, rows[3]);
 }
 
 /// Format a slice of display messages into styled lines for rendering.
@@ -160,7 +184,12 @@ pub fn format_messages(
 
 /// Render lines into a buffer for `Terminal::insert_before` scrollback output.
 pub fn render_scrollback(lines: &[Line<'_>], width: u16, buf: &mut Buffer) {
-    let area = Rect::new(0, 0, width, buf.area.height);
+    let area = Rect::new(
+        SIDE_PADDING,
+        0,
+        width.saturating_sub(SIDE_PADDING * 2),
+        buf.area.height,
+    );
     let paragraph = Paragraph::new(Text::from(lines.to_vec())).wrap(Wrap { trim: false });
     paragraph.render(area, buf);
 }
@@ -224,29 +253,9 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
 
     let mut spans: Vec<Span> = Vec::new();
 
-    // Model name
-    spans.push(Span::styled(format!(" {}", app.model_name), style));
-
-    // Folder name
-    let folder = app
-        .working_dir
-        .rsplit('/')
-        .next()
-        .unwrap_or(&app.working_dir);
-    spans.push(sep.clone());
-    spans.push(Span::styled(format!("\u{1F4C1}{folder}"), style));
-
-    // Git branch + uncommitted count
-    if !app.git_branch.is_empty() {
-        spans.push(sep.clone());
-        spans.push(Span::styled(
-            format!(
-                "\u{1F500}{} ({} files uncommitted)",
-                app.git_branch, app.git_uncommitted
-            ),
-            style,
-        ));
-    }
+    // Left padding + model name
+    let pad = " ".repeat(SIDE_PADDING as usize);
+    spans.push(Span::styled(format!("{pad}{}", app.model_name), style));
 
     // Token progress bar
     let pct = app.token_percent();
