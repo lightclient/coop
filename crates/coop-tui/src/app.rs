@@ -232,6 +232,70 @@ impl App {
         }
     }
 
+    /// Move cursor up one line in multi-line input.
+    pub fn cursor_up(&mut self) {
+        let (row, col) = self.cursor_row_col();
+        if row > 0 {
+            self.cursor_pos = self.pos_from_row_col(row - 1, col);
+        }
+    }
+
+    /// Move cursor down one line in multi-line input.
+    pub fn cursor_down(&mut self) {
+        let (row, col) = self.cursor_row_col();
+        let line_count = self.input.lines().count().max(1);
+        if row + 1 < line_count {
+            self.cursor_pos = self.pos_from_row_col(row + 1, col);
+        }
+    }
+
+    /// Move cursor to the start of the current line.
+    pub fn cursor_home(&mut self) {
+        let before = &self.input[..self.cursor_pos];
+        let line_start = before.rfind('\n').map_or(0, |i| i + 1);
+        self.cursor_pos = line_start;
+    }
+
+    /// Move cursor to the end of the current line.
+    pub fn cursor_end(&mut self) {
+        let after = &self.input[self.cursor_pos..];
+        let line_end = after
+            .find('\n')
+            .map_or(self.input.len(), |i| self.cursor_pos + i);
+        self.cursor_pos = line_end;
+    }
+
+    /// Get the (row, col) of the cursor in the input text.
+    pub fn cursor_row_col(&self) -> (usize, usize) {
+        let before = &self.input[..self.cursor_pos];
+        let row = before.matches('\n').count();
+        let col = before
+            .rfind('\n')
+            .map_or(before.len(), |i| before.len() - i - 1);
+        (row, col)
+    }
+
+    /// Convert (row, col) back to a byte position, clamping to line length.
+    fn pos_from_row_col(&self, target_row: usize, target_col: usize) -> usize {
+        let mut pos = 0;
+        for (i, line) in self.input.split('\n').enumerate() {
+            if i == target_row {
+                return pos + target_col.min(line.len());
+            }
+            pos += line.len() + 1; // +1 for the \n
+        }
+        self.input.len()
+    }
+
+    /// Number of lines in the input buffer.
+    pub fn input_line_count(&self) -> usize {
+        if self.input.is_empty() {
+            1
+        } else {
+            self.input.lines().count() + usize::from(self.input.ends_with('\n'))
+        }
+    }
+
     /// Take the current input, resetting the buffer.
     pub fn take_input(&mut self) -> String {
         let input = self.input.clone();
