@@ -18,6 +18,7 @@ pub enum InputAction {
 }
 
 /// Handle a key event, updating app state and returning any action.
+#[allow(clippy::too_many_lines)]
 pub fn handle_key_event(app: &mut App, key: KeyEvent) -> InputAction {
     match (key.modifiers, key.code) {
         // Quit
@@ -28,6 +29,12 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent) -> InputAction {
             } else {
                 InputAction::None
             }
+        }
+
+        // Newline in multi-line input
+        (KeyModifiers::SHIFT, KeyCode::Enter) => {
+            app.insert_char('\n');
+            InputAction::None
         }
 
         // Submit
@@ -83,15 +90,23 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent) -> InputAction {
             InputAction::None
         }
         (KeyModifiers::CONTROL, KeyCode::Char('a')) | (_, KeyCode::Home) => {
-            app.cursor_pos = 0;
+            app.cursor_home();
             InputAction::None
         }
         (KeyModifiers::CONTROL, KeyCode::Char('e')) | (_, KeyCode::End) => {
-            app.cursor_pos = app.input.len();
+            app.cursor_end();
             InputAction::None
         }
 
-        // Scrolling
+        // Scrolling (Shift+Arrow always scrolls messages, must come before bare arrows)
+        (KeyModifiers::SHIFT, KeyCode::Up) => {
+            app.scroll_up(1);
+            InputAction::None
+        }
+        (KeyModifiers::SHIFT, KeyCode::Down) => {
+            app.scroll_down(1);
+            InputAction::None
+        }
         (_, KeyCode::PageUp) => {
             app.scroll_up(10);
             InputAction::None
@@ -100,12 +115,22 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent) -> InputAction {
             app.scroll_down(10);
             InputAction::None
         }
-        (KeyModifiers::SHIFT, KeyCode::Up) => {
-            app.scroll_up(1);
+
+        // Up/Down: navigate within multi-line input, or scroll messages
+        (_, KeyCode::Up) => {
+            if app.input_line_count() > 1 {
+                app.cursor_up();
+            } else {
+                app.scroll_up(1);
+            }
             InputAction::None
         }
-        (KeyModifiers::SHIFT, KeyCode::Down) => {
-            app.scroll_down(1);
+        (_, KeyCode::Down) => {
+            if app.input_line_count() > 1 {
+                app.cursor_down();
+            } else {
+                app.scroll_down(1);
+            }
             InputAction::None
         }
 

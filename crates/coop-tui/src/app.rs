@@ -397,3 +397,110 @@ impl App {
         f64::from(self.token_count) / f64::from(self.context_limit) * 100.0
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_app() -> App {
+        App::new("test-agent", "test-model", "main", 200_000)
+    }
+
+    #[test]
+    fn single_line_input() {
+        let mut app = test_app();
+        app.insert_char('h');
+        app.insert_char('i');
+        assert_eq!(app.input, "hi");
+        assert_eq!(app.input_line_count(), 1);
+        assert_eq!(app.cursor_row_col(), (0, 2));
+    }
+
+    #[test]
+    fn multiline_insert_newline() {
+        let mut app = test_app();
+        for c in "line1".chars() {
+            app.insert_char(c);
+        }
+        app.insert_char('\n');
+        for c in "line2".chars() {
+            app.insert_char(c);
+        }
+        assert_eq!(app.input, "line1\nline2");
+        assert_eq!(app.input_line_count(), 2);
+        assert_eq!(app.cursor_row_col(), (1, 5));
+    }
+
+    #[test]
+    fn cursor_up_down_navigation() {
+        let mut app = test_app();
+        app.input = "abc\ndef\nghi".to_string();
+        app.cursor_pos = app.input.len(); // end of "ghi"
+        assert_eq!(app.cursor_row_col(), (2, 3));
+
+        app.cursor_up();
+        assert_eq!(app.cursor_row_col(), (1, 3));
+        assert_eq!(&app.input[app.cursor_pos..=app.cursor_pos], "\n");
+
+        app.cursor_up();
+        assert_eq!(app.cursor_row_col(), (0, 3));
+
+        // Already at top, should stay
+        app.cursor_up();
+        assert_eq!(app.cursor_row_col(), (0, 3));
+
+        app.cursor_down();
+        assert_eq!(app.cursor_row_col(), (1, 3));
+    }
+
+    #[test]
+    fn cursor_up_clamps_to_shorter_line() {
+        let mut app = test_app();
+        app.input = "ab\nc\ndefgh".to_string();
+        app.cursor_pos = app.input.len(); // end of "defgh", col=5
+        assert_eq!(app.cursor_row_col(), (2, 5));
+
+        app.cursor_up(); // line "c" only has 1 char, col clamped to 1
+        assert_eq!(app.cursor_row_col(), (1, 1));
+
+        app.cursor_up(); // line "ab" has 2 chars, col clamped to 1 (sticky)
+        assert_eq!(app.cursor_row_col(), (0, 1));
+    }
+
+    #[test]
+    fn cursor_home_end_multiline() {
+        let mut app = test_app();
+        app.input = "abc\ndefgh".to_string();
+        app.cursor_pos = 6; // middle of "defgh" → "de|fgh"
+        assert_eq!(app.cursor_row_col(), (1, 2));
+
+        app.cursor_home();
+        assert_eq!(app.cursor_row_col(), (1, 0));
+        assert_eq!(app.cursor_pos, 4); // right after '\n'
+
+        app.cursor_end();
+        assert_eq!(app.cursor_row_col(), (1, 5));
+        assert_eq!(app.cursor_pos, 9); // end of string
+    }
+
+    #[test]
+    fn input_line_count_trailing_newline() {
+        let mut app = test_app();
+        app.input = "hello\n".to_string();
+        assert_eq!(app.input_line_count(), 2);
+
+        app.input = "a\nb\n".to_string();
+        assert_eq!(app.input_line_count(), 3);
+    }
+
+    #[test]
+    fn take_input_preserves_newlines() {
+        let mut app = test_app();
+        app.input = "line1\nline2\nline3".to_string();
+        app.cursor_pos = app.input.len();
+        let taken = app.take_input();
+        assert_eq!(taken, "line1\nline2\nline3");
+        assert_eq!(app.input, "");
+        assert_eq!(app.cursor_pos, 0);
+    }
+}

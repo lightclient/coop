@@ -149,9 +149,6 @@ fn cmd_chat(config_path: Option<&str>) -> Result<()> {
 
     // Main event loop
     loop {
-        // Draw
-        terminal.draw(|f| coop_tui::ui::draw(f, &app))?;
-
         // Check for async turn events
         while let Ok(turn_event) = event_rx.try_recv() {
             match turn_event {
@@ -172,7 +169,6 @@ fn cmd_chat(config_path: Option<&str>) -> Result<()> {
                         .get(&id)
                         .cloned()
                         .unwrap_or_else(|| "unknown".to_string());
-                    // Extract output and error state from tool result content
                     let (output, is_error) = message
                         .content
                         .iter()
@@ -194,6 +190,9 @@ fn cmd_chat(config_path: Option<&str>) -> Result<()> {
                 }
             }
         }
+
+        // Draw after processing events so state changes are immediately visible
+        terminal.draw(|f| coop_tui::ui::draw(f, &app))?;
 
         // Poll for input events
         if let Some(event) = poll_event(Duration::from_millis(50)) {

@@ -8,26 +8,33 @@ use ratatui::{
 
 use crate::app::{App, DisplayRole};
 
-/// Icon for a tool name.
-fn tool_icon(name: &str) -> &'static str {
+/// Human-readable label for a tool: (icon, verb).
+fn tool_label(name: &str) -> (&'static str, &'static str) {
     match name {
-        "bash" => "⚡",
-        "read_file" => "📄",
-        "write_file" => "✏️",
-        "list_directory" => "📂",
-        _ => "🔧",
+        "bash" => ("⚡", "Execute"),
+        "read_file" => ("📄", "Read"),
+        "write_file" => ("✏️", "Write"),
+        "list_directory" => ("📂", "List"),
+        _ => ("🔧", "Run"),
     }
 }
 
+/// Maximum lines the input area can grow to before it stops expanding.
+const MAX_INPUT_HEIGHT: u16 = 10;
+
 /// Render the entire TUI.
 pub fn draw(frame: &mut Frame, app: &App) {
+    #[allow(clippy::cast_possible_truncation)] // input_line_count capped by MAX_INPUT_HEIGHT
+    let input_lines = app.input_line_count() as u16;
+    let input_height = input_lines.clamp(1, MAX_INPUT_HEIGHT);
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(1),    // messages
-            Constraint::Length(1), // input
-            Constraint::Length(1), // status line 1
-            Constraint::Length(1), // status line 2
+            Constraint::Min(1),               // messages
+            Constraint::Length(input_height), // input
+            Constraint::Length(1),            // status line 1
+            Constraint::Length(1),            // status line 2
         ])
         .split(frame.area());
 
@@ -51,23 +58,25 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
                 if !lines.is_empty() {
                     lines.push(Line::raw(""));
                 }
-                let icon = tool_icon(name);
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        format!("  {icon} {name}"),
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        if msg.content.is_empty() {
-                            String::new()
-                        } else {
-                            format!(" {}", msg.content)
-                        },
+                let (icon, verb) = tool_label(name);
+                let header = if verb == "Run" {
+                    format!("  {icon} {verb} {name}")
+                } else {
+                    format!("  {icon} {verb}")
+                };
+                let mut spans = vec![Span::styled(
+                    header,
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )];
+                if !msg.content.is_empty() {
+                    spans.push(Span::styled(
+                        format!("  {}", msg.content),
                         Style::default().fg(Color::DarkGray),
-                    ),
-                ]));
+                    ));
+                }
+                lines.push(Line::from(spans));
             }
             DisplayRole::ToolOutput { is_error, .. } => {
                 let style = if *is_error {
@@ -159,18 +168,55 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
-    let input_line = Line::from(vec![
-        Span::styled("> ", Style::default().fg(Color::Cyan)),
-        Span::raw(&app.input),
-    ]);
+    let prompt_style = Style::default().fg(Color::Cyan);
+    let text_style = Style::default().fg(Color::White);
 
-    let input = Paragraph::new(input_line).style(Style::default().fg(Color::White));
+    let input_lines: Vec<&str> = if app.input.is_empty() {
+        vec![""]
+    } else {
+        app.input.split('\n').collect()
+    };
+
+    let lines: Vec<Line> = input_lines
+        .iter()
+        .enumerate()
+        .map(|(i, line)| {
+            if i == 0 {
+                Line::from(vec![
+                    Span::styled("> ", prompt_style),
+                    Span::styled(*line, text_style),
+                ])
+            } else {
+                Line::from(vec![
+                    Span::styled("  ", prompt_style),
+                    Span::styled(*line, text_style),
+                ])
+            }
+        })
+        .collect();
+
+    // Scroll the input if it exceeds the visible area
+    #[allow(clippy::cast_possible_truncation)] // line counts fit in u16 for any terminal
+    let total_lines = lines.len() as u16;
+    let (cursor_row, cursor_col) = app.cursor_row_col();
+    #[allow(clippy::cast_possible_truncation)]
+    let input_scroll = if total_lines > area.height {
+        (cursor_row as u16).saturating_sub(area.height.saturating_sub(1))
+    } else {
+        0
+    };
+
+    let input = Paragraph::new(Text::from(lines))
+        .style(text_style)
+        .scroll((input_scroll, 0));
 
     frame.render_widget(input, area);
 
+    // Position cursor: +2 for the "> " prefix
     #[allow(clippy::cast_possible_truncation)]
-    let cursor_x = area.x + 2 + app.cursor_pos as u16;
-    let cursor_y = area.y;
+    let cursor_x = area.x + 2 + cursor_col as u16;
+    #[allow(clippy::cast_possible_truncation)]
+    let cursor_y = area.y + (cursor_row as u16).saturating_sub(input_scroll);
     frame.set_cursor_position((cursor_x, cursor_y));
 }
 
