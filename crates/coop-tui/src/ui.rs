@@ -1,12 +1,13 @@
 use ratatui::{
     Frame,
+    buffer::Buffer,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Paragraph, Wrap},
+    widgets::{Paragraph, Widget, Wrap},
 };
 
-use crate::app::{App, DisplayRole};
+use crate::app::{App, DisplayMessage, DisplayRole};
 
 /// Human-readable label for a tool: (icon, verb).
 fn tool_label(name: &str) -> (&'static str, &'static str) {
@@ -44,12 +45,17 @@ pub fn draw(frame: &mut Frame, app: &App) {
     draw_status_line2(frame, app, chunks[3]);
 }
 
+/// Format a slice of display messages into styled lines for rendering.
 #[allow(clippy::too_many_lines)]
-fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
+pub fn format_messages(
+    messages: &[DisplayMessage],
+    agent_name: &str,
+    verbose: bool,
+) -> Vec<Line<'static>> {
     let mut lines: Vec<Line> = Vec::new();
 
-    for msg in &app.messages {
-        if msg.is_tool && !app.verbose {
+    for msg in messages {
+        if msg.is_tool && !verbose {
             continue;
         }
 
@@ -84,7 +90,6 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
                 } else {
                     Style::default().fg(Color::DarkGray)
                 };
-                // Truncate long output, show first/last few lines
                 let content_lines: Vec<&str> = msg.content.lines().collect();
                 let max_lines = 20;
                 if content_lines.len() > max_lines {
@@ -113,7 +118,7 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
                         Style::default().fg(Color::Cyan),
                     ),
                     DisplayRole::Assistant => (
-                        format!("{} {}: ", msg.local_time(), app.agent_name),
+                        format!("{} {agent_name}: ", msg.local_time()),
                         Style::default().fg(Color::White),
                     ),
                     DisplayRole::System => (
@@ -155,6 +160,12 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
         }
     }
 
+    lines
+}
+
+fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
+    let lines = format_messages(app.pending_messages(), &app.agent_name, app.verbose);
+
     let visible_height = area.height as usize;
     let total_lines = lines.len();
     let max_scroll = total_lines.saturating_sub(visible_height);
@@ -165,6 +176,13 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
         .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0));
 
     frame.render_widget(messages, area);
+}
+
+/// Render lines into a buffer for `Terminal::insert_before` scrollback output.
+pub fn render_scrollback(lines: &[Line<'_>], width: u16, buf: &mut Buffer) {
+    let area = Rect::new(0, 0, width, buf.area.height);
+    let paragraph = Paragraph::new(Text::from(lines.to_vec())).wrap(Wrap { trim: false });
+    paragraph.render(area, buf);
 }
 
 fn draw_input(frame: &mut Frame, app: &App, area: Rect) {

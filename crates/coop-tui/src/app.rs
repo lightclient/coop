@@ -136,6 +136,8 @@ fn format_tool_args(name: &str, args: &Value) -> String {
 pub struct App {
     /// Chat messages to display.
     pub messages: Vec<DisplayMessage>,
+    /// Number of messages already flushed to terminal scrollback.
+    pub flushed_count: usize,
     /// Current input buffer.
     pub input: String,
     /// Cursor position in input.
@@ -175,6 +177,7 @@ impl App {
     ) -> Self {
         Self {
             messages: Vec::new(),
+            flushed_count: 0,
             input: String::new(),
             cursor_pos: 0,
             scroll: 0,
@@ -341,8 +344,43 @@ impl App {
     /// Clear all messages and reset session.
     pub fn clear(&mut self) {
         self.messages.clear();
+        self.flushed_count = 0;
         self.scroll = 0;
         self.push_message(DisplayMessage::system("Session cleared."));
+    }
+
+    /// Messages not yet flushed to terminal scrollback.
+    pub fn pending_messages(&self) -> &[DisplayMessage] {
+        &self.messages[self.flushed_count..]
+    }
+
+    /// Drain completed messages for flushing to scrollback.
+    ///
+    /// Returns messages from `flushed_count` up to (but not including) the last
+    /// message if it's an in-progress assistant message. Updates `flushed_count`.
+    pub fn drain_flushed(&mut self) -> Vec<DisplayMessage> {
+        let end = if self.is_loading {
+            if let Some(last) = self.messages.last() {
+                if last.role == DisplayRole::Assistant {
+                    self.messages.len().saturating_sub(1)
+                } else {
+                    self.messages.len()
+                }
+            } else {
+                self.messages.len()
+            }
+        } else {
+            self.messages.len()
+        };
+
+        if end <= self.flushed_count {
+            return Vec::new();
+        }
+
+        let drained: Vec<DisplayMessage> = self.messages[self.flushed_count..end].to_vec();
+        self.flushed_count = end;
+        self.scroll = 0;
+        drained
     }
 
     /// Loading spinner text.

@@ -13,11 +13,10 @@ use coop_core::{Provider, TurnEvent};
 use coop_tui::{App, DisplayMessage, InputAction, handle_key_event, poll_event};
 use crossterm::{
     event::{Event, KeyEvent},
-    execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+    terminal::{disable_raw_mode, enable_raw_mode},
 };
-use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use ratatui::{Terminal, TerminalOptions, Viewport};
 use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
@@ -126,12 +125,17 @@ fn cmd_chat(config_path: Option<&str>) -> Result<()> {
     ));
     let session_key = gw.default_session_key();
 
-    // Set up TUI
+    // Set up TUI with inline viewport (content persists in scrollback)
     enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    let stdout = io::stdout();
     let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
+    let (_, rows) = crossterm::terminal::size()?;
+    let mut terminal = Terminal::with_options(
+        backend,
+        TerminalOptions {
+            viewport: Viewport::Inline(rows),
+        },
+    )?;
 
     let session_name = format!("{:?}", session_key.kind).to_lowercase();
     let mut app = App::new(&config.agent.id, &config.agent.model, session_name, 200_000);
@@ -183,10 +187,12 @@ fn cmd_chat(config_path: Option<&str>) -> Result<()> {
                 }
                 TurnEvent::Done(result) => {
                     app.end_turn(result.usage.total_tokens());
+                    flush_to_scrollback(&mut terminal, &mut app)?;
                 }
                 TurnEvent::Error(err) => {
                     app.push_message(DisplayMessage::system(format!("Error: {err}")));
                     app.end_turn(0);
+                    flush_to_scrollback(&mut terminal, &mut app)?;
                 }
             }
         }
@@ -205,6 +211,7 @@ fn cmd_chat(config_path: Option<&str>) -> Result<()> {
                 match handle_key_event(&mut app, key_event) {
                     InputAction::Submit(input) => {
                         app.push_message(DisplayMessage::user(&input));
+                        flush_to_scrollback(&mut terminal, &mut app)?;
                         app.start_turn();
 
                         // Spawn async task for agent turn
@@ -239,12 +246,39 @@ fn cmd_chat(config_path: Option<&str>) -> Result<()> {
         }
     }
 
-    // Restore terminal
+    // Flush remaining messages before exit
+    flush_to_scrollback(&mut terminal, &mut app)?;
+
+    // Restore terminal (no LeaveAlternateScreen — content is already in scrollback)
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
     println!("👋 Goodbye!");
+    Ok(())
+}
+
+/// Flush completed messages from the app into terminal scrollback via `insert_before`.
+fn flush_to_scrollback(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut App,
+) -> Result<()> {
+    let drained = app.drain_flushed();
+    if drained.is_empty() {
+        return Ok(());
+    }
+
+    let lines = coop_tui::ui::format_messages(&drained, &app.agent_name, app.verbose);
+    if lines.is_empty() {
+        return Ok(());
+    }
+
+    let width = terminal.size()?.width;
+    #[allow(clippy::cast_possible_truncation)]
+    let height = lines.len() as u16;
+    terminal.insert_before(height, |buf| {
+        coop_tui::ui::render_scrollback(&lines, width, buf);
+    })?;
+
     Ok(())
 }
 
