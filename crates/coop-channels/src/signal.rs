@@ -24,7 +24,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, UNIX_EPOCH};
 use tokio::sync::mpsc;
-use tracing::{debug, warn};
+use tracing::{Instrument, debug, info, info_span, warn};
 
 type SignalManager = Manager<SqliteStore, Registered>;
 type HealthState = Arc<Mutex<ChannelHealth>>;
@@ -293,13 +293,33 @@ async fn receive_task(
 
                 tokio::pin!(messages);
                 while let Some(received) = messages.next().await {
-                    if let Received::Content(content) = received
-                        && let Some(inbound) = inbound_from_content(&content)
-                    {
+                    let Received::Content(content) = received else {
+                        continue;
+                    };
+
+                    let sender = content.metadata.sender.raw_uuid().to_string();
+                    let content_body = signal_content_body_name(&content.body);
+                    let timestamp = content.metadata.timestamp;
+
+                    let receive_span = info_span!(
+                        "signal_receive_event",
+                        signal.sender = %sender,
+                        signal.content_body = content_body,
+                        signal.timestamp = timestamp,
+                    );
+
+                    let inbound = {
+                        let _guard = receive_span.enter();
+                        inbound_from_content(&content)
+                    };
+
+                    if let Some(inbound) = inbound {
                         debug!(
-                            kind = ?inbound.kind,
-                            sender = %inbound.sender,
-                            chat_id = ?inbound.chat_id,
+                            signal.inbound_kind = ?inbound.kind,
+                            signal.sender = %inbound.sender,
+                            signal.chat_id = ?inbound.chat_id,
+                            signal.message_timestamp = ?inbound.message_timestamp,
+                            signal.raw_content = %inbound.content,
                             "received signal inbound"
                         );
 
@@ -356,17 +376,28 @@ async fn send_task(
     );
 }
 
-#[allow(clippy::large_futures)]
+#[allow(clippy::large_futures, clippy::too_many_lines)]
 async fn send_signal_action(manager: &mut SignalManager, action: SignalAction) -> Result<()> {
     match action {
         SignalAction::SendText(outbound) => {
             let target = SignalTarget::parse(&outbound.target)?;
+            let target_kind = signal_target_kind(&target);
+            let target_value = signal_target_value(&target);
             let timestamp = now_epoch_millis();
+            let raw_content = outbound.content.clone();
+            let span = info_span!(
+                "signal_action_send",
+                signal.action = "send_text",
+                signal.target_kind = target_kind,
+                signal.target = %target_value,
+                signal.timestamp = timestamp,
+                signal.raw_content = %raw_content,
+            );
             let message = DataMessage {
                 body: Some(outbound.content),
                 ..Default::default()
             };
-            send_content_to_target(manager, target, message, timestamp).await
+            send_action_with_trace(manager, span, target, message, timestamp).await
         }
         SignalAction::React {
             target,
@@ -375,7 +406,22 @@ async fn send_signal_action(manager: &mut SignalManager, action: SignalAction) -
             target_sent_timestamp,
             remove,
         } => {
+            let target_kind = signal_target_kind(&target);
+            let target_value = signal_target_value(&target);
             let timestamp = now_epoch_millis();
+            let emoji_for_trace = emoji.clone();
+            let target_author_aci_for_trace = target_author_aci.clone();
+            let span = info_span!(
+                "signal_action_send",
+                signal.action = "react",
+                signal.target_kind = target_kind,
+                signal.target = %target_value,
+                signal.timestamp = timestamp,
+                signal.emoji = %emoji_for_trace,
+                signal.remove = remove,
+                signal.target_sent_timestamp = target_sent_timestamp,
+                signal.target_author_aci = %target_author_aci_for_trace,
+            );
             let message = DataMessage {
                 reaction: Some(Reaction {
                     emoji: Some(emoji),
@@ -385,7 +431,7 @@ async fn send_signal_action(manager: &mut SignalManager, action: SignalAction) -
                 }),
                 ..Default::default()
             };
-            send_content_to_target(manager, target, message, timestamp).await
+            send_action_with_trace(manager, span, target, message, timestamp).await
         }
         SignalAction::Reply {
             target,
@@ -393,7 +439,21 @@ async fn send_signal_action(manager: &mut SignalManager, action: SignalAction) -
             quote_timestamp,
             quote_author_aci,
         } => {
+            let target_kind = signal_target_kind(&target);
+            let target_value = signal_target_value(&target);
             let timestamp = now_epoch_millis();
+            let raw_content = text.clone();
+            let quote_author_aci_for_trace = quote_author_aci.clone();
+            let span = info_span!(
+                "signal_action_send",
+                signal.action = "reply",
+                signal.target_kind = target_kind,
+                signal.target = %target_value,
+                signal.timestamp = timestamp,
+                signal.raw_content = %raw_content,
+                signal.quote_timestamp = quote_timestamp,
+                signal.quote_author_aci = %quote_author_aci_for_trace,
+            );
             let message = DataMessage {
                 body: Some(text),
                 quote: Some(Quote {
@@ -404,10 +464,20 @@ async fn send_signal_action(manager: &mut SignalManager, action: SignalAction) -
                 }),
                 ..Default::default()
             };
-            send_content_to_target(manager, target, message, timestamp).await
+            send_action_with_trace(manager, span, target, message, timestamp).await
         }
         SignalAction::Typing { target, started } => {
+            let target_kind = signal_target_kind(&target);
+            let target_value = signal_target_value(&target);
             let timestamp = now_epoch_millis();
+            let span = info_span!(
+                "signal_action_send",
+                signal.action = "typing",
+                signal.target_kind = target_kind,
+                signal.target = %target_value,
+                signal.timestamp = timestamp,
+                signal.started = started,
+            );
             let typing = TypingMessage {
                 timestamp: Some(timestamp),
                 action: Some(
@@ -423,8 +493,53 @@ async fn send_signal_action(manager: &mut SignalManager, action: SignalAction) -
                     SignalTarget::Direct(_) => None,
                 },
             };
-            send_content_to_target(manager, target, typing, timestamp).await
+            send_action_with_trace(manager, span, target, typing, timestamp).await
         }
+    }
+}
+
+#[allow(clippy::large_futures)]
+async fn send_action_with_trace(
+    manager: &mut SignalManager,
+    span: tracing::Span,
+    target: SignalTarget,
+    message: impl Into<ContentBody>,
+    timestamp: u64,
+) -> Result<()> {
+    async {
+        let result = send_content_to_target(manager, target, message, timestamp).await;
+        match &result {
+            Ok(()) => info!("signal action sent"),
+            Err(error) => warn!(error = %error, "signal action send failed"),
+        }
+        result
+    }
+    .instrument(span)
+    .await
+}
+
+fn signal_content_body_name(content_body: &ContentBody) -> &'static str {
+    match content_body {
+        ContentBody::DataMessage(_) => "data_message",
+        ContentBody::EditMessage(_) => "edit_message",
+        ContentBody::TypingMessage(_) => "typing_message",
+        ContentBody::ReceiptMessage(_) => "receipt_message",
+        ContentBody::SynchronizeMessage(_) => "synchronize_message",
+        _ => "unsupported",
+    }
+}
+
+fn signal_target_kind(target: &SignalTarget) -> &'static str {
+    match target {
+        SignalTarget::Direct(_) => "direct",
+        SignalTarget::Group { .. } => "group",
+    }
+}
+
+fn signal_target_value(target: &SignalTarget) -> String {
+    match target {
+        SignalTarget::Direct(uuid) => uuid.clone(),
+        SignalTarget::Group { master_key } => format!("group:{}", hex::encode(master_key)),
     }
 }
 

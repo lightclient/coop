@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use coop_core::{Tool, ToolContext, ToolDef, ToolExecutor, ToolOutput};
 use serde::Deserialize;
 use tokio::sync::mpsc;
-use tracing::{Instrument, debug, info_span};
+use tracing::{Instrument, debug, info, info_span};
 
 use crate::signal::{SignalAction, SignalTarget};
 
@@ -92,6 +92,17 @@ impl Tool for SignalReactTool {
             let args: ReactArgs = serde_json::from_value(arguments)?;
             let target = SignalTarget::parse(&args.chat_id)?;
 
+            info!(
+                tool.name = "signal_react",
+                signal.action = "react",
+                signal.chat_id = %args.chat_id.as_str(),
+                signal.emoji = %args.emoji.as_str(),
+                signal.target_sent_timestamp = args.message_timestamp,
+                signal.target_author_aci = %args.author_id.as_str(),
+                signal.remove = args.remove,
+                "signal tool action queued"
+            );
+
             let action = SignalAction::React {
                 target,
                 emoji: args.emoji,
@@ -153,6 +164,16 @@ impl Tool for SignalReplyTool {
         async {
             let args: ReplyArgs = serde_json::from_value(arguments)?;
             let target = SignalTarget::parse(&args.chat_id)?;
+
+            info!(
+                tool.name = "signal_reply",
+                signal.action = "reply",
+                signal.chat_id = %args.chat_id.as_str(),
+                signal.raw_content = %args.text.as_str(),
+                signal.quote_timestamp = args.reply_to_timestamp,
+                signal.quote_author_aci = %args.author_id.as_str(),
+                "signal tool action queued"
+            );
 
             let action = SignalAction::Reply {
                 target,

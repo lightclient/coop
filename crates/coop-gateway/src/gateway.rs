@@ -39,9 +39,53 @@ impl Drop for TypingGuard {
     fn drop(&mut self) {
         let notifier = self.notifier.clone();
         let session_key = self.session_key.clone();
+        emit_typing_notifier_event(&session_key, false);
         tokio::spawn(async move {
             notifier.set_typing(&session_key, false).await;
         });
+    }
+}
+
+fn emit_typing_notifier_event(session_key: &SessionKey, started: bool) {
+    let event_name = if started {
+        "typing notifier start"
+    } else {
+        "typing notifier stop"
+    };
+
+    if let Some((target_kind, target)) = signal_target_from_session(session_key) {
+        info!(
+            session = %session_key,
+            signal.started = started,
+            signal.target_kind = target_kind,
+            signal.target = %target,
+            "{event_name}"
+        );
+    } else {
+        info!(
+            session = %session_key,
+            signal.started = started,
+            "{event_name}"
+        );
+    }
+}
+
+fn signal_target_from_session(session_key: &SessionKey) -> Option<(&'static str, String)> {
+    match &session_key.kind {
+        SessionKind::Dm(identity) => {
+            let target = identity.strip_prefix("signal:").unwrap_or(identity);
+            Some(("direct", target.to_string()))
+        }
+        SessionKind::Group(group_id) => {
+            let target = group_id.strip_prefix("signal:").unwrap_or(group_id);
+            let target = if target.starts_with("group:") {
+                target.to_string()
+            } else {
+                format!("group:{target}")
+            };
+            Some(("group", target))
+        }
+        SessionKind::Main | SessionKind::Isolated(_) => None,
     }
 }
 
@@ -116,6 +160,7 @@ impl Gateway {
 
         async {
             let _typing_guard = if let Some(notifier) = &self.typing_notifier {
+                emit_typing_notifier_event(session_key, true);
                 notifier.set_typing(session_key, true).await;
                 Some(TypingGuard::new(notifier.clone(), session_key.clone()))
             } else {

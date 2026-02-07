@@ -5,22 +5,45 @@ use presage::proto::data_message::Quote;
 use presage::proto::{
     AttachmentPointer, EditMessage, Preview, ReceiptMessage, TypingMessage, receipt_message,
 };
+use tracing::{field, info, info_span};
+
+enum ParseOutcome {
+    Parsed(InboundMessage),
+    UnsupportedBodyVariant,
+    DroppedEmpty,
+}
 
 pub(super) fn inbound_from_content(content: &Content) -> Option<InboundMessage> {
     let sender = content.metadata.sender.raw_uuid().to_string();
     let timestamp = content.metadata.timestamp;
+    let content_body = signal_content_body_name(&content.body);
+    let span = info_span!(
+        "signal_inbound_parse",
+        signal.sender = %sender,
+        signal.content_body = content_body,
+        signal.timestamp = timestamp,
+        signal.inbound_kind = field::Empty,
+        signal.chat_id = field::Empty,
+        signal.is_group = field::Empty,
+        signal.message_timestamp = field::Empty,
+        signal.raw_content = field::Empty,
+    );
 
-    match &content.body {
+    let _guard = span.enter();
+
+    let outcome = match &content.body {
         ContentBody::DataMessage(data_message) => {
             inbound_from_data_message(data_message, &sender, timestamp)
+                .map_or(ParseOutcome::DroppedEmpty, ParseOutcome::Parsed)
         }
         ContentBody::EditMessage(edit_message) => {
             inbound_from_edit_message(edit_message, &sender, timestamp)
+                .map_or(ParseOutcome::DroppedEmpty, ParseOutcome::Parsed)
         }
         ContentBody::TypingMessage(typing_message) => {
             let (chat_id, is_group, reply_to) =
                 chat_context_from_typing_message(typing_message, &sender);
-            Some(InboundMessage {
+            ParseOutcome::Parsed(InboundMessage {
                 channel: "signal".to_string(),
                 sender,
                 content: String::new(),
@@ -39,7 +62,7 @@ pub(super) fn inbound_from_content(content: &Content) -> Option<InboundMessage> 
                 None,
                 timestamp,
             );
-            Some(InboundMessage {
+            ParseOutcome::Parsed(InboundMessage {
                 channel: "signal".to_string(),
                 sender: sender.clone(),
                 content: content_text,
@@ -53,8 +76,67 @@ pub(super) fn inbound_from_content(content: &Content) -> Option<InboundMessage> 
         }
         ContentBody::SynchronizeMessage(sync_message) => {
             inbound_from_sync_message(sync_message, &sender, timestamp)
+                .map_or(ParseOutcome::DroppedEmpty, ParseOutcome::Parsed)
         }
-        _ => None,
+        _ => ParseOutcome::UnsupportedBodyVariant,
+    };
+
+    match outcome {
+        ParseOutcome::Parsed(inbound) => {
+            span.record(
+                "signal.inbound_kind",
+                signal_inbound_kind_name(&inbound.kind),
+            );
+            if let Some(chat_id) = inbound.chat_id.as_deref() {
+                span.record("signal.chat_id", chat_id);
+            }
+            span.record("signal.is_group", inbound.is_group);
+            if let Some(message_timestamp) = inbound.message_timestamp {
+                span.record("signal.message_timestamp", message_timestamp);
+            }
+            span.record("signal.raw_content", field::display(&inbound.content));
+
+            info!(
+                signal.inbound_kind = signal_inbound_kind_name(&inbound.kind),
+                signal.chat_id = ?inbound.chat_id,
+                signal.is_group = inbound.is_group,
+                signal.message_timestamp = ?inbound.message_timestamp,
+                signal.raw_content = %inbound.content,
+                "signal inbound parsed and emitted"
+            );
+
+            Some(inbound)
+        }
+        ParseOutcome::UnsupportedBodyVariant => {
+            info!("signal inbound unsupported body variant");
+            None
+        }
+        ParseOutcome::DroppedEmpty => {
+            info!("signal inbound dropped/empty");
+            None
+        }
+    }
+}
+
+fn signal_content_body_name(content_body: &ContentBody) -> &'static str {
+    match content_body {
+        ContentBody::DataMessage(_) => "data_message",
+        ContentBody::EditMessage(_) => "edit_message",
+        ContentBody::TypingMessage(_) => "typing_message",
+        ContentBody::ReceiptMessage(_) => "receipt_message",
+        ContentBody::SynchronizeMessage(_) => "synchronize_message",
+        _ => "unsupported",
+    }
+}
+
+fn signal_inbound_kind_name(kind: &InboundKind) -> &'static str {
+    match kind {
+        InboundKind::Text => "text",
+        InboundKind::Reaction => "reaction",
+        InboundKind::Typing => "typing",
+        InboundKind::Receipt => "receipt",
+        InboundKind::Edit => "edit",
+        InboundKind::Attachment => "attachment",
     }
 }
 

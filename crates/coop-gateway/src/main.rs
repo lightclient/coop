@@ -344,12 +344,15 @@ async fn run_signal_loop(
     loop {
         let inbound = coop_core::Channel::recv(&mut signal_channel).await?;
         if !should_dispatch_signal_message(&inbound) {
+            trace_signal_inbound("signal inbound filtered", &inbound);
             continue;
         }
 
         let Some(target) = signal_reply_target(&inbound) else {
             continue;
         };
+
+        trace_signal_inbound("signal inbound dispatched", &inbound);
 
         let (_decision, response) = router.dispatch_collect_text(&inbound).await?;
         if response.trim().is_empty() {
@@ -371,6 +374,30 @@ async fn run_signal_loop(
 #[cfg(feature = "signal")]
 fn should_dispatch_signal_message(inbound: &InboundMessage) -> bool {
     !matches!(inbound.kind, InboundKind::Typing | InboundKind::Receipt)
+}
+
+#[cfg(feature = "signal")]
+fn trace_signal_inbound(message: &'static str, inbound: &InboundMessage) {
+    tracing::info!(
+        signal.inbound_kind = signal_inbound_kind_name(&inbound.kind),
+        signal.sender = %inbound.sender,
+        signal.chat_id = ?inbound.chat_id,
+        signal.message_timestamp = ?inbound.message_timestamp,
+        signal.raw_content = %inbound.content,
+        "{message}"
+    );
+}
+
+#[cfg(feature = "signal")]
+fn signal_inbound_kind_name(kind: &InboundKind) -> &'static str {
+    match kind {
+        InboundKind::Text => "text",
+        InboundKind::Reaction => "reaction",
+        InboundKind::Typing => "typing",
+        InboundKind::Receipt => "receipt",
+        InboundKind::Edit => "edit",
+        InboundKind::Attachment => "attachment",
+    }
 }
 
 #[cfg(feature = "signal")]
