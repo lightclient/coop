@@ -45,6 +45,52 @@ impl MessageRouter {
             .await?;
         Ok(decision)
     }
+
+    #[allow(dead_code)]
+    pub(crate) async fn dispatch_collect_text(
+        &self,
+        msg: &InboundMessage,
+    ) -> Result<(RouteDecision, String)> {
+        let (event_tx, mut event_rx) = mpsc::channel(64);
+        let router = self.clone();
+        let message = msg.clone();
+
+        let dispatch_task = tokio::spawn(async move { router.dispatch(&message, event_tx).await });
+
+        let mut text = String::new();
+        let mut fallback_assistant = String::new();
+
+        while let Some(event) = event_rx.recv().await {
+            match event {
+                TurnEvent::TextDelta(delta) => {
+                    text.push_str(&delta);
+                }
+                TurnEvent::AssistantMessage(message) => {
+                    if fallback_assistant.is_empty() {
+                        fallback_assistant = message.text();
+                    }
+                }
+                TurnEvent::Error(message) => {
+                    return Err(anyhow::anyhow!(message));
+                }
+                TurnEvent::Done(_) => {
+                    break;
+                }
+                TurnEvent::ToolStart { .. } | TurnEvent::ToolResult { .. } => {}
+            }
+        }
+
+        let decision = match dispatch_task.await {
+            Ok(result) => result?,
+            Err(error) => anyhow::bail!("router task failed: {error}"),
+        };
+
+        if text.is_empty() {
+            text = fallback_assistant;
+        }
+
+        Ok((decision, text))
+    }
 }
 
 pub(crate) fn route_message(msg: &InboundMessage, config: &Config) -> RouteDecision {
@@ -306,5 +352,28 @@ users:
                 .iter()
                 .any(|key| key == &decision.session_key)
         );
+    }
+
+    #[tokio::test]
+    async fn dispatch_collect_text_returns_assistant_reply() {
+        let config = test_config();
+        let provider: Arc<dyn Provider> = Arc::new(FakeProvider::new("hi from fake"));
+        let executor = Arc::new(DefaultExecutor::new());
+        let gateway = Arc::new(Gateway::new(
+            config.clone(),
+            "system".to_string(),
+            provider,
+            executor,
+        ));
+        let router = MessageRouter::new(config, gateway);
+
+        let msg = inbound("signal", "alice-uuid", None, false, None);
+        let (decision, response) = router.dispatch_collect_text(&msg).await.unwrap();
+
+        assert_eq!(
+            decision.session_key.kind,
+            SessionKind::Dm("signal:alice-uuid".to_string())
+        );
+        assert_eq!(response, "hi from fake");
     }
 }
