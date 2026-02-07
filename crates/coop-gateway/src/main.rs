@@ -8,7 +8,7 @@ use chrono::Utc;
 use clap::{Parser, Subcommand};
 use coop_agent::AnthropicProvider;
 use coop_core::tools::DefaultExecutor;
-use coop_core::{InboundMessage, Provider};
+use coop_core::{InboundMessage, OutboundMessage, Provider};
 use coop_ipc::{
     ClientMessage, IpcClient, IpcConnection, IpcServer, PROTOCOL_VERSION, ServerMessage,
     socket_path,
@@ -31,6 +31,9 @@ use tracing::info;
 use crate::config::Config;
 use crate::gateway::Gateway;
 use crate::router::MessageRouter;
+
+#[cfg(feature = "signal")]
+use coop_channels::{SignalChannel, SignalHandle, signal_pair};
 
 #[derive(Parser)]
 #[command(name = "coop", version, about = "🐔 Coop — Personal Agent Gateway")]
@@ -118,8 +121,30 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
     let socket = socket_path(&config.agent.id);
     let server = IpcServer::bind(&socket)?;
 
+    #[cfg(feature = "signal")]
+    let mut _signal_handle: Option<SignalHandle> = None;
+
     if config.channels.signal.is_some() {
-        info!("signal channel configured (link/unlink command available)");
+        info!("signal channel configured");
+
+        #[cfg(feature = "signal")]
+        {
+            let (signal_channel, handle) = signal_pair(64);
+            let router = router.clone();
+            tokio::spawn(async move {
+                if let Err(error) = run_signal_loop(signal_channel, router).await {
+                    tracing::warn!(error = %error, "signal loop stopped");
+                }
+            });
+            _signal_handle = Some(handle);
+        }
+
+        #[cfg(not(feature = "signal"))]
+        {
+            tracing::warn!(
+                "signal is configured, but this binary was built without the 'signal' feature"
+            );
+        }
     }
 
     info!(
@@ -260,6 +285,53 @@ async fn handle_send(
     }
 
     Ok(())
+}
+
+#[cfg(feature = "signal")]
+async fn run_signal_loop(
+    mut signal_channel: SignalChannel,
+    router: Arc<MessageRouter>,
+) -> Result<()> {
+    loop {
+        let inbound = coop_core::Channel::recv(&mut signal_channel).await?;
+        let Some(target) = signal_reply_target(&inbound) else {
+            continue;
+        };
+
+        let (_decision, response) = router.dispatch_collect_text(&inbound).await?;
+        if response.trim().is_empty() {
+            continue;
+        }
+
+        coop_core::Channel::send(
+            &signal_channel,
+            OutboundMessage {
+                channel: "signal".to_string(),
+                target,
+                content: response,
+            },
+        )
+        .await?;
+    }
+}
+
+#[cfg(feature = "signal")]
+fn signal_reply_target(msg: &InboundMessage) -> Option<String> {
+    if let Some(reply_to) = &msg.reply_to {
+        return Some(reply_to.clone());
+    }
+
+    if msg.is_group {
+        return msg.chat_id.as_ref().map(|chat_id| {
+            if chat_id.starts_with("group:") {
+                chat_id.clone()
+            } else {
+                format!("group:{chat_id}")
+            }
+        });
+    }
+
+    Some(msg.sender.clone())
 }
 
 #[allow(clippy::too_many_lines)]
