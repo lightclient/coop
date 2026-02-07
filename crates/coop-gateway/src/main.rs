@@ -196,7 +196,7 @@ async fn handle_client(
                     .collect();
                 connection.send(ServerMessage::Sessions { keys }).await?;
             }
-            ClientMessage::Clear { session } => match gateway.find_session(&session) {
+            ClientMessage::Clear { session } => match gateway.resolve_session(&session) {
                 Some(key) => gateway.clear_session(&key),
                 None => {
                     connection

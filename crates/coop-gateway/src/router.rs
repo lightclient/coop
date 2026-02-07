@@ -51,6 +51,14 @@ pub(crate) fn route_message(msg: &InboundMessage, config: &Config) -> RouteDecis
     let agent_id = config.agent.id.clone();
     let identity = format!("{}:{}", msg.channel, msg.sender);
 
+    let explicit_kind = if msg.channel == "terminal:default" {
+        msg.reply_to
+            .as_deref()
+            .and_then(|session| parse_explicit_session_kind(session, &agent_id))
+    } else {
+        None
+    };
+
     let user_trust = config
         .users
         .iter()
@@ -61,14 +69,21 @@ pub(crate) fn route_message(msg: &InboundMessage, config: &Config) -> RouteDecis
         })
         .map_or(TrustLevel::Public, |user| user.trust);
 
-    let ceiling = if msg.is_group {
+    let group_context = msg.is_group
+        || explicit_kind
+            .as_ref()
+            .is_some_and(|kind| matches!(kind, SessionKind::Group(_)));
+
+    let ceiling = if group_context {
         TrustLevel::Familiar
     } else {
         TrustLevel::Full
     };
     let trust = resolve_trust(user_trust, ceiling);
 
-    let kind = if msg.is_group {
+    let kind = if let Some(kind) = explicit_kind {
+        kind
+    } else if msg.is_group {
         let group_id = msg.chat_id.clone().unwrap_or_else(|| msg.channel.clone());
         let namespaced_group = if group_id.starts_with(&format!("{}:", msg.channel)) {
             group_id
@@ -89,10 +104,37 @@ pub(crate) fn route_message(msg: &InboundMessage, config: &Config) -> RouteDecis
     }
 }
 
+fn parse_explicit_session_kind(session: &str, agent_id: &str) -> Option<SessionKind> {
+    if session == "main" {
+        return Some(SessionKind::Main);
+    }
+
+    let rest = session.strip_prefix(&format!("{agent_id}:"))?;
+
+    if rest == "main" {
+        return Some(SessionKind::Main);
+    }
+
+    if let Some(dm) = rest.strip_prefix("dm:") {
+        return Some(SessionKind::Dm(dm.to_string()));
+    }
+
+    if let Some(group) = rest.strip_prefix("group:") {
+        return Some(SessionKind::Group(group.to_string()));
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::Utc;
+    use coop_core::Provider;
+    use coop_core::fakes::FakeProvider;
+    use coop_core::tools::DefaultExecutor;
+    use std::sync::Arc;
+    use tokio::sync::mpsc;
 
     fn test_config() -> Config {
         serde_yaml::from_str(
@@ -117,6 +159,7 @@ users:
         sender: &str,
         chat_id: Option<&str>,
         is_group: bool,
+        reply_to: Option<&str>,
     ) -> InboundMessage {
         InboundMessage {
             channel: channel.to_string(),
@@ -125,13 +168,13 @@ users:
             chat_id: chat_id.map(ToOwned::to_owned),
             is_group,
             timestamp: Utc::now(),
-            reply_to: None,
+            reply_to: reply_to.map(ToOwned::to_owned),
         }
     }
 
     #[test]
     fn terminal_routes_to_main() {
-        let msg = inbound("terminal:default", "alice", None, false);
+        let msg = inbound("terminal:default", "alice", None, false, None);
         let decision = route_message(&msg, &test_config());
 
         assert_eq!(decision.session_key.agent_id, "reid");
@@ -141,7 +184,7 @@ users:
 
     #[test]
     fn signal_dm_routes_per_sender() {
-        let msg = inbound("signal", "alice-uuid", None, false);
+        let msg = inbound("signal", "alice-uuid", None, false, None);
         let decision = route_message(&msg, &test_config());
 
         assert_eq!(
@@ -153,7 +196,7 @@ users:
 
     #[test]
     fn unknown_signal_user_is_public() {
-        let msg = inbound("signal", "mallory-uuid", None, false);
+        let msg = inbound("signal", "mallory-uuid", None, false, None);
         let decision = route_message(&msg, &test_config());
 
         assert_eq!(
@@ -165,7 +208,7 @@ users:
 
     #[test]
     fn signal_group_routes_to_group_session_with_familiar_ceiling() {
-        let msg = inbound("signal", "alice-uuid", Some("group:deadbeef"), true);
+        let msg = inbound("signal", "alice-uuid", Some("group:deadbeef"), true, None);
         let decision = route_message(&msg, &test_config());
 
         assert_eq!(
@@ -173,5 +216,95 @@ users:
             SessionKind::Group("signal:group:deadbeef".to_string())
         );
         assert_eq!(decision.trust, TrustLevel::Familiar);
+    }
+
+    #[test]
+    fn terminal_reply_to_dm_routes_to_requested_session() {
+        let msg = inbound(
+            "terminal:default",
+            "alice",
+            None,
+            false,
+            Some("reid:dm:signal:bob-uuid"),
+        );
+        let decision = route_message(&msg, &test_config());
+
+        assert_eq!(
+            decision.session_key.kind,
+            SessionKind::Dm("signal:bob-uuid".to_string())
+        );
+        assert_eq!(decision.trust, TrustLevel::Full);
+    }
+
+    #[test]
+    fn terminal_reply_to_group_applies_familiar_ceiling() {
+        let msg = inbound(
+            "terminal:default",
+            "alice",
+            None,
+            false,
+            Some("reid:group:signal:group:deadbeef"),
+        );
+        let decision = route_message(&msg, &test_config());
+
+        assert_eq!(
+            decision.session_key.kind,
+            SessionKind::Group("signal:group:deadbeef".to_string())
+        );
+        assert_eq!(decision.trust, TrustLevel::Familiar);
+    }
+
+    #[test]
+    fn terminal_ignores_invalid_reply_to() {
+        let msg = inbound(
+            "terminal:default",
+            "alice",
+            None,
+            false,
+            Some("other:dm:signal:bob-uuid"),
+        );
+        let decision = route_message(&msg, &test_config());
+
+        assert_eq!(decision.session_key.kind, SessionKind::Main);
+        assert_eq!(decision.trust, TrustLevel::Full);
+    }
+
+    #[tokio::test]
+    async fn dispatch_routes_and_runs_turn() {
+        let config = test_config();
+        let provider: Arc<dyn Provider> = Arc::new(FakeProvider::new("hello from fake"));
+        let executor = Arc::new(DefaultExecutor::new());
+        let gateway = Arc::new(Gateway::new(
+            config.clone(),
+            "system".to_string(),
+            provider,
+            executor,
+        ));
+        let router = MessageRouter::new(config, gateway.clone());
+
+        let msg = inbound("signal", "bob-uuid", None, false, None);
+        let (event_tx, mut event_rx) = mpsc::channel(32);
+
+        let decision = router.dispatch(&msg, event_tx).await.unwrap();
+        assert_eq!(
+            decision.session_key.kind,
+            SessionKind::Dm("signal:bob-uuid".to_string())
+        );
+
+        let mut saw_done = false;
+        while let Some(event) = event_rx.recv().await {
+            if matches!(event, TurnEvent::Done(_)) {
+                saw_done = true;
+                break;
+            }
+        }
+
+        assert!(saw_done);
+        assert!(
+            gateway
+                .list_sessions()
+                .iter()
+                .any(|key| key == &decision.session_key)
+        );
     }
 }

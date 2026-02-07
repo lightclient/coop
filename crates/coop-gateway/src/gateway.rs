@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tracing::error;
+use uuid::Uuid;
 
 use crate::config::Config;
 
@@ -45,20 +46,14 @@ impl Gateway {
     pub(crate) fn list_sessions(&self) -> Vec<SessionKey> {
         let sessions = self.sessions.lock().unwrap();
         let mut keys: Vec<_> = sessions.keys().cloned().collect();
+        keys.push(self.default_session_key());
         keys.sort_by_cached_key(ToString::to_string);
+        keys.dedup_by(|a, b| a.to_string() == b.to_string());
         keys
     }
 
-    pub(crate) fn find_session(&self, session: &str) -> Option<SessionKey> {
-        if session == "main" {
-            return Some(self.default_session_key());
-        }
-
-        let sessions = self.sessions.lock().unwrap();
-        sessions
-            .keys()
-            .find(|key| key.to_string() == session)
-            .cloned()
+    pub(crate) fn resolve_session(&self, session: &str) -> Option<SessionKey> {
+        parse_session_key(session, &self.config.agent.id)
     }
 
     fn tool_context(&self, session_key: &SessionKey, trust: TrustLevel) -> ToolContext {
@@ -251,5 +246,92 @@ impl Gateway {
         }
 
         Ok((response, usage))
+    }
+}
+
+fn parse_session_key(session: &str, agent_id: &str) -> Option<SessionKey> {
+    if session == "main" {
+        return Some(SessionKey {
+            agent_id: agent_id.to_string(),
+            kind: SessionKind::Main,
+        });
+    }
+
+    let rest = session.strip_prefix(&format!("{agent_id}:"))?;
+    if rest == "main" {
+        return Some(SessionKey {
+            agent_id: agent_id.to_string(),
+            kind: SessionKind::Main,
+        });
+    }
+
+    if let Some(dm) = rest.strip_prefix("dm:") {
+        return Some(SessionKey {
+            agent_id: agent_id.to_string(),
+            kind: SessionKind::Dm(dm.to_string()),
+        });
+    }
+
+    if let Some(group) = rest.strip_prefix("group:") {
+        return Some(SessionKey {
+            agent_id: agent_id.to_string(),
+            kind: SessionKind::Group(group.to_string()),
+        });
+    }
+
+    if let Some(isolated) = rest.strip_prefix("isolated:") {
+        let uuid = Uuid::parse_str(isolated).ok()?;
+        return Some(SessionKey {
+            agent_id: agent_id.to_string(),
+            kind: SessionKind::Isolated(uuid),
+        });
+    }
+
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_main_alias() {
+        let key = parse_session_key("main", "coop").unwrap();
+        assert_eq!(
+            key,
+            SessionKey {
+                agent_id: "coop".to_string(),
+                kind: SessionKind::Main,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_dm_session() {
+        let key = parse_session_key("coop:dm:signal:alice-uuid", "coop").unwrap();
+        assert_eq!(
+            key,
+            SessionKey {
+                agent_id: "coop".to_string(),
+                kind: SessionKind::Dm("signal:alice-uuid".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_group_session() {
+        let key = parse_session_key("coop:group:signal:group:deadbeef", "coop").unwrap();
+        assert_eq!(
+            key,
+            SessionKey {
+                agent_id: "coop".to_string(),
+                kind: SessionKind::Group("signal:group:deadbeef".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_rejects_other_agent() {
+        assert!(parse_session_key("other:main", "coop").is_none());
     }
 }

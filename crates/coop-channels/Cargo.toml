@@ -9,12 +9,13 @@ workspace = true
 
 [features]
 default = []
-signal = []
+signal = ["dep:hex"]
 
 [dependencies]
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 coop-core = { path = "../coop-core" }
+hex = { workspace = true, optional = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
