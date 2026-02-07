@@ -106,9 +106,9 @@ impl SignalChannel {
         )
         .await;
 
-        provisioning_result?;
-
         let manager = manager.context("failed to complete signal linking")?;
+
+        provisioning_result?;
 
         tracing::info!(
             service_ids = %manager.registration_data().service_ids,
@@ -139,34 +139,47 @@ fn start_signal_runtime(
     outbound_rx: mpsc::Receiver<OutboundMessage>,
     health: HealthState,
 ) {
-    std::thread::spawn(move || {
-        let runtime = match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(runtime) => runtime,
-            Err(error) => {
-                set_health(
-                    &health,
-                    ChannelHealth::Unhealthy(format!("failed to start signal runtime: {error}")),
-                );
-                return;
-            }
-        };
+    std::thread::Builder::new()
+        .name("signal-runtime".to_string())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    set_health(
+                        &health,
+                        ChannelHealth::Unhealthy(format!(
+                            "failed to start signal runtime: {error}"
+                        )),
+                    );
+                    return;
+                }
+            };
 
-        let local = tokio::task::LocalSet::new();
-        local.block_on(&runtime, async move {
-            let receive_manager = manager.clone();
-            let receive_health = health.clone();
-            let send_health = health.clone();
+            let local = tokio::task::LocalSet::new();
+            local.block_on(&runtime, async move {
+                let receive_manager = manager.clone();
+                let receive_health = health.clone();
+                let send_health = health.clone();
 
-            let receive_task =
-                tokio::task::spawn_local(receive_task(receive_manager, inbound_tx, receive_health));
-            let send_task = tokio::task::spawn_local(send_task(manager, outbound_rx, send_health));
+                let receive_task = tokio::task::spawn_local(Box::pin(receive_task(
+                    receive_manager,
+                    inbound_tx,
+                    receive_health,
+                )));
+                let send_task = tokio::task::spawn_local(Box::pin(send_task(
+                    manager,
+                    outbound_rx,
+                    send_health,
+                )));
 
-            let _ = futures::future::join(receive_task, send_task).await;
-        });
-    });
+                let _ = futures::future::join(receive_task, send_task).await;
+            });
+        })
+        .expect("failed to spawn signal runtime thread");
 }
 
 #[async_trait]
@@ -203,7 +216,7 @@ async fn receive_task(
     let mut backoff = Duration::from_secs(1);
 
     loop {
-        match manager.receive_messages().await {
+        match Box::pin(manager.receive_messages()).await {
             Ok(messages) => {
                 set_health(&health, ChannelHealth::Healthy);
                 backoff = Duration::from_secs(1);
@@ -280,14 +293,12 @@ async fn send_outbound_message(
         SignalTarget::Direct(uuid_str) => {
             let uuid = Uuid::parse_str(&uuid_str)
                 .with_context(|| format!("invalid signal uuid target: {uuid_str}"))?;
-            manager
-                .send_message(ServiceId::Aci(uuid.into()), message, timestamp)
+            Box::pin(manager.send_message(ServiceId::Aci(uuid.into()), message, timestamp))
                 .await
                 .context("failed to send direct signal message")?;
         }
         SignalTarget::Group { master_key } => {
-            manager
-                .send_message_to_group(&master_key, message, timestamp)
+            Box::pin(manager.send_message_to_group(&master_key, message, timestamp))
                 .await
                 .context("failed to send group signal message")?;
         }
