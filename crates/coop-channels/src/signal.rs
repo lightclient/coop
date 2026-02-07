@@ -1,30 +1,61 @@
+mod inbound;
+#[cfg(test)]
+mod target_tests;
+
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
-use coop_core::{Channel, ChannelHealth, InboundMessage, OutboundMessage};
+use coop_core::{
+    Channel, ChannelHealth, InboundMessage, OutboundMessage, SessionKey, SessionKind,
+    TypingNotifier,
+};
 use futures::StreamExt;
-use presage::libsignal_service::content::{Content, ContentBody, DataMessage};
+use inbound::inbound_from_content;
+use presage::libsignal_service::content::{ContentBody, DataMessage};
 use presage::libsignal_service::prelude::Uuid;
 use presage::libsignal_service::protocol::ServiceId;
 use presage::manager::Registered;
 use presage::model::identity::OnNewIdentity;
 use presage::model::messages::Received;
+use presage::proto::data_message::{Quote, Reaction};
+use presage::proto::{TypingMessage, typing_message};
 use presage::{Manager, store::StateStore};
 use presage_store_sqlite::{SqliteConnectOptions, SqliteStore};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, UNIX_EPOCH};
 use tokio::sync::mpsc;
-use tracing::warn;
+use tracing::{debug, warn};
 
 type SignalManager = Manager<SqliteStore, Registered>;
 type HealthState = Arc<Mutex<ChannelHealth>>;
+
+#[derive(Debug, Clone)]
+pub enum SignalAction {
+    SendText(OutboundMessage),
+    React {
+        target: SignalTarget,
+        emoji: String,
+        target_author_aci: String,
+        target_sent_timestamp: u64,
+        remove: bool,
+    },
+    Reply {
+        target: SignalTarget,
+        text: String,
+        quote_timestamp: u64,
+        quote_author_aci: String,
+    },
+    Typing {
+        target: SignalTarget,
+        started: bool,
+    },
+}
 
 #[allow(missing_debug_implementations)]
 pub struct SignalChannel {
     id: String,
     inbound_rx: mpsc::Receiver<InboundMessage>,
-    outbound_tx: mpsc::Sender<OutboundMessage>,
+    action_tx: mpsc::Sender<SignalAction>,
     health: HealthState,
 }
 
@@ -56,22 +87,65 @@ impl SignalTarget {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct SignalTypingNotifier {
+    action_tx: mpsc::Sender<SignalAction>,
+}
+
+impl SignalTypingNotifier {
+    pub fn new(action_tx: mpsc::Sender<SignalAction>) -> Self {
+        Self { action_tx }
+    }
+}
+
+#[async_trait]
+impl TypingNotifier for SignalTypingNotifier {
+    async fn set_typing(&self, session_key: &SessionKey, started: bool) {
+        let target = match &session_key.kind {
+            SessionKind::Dm(identity) => {
+                let identity = identity.strip_prefix("signal:").unwrap_or(identity);
+                match SignalTarget::parse(identity) {
+                    Ok(target) => target,
+                    Err(_) => return,
+                }
+            }
+            SessionKind::Group(group_id) => {
+                let group_id = group_id.strip_prefix("signal:").unwrap_or(group_id);
+                match SignalTarget::parse(group_id) {
+                    Ok(target) => target,
+                    Err(_) => return,
+                }
+            }
+            SessionKind::Main | SessionKind::Isolated(_) => return,
+        };
+
+        let _ = self
+            .action_tx
+            .send(SignalAction::Typing { target, started })
+            .await;
+    }
+}
+
 impl SignalChannel {
     pub async fn connect(db_path: impl AsRef<Path>) -> Result<Self> {
         let manager = load_registered_manager(db_path.as_ref()).await?;
 
         let (inbound_tx, inbound_rx) = mpsc::channel(64);
-        let (outbound_tx, outbound_rx) = mpsc::channel(64);
+        let (action_tx, action_rx) = mpsc::channel(64);
         let health = Arc::new(Mutex::new(ChannelHealth::Healthy));
 
-        start_signal_runtime(manager, inbound_tx, outbound_rx, health.clone());
+        start_signal_runtime(manager, inbound_tx, action_rx, health.clone());
 
         Ok(Self {
             id: "signal".to_string(),
             inbound_rx,
-            outbound_tx,
+            action_tx,
             health,
         })
+    }
+
+    pub fn action_sender(&self) -> mpsc::Sender<SignalAction> {
+        self.action_tx.clone()
     }
 
     pub async fn link_device<F>(
@@ -107,7 +181,6 @@ impl SignalChannel {
         .await;
 
         let manager = manager.context("failed to complete signal linking")?;
-
         provisioning_result?;
 
         tracing::info!(
@@ -136,7 +209,7 @@ impl SignalChannel {
 fn start_signal_runtime(
     manager: SignalManager,
     inbound_tx: mpsc::Sender<InboundMessage>,
-    outbound_rx: mpsc::Receiver<OutboundMessage>,
+    action_rx: mpsc::Receiver<SignalAction>,
     health: HealthState,
 ) {
     std::thread::Builder::new()
@@ -170,11 +243,8 @@ fn start_signal_runtime(
                     inbound_tx,
                     receive_health,
                 )));
-                let send_task = tokio::task::spawn_local(Box::pin(send_task(
-                    manager,
-                    outbound_rx,
-                    send_health,
-                )));
+                let send_task =
+                    tokio::task::spawn_local(Box::pin(send_task(manager, action_rx, send_health)));
 
                 let _ = futures::future::join(receive_task, send_task).await;
             });
@@ -196,10 +266,10 @@ impl Channel for SignalChannel {
     }
 
     async fn send(&self, msg: OutboundMessage) -> Result<()> {
-        self.outbound_tx
-            .send(msg)
+        self.action_tx
+            .send(SignalAction::SendText(msg))
             .await
-            .map_err(|_| anyhow::anyhow!("signal outbound channel closed"))
+            .map_err(|_| anyhow::anyhow!("signal action channel closed"))
     }
 
     async fn probe(&self) -> ChannelHealth {
@@ -225,9 +295,17 @@ async fn receive_task(
                 while let Some(received) = messages.next().await {
                     if let Received::Content(content) = received
                         && let Some(inbound) = inbound_from_content(&content)
-                        && inbound_tx.send(inbound).await.is_err()
                     {
-                        return;
+                        debug!(
+                            kind = ?inbound.kind,
+                            sender = %inbound.sender,
+                            chat_id = ?inbound.chat_id,
+                            "received signal inbound"
+                        );
+
+                        if inbound_tx.send(inbound).await.is_err() {
+                            return;
+                        }
                     }
                 }
 
@@ -254,14 +332,16 @@ async fn receive_task(
 #[allow(clippy::large_futures)]
 async fn send_task(
     mut manager: SignalManager,
-    mut outbound_rx: mpsc::Receiver<OutboundMessage>,
+    mut action_rx: mpsc::Receiver<SignalAction>,
     health: HealthState,
 ) {
-    while let Some(outbound) = outbound_rx.recv().await {
-        match send_outbound_message(&mut manager, outbound).await {
+    while let Some(action) = action_rx.recv().await {
+        debug!(action = ?action, "sending signal action");
+
+        match send_signal_action(&mut manager, action).await {
             Ok(()) => set_health(&health, ChannelHealth::Healthy),
             Err(error) => {
-                warn!(error = %error, "failed to send signal message");
+                warn!(error = %error, "failed to send signal action");
                 set_health(
                     &health,
                     ChannelHealth::Degraded(format!("signal send failed: {error}")),
@@ -277,18 +357,84 @@ async fn send_task(
 }
 
 #[allow(clippy::large_futures)]
-async fn send_outbound_message(
+async fn send_signal_action(manager: &mut SignalManager, action: SignalAction) -> Result<()> {
+    match action {
+        SignalAction::SendText(outbound) => {
+            let target = SignalTarget::parse(&outbound.target)?;
+            let timestamp = now_epoch_millis();
+            let message = DataMessage {
+                body: Some(outbound.content),
+                ..Default::default()
+            };
+            send_content_to_target(manager, target, message, timestamp).await
+        }
+        SignalAction::React {
+            target,
+            emoji,
+            target_author_aci,
+            target_sent_timestamp,
+            remove,
+        } => {
+            let timestamp = now_epoch_millis();
+            let message = DataMessage {
+                reaction: Some(Reaction {
+                    emoji: Some(emoji),
+                    remove: Some(remove),
+                    target_author_aci: Some(target_author_aci),
+                    target_sent_timestamp: Some(target_sent_timestamp),
+                }),
+                ..Default::default()
+            };
+            send_content_to_target(manager, target, message, timestamp).await
+        }
+        SignalAction::Reply {
+            target,
+            text,
+            quote_timestamp,
+            quote_author_aci,
+        } => {
+            let timestamp = now_epoch_millis();
+            let message = DataMessage {
+                body: Some(text),
+                quote: Some(Quote {
+                    id: Some(quote_timestamp),
+                    author_aci: Some(quote_author_aci),
+                    text: None,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            send_content_to_target(manager, target, message, timestamp).await
+        }
+        SignalAction::Typing { target, started } => {
+            let timestamp = now_epoch_millis();
+            let typing = TypingMessage {
+                timestamp: Some(timestamp),
+                action: Some(
+                    if started {
+                        typing_message::Action::Started
+                    } else {
+                        typing_message::Action::Stopped
+                    }
+                    .into(),
+                ),
+                group_id: match &target {
+                    SignalTarget::Group { master_key } => Some(master_key.clone()),
+                    SignalTarget::Direct(_) => None,
+                },
+            };
+            send_content_to_target(manager, target, typing, timestamp).await
+        }
+    }
+}
+
+#[allow(clippy::large_futures)]
+async fn send_content_to_target(
     manager: &mut SignalManager,
-    outbound: OutboundMessage,
+    target: SignalTarget,
+    message: impl Into<ContentBody>,
+    timestamp: u64,
 ) -> Result<()> {
-    let target = SignalTarget::parse(&outbound.target)?;
-    let timestamp = now_epoch_millis();
-
-    let message = DataMessage {
-        body: Some(outbound.content),
-        ..Default::default()
-    };
-
     match target {
         SignalTarget::Direct(uuid_str) => {
             let uuid = Uuid::parse_str(&uuid_str)
@@ -305,52 +451,6 @@ async fn send_outbound_message(
     }
 
     Ok(())
-}
-
-fn inbound_from_content(content: &Content) -> Option<InboundMessage> {
-    let data_message = extract_supported_data_message(&content.body)?;
-    let text = data_message.body.as_deref()?.trim();
-
-    if text.is_empty() {
-        return None;
-    }
-
-    let sender = content.metadata.sender.raw_uuid().to_string();
-    let (chat_id, is_group, reply_to) = if let Some(master_key) = data_message
-        .group_v2
-        .as_ref()
-        .and_then(|group| group.master_key.as_ref())
-    {
-        let target = format!("group:{}", hex::encode(master_key));
-        (Some(target.clone()), true, Some(target))
-    } else {
-        (None, false, Some(sender.clone()))
-    };
-
-    Some(InboundMessage {
-        channel: "signal".to_string(),
-        sender,
-        content: text.to_string(),
-        chat_id,
-        is_group,
-        timestamp: from_epoch_millis(content.metadata.timestamp),
-        reply_to,
-    })
-}
-
-fn extract_supported_data_message(content: &ContentBody) -> Option<&DataMessage> {
-    match content {
-        ContentBody::DataMessage(data_message) => Some(data_message),
-        ContentBody::SynchronizeMessage(sync) => sync.sent.as_ref()?.message.as_ref(),
-        _ => None,
-    }
-}
-
-fn from_epoch_millis(timestamp: u64) -> DateTime<Utc> {
-    i64::try_from(timestamp)
-        .ok()
-        .and_then(DateTime::<Utc>::from_timestamp_millis)
-        .unwrap_or_else(Utc::now)
 }
 
 fn now_epoch_millis() -> u64 {
@@ -388,48 +488,4 @@ async fn open_store(db_path: &Path) -> Result<SqliteStore> {
 
 fn set_health(health: &HealthState, state: ChannelHealth) {
     *health.lock().unwrap() = state;
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parse_direct_target() {
-        let target = SignalTarget::parse("alice-uuid").unwrap();
-        assert_eq!(target, SignalTarget::Direct("alice-uuid".to_string()));
-    }
-
-    #[test]
-    fn parse_prefixed_direct_target() {
-        let target = SignalTarget::parse("signal:alice-uuid").unwrap();
-        assert_eq!(target, SignalTarget::Direct("alice-uuid".to_string()));
-    }
-
-    #[test]
-    fn parse_group_target() {
-        let target = SignalTarget::parse(
-            "group:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
-        )
-        .unwrap();
-        assert_eq!(
-            target,
-            SignalTarget::Group {
-                master_key: hex::decode(
-                    "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
-                )
-                .unwrap(),
-            }
-        );
-    }
-
-    #[test]
-    fn reject_invalid_group_key() {
-        assert!(SignalTarget::parse("group:not-hex").is_err());
-    }
-
-    #[test]
-    fn reject_wrong_group_key_size() {
-        assert!(SignalTarget::parse("group:deadbeef").is_err());
-    }
 }

@@ -38,6 +38,17 @@ impl Default for DefaultExecutor {
     }
 }
 
+#[allow(missing_debug_implementations)]
+pub struct CompositeExecutor {
+    executors: Vec<Box<dyn ToolExecutor>>,
+}
+
+impl CompositeExecutor {
+    pub fn new(executors: Vec<Box<dyn ToolExecutor>>) -> Self {
+        Self { executors }
+    }
+}
+
 #[async_trait]
 impl ToolExecutor for DefaultExecutor {
     async fn execute(
@@ -62,5 +73,77 @@ impl ToolExecutor for DefaultExecutor {
 
     fn tools(&self) -> Vec<ToolDef> {
         self.tools.iter().map(|t| t.definition()).collect()
+    }
+}
+
+#[async_trait]
+impl ToolExecutor for CompositeExecutor {
+    async fn execute(
+        &self,
+        name: &str,
+        arguments: serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<ToolOutput> {
+        for executor in &self.executors {
+            if executor.tools().iter().any(|tool| tool.name == name) {
+                return executor.execute(name, arguments, ctx).await;
+            }
+        }
+        Ok(ToolOutput::error(format!("unknown tool: {name}")))
+    }
+
+    fn tools(&self) -> Vec<ToolDef> {
+        self.executors.iter().flat_map(|e| e.tools()).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fakes::{FakeTool, SimpleExecutor};
+    use crate::types::TrustLevel;
+    use std::path::PathBuf;
+
+    fn tool_context() -> ToolContext {
+        ToolContext {
+            session_id: "session".to_string(),
+            trust: TrustLevel::Full,
+            workspace: PathBuf::from("."),
+        }
+    }
+
+    #[tokio::test]
+    async fn composite_executor_routes_to_matching_executor() {
+        let mut first = SimpleExecutor::new();
+        first.add(Box::new(FakeTool::new("first_tool", "first output")));
+
+        let mut second = SimpleExecutor::new();
+        second.add(Box::new(FakeTool::new("second_tool", "second output")));
+
+        let executor = CompositeExecutor::new(vec![Box::new(first), Box::new(second)]);
+
+        let first_output = executor
+            .execute("first_tool", serde_json::json!({}), &tool_context())
+            .await
+            .unwrap();
+        assert_eq!(first_output.content, "first output");
+
+        let second_output = executor
+            .execute("second_tool", serde_json::json!({}), &tool_context())
+            .await
+            .unwrap();
+        assert_eq!(second_output.content, "second output");
+    }
+
+    #[tokio::test]
+    async fn composite_executor_returns_unknown_for_missing_tool() {
+        let executor = CompositeExecutor::new(Vec::new());
+        let output = executor
+            .execute("missing", serde_json::json!({}), &tool_context())
+            .await
+            .unwrap();
+
+        assert!(output.is_error);
+        assert_eq!(output.content, "unknown tool: missing");
     }
 }

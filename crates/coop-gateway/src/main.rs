@@ -10,8 +10,10 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::Parser;
 use coop_agent::AnthropicProvider;
+#[cfg(feature = "signal")]
+use coop_core::tools::CompositeExecutor;
 use coop_core::tools::DefaultExecutor;
-use coop_core::{InboundMessage, Provider, TurnEvent};
+use coop_core::{InboundKind, InboundMessage, Provider, TurnEvent};
 use coop_ipc::{
     ClientMessage, IpcClient, IpcConnection, IpcServer, PROTOCOL_VERSION, ServerMessage,
     socket_path,
@@ -38,7 +40,7 @@ use crate::tui_helpers::{
 };
 
 #[cfg(feature = "signal")]
-use coop_channels::SignalChannel;
+use coop_channels::{SignalChannel, SignalToolExecutor, SignalTypingNotifier};
 
 // Component indices — layout: header(0), chat(1), spacer(2), status(3), editor(4), footer(5)
 const CHAT_IDX: usize = 1;
@@ -101,24 +103,11 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
         AnthropicProvider::from_env(&config.agent.model)
             .context("failed to initialize Anthropic provider")?,
     );
-    let executor = Arc::new(DefaultExecutor::new());
-    let gateway = Arc::new(Gateway::new(
-        config.clone(),
-        system_prompt,
-        provider,
-        executor,
-    ));
-    let router = Arc::new(MessageRouter::new(config.clone(), gateway.clone()));
 
-    let working_dir = resolve_working_dir();
-
-    println!(
-        "{}\n",
-        format_tui_welcome(env!("CARGO_PKG_VERSION"), &config.agent.model, &working_dir)
-    );
-
-    let socket = socket_path(&config.agent.id);
-    let server = IpcServer::bind(&socket)?;
+    #[cfg(feature = "signal")]
+    let mut signal_channel: Option<SignalChannel> = None;
+    #[cfg(feature = "signal")]
+    let mut signal_action_tx: Option<mpsc::Sender<coop_channels::SignalAction>> = None;
 
     if let Some(signal) = &config.channels.signal {
         #[cfg(feature = "signal")]
@@ -127,13 +116,9 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
             info!(db_path = %db_path.display(), "signal channel configured");
 
             match SignalChannel::connect(&db_path).await {
-                Ok(signal_channel) => {
-                    let router = router.clone();
-                    tokio::spawn(async move {
-                        if let Err(error) = run_signal_loop(signal_channel, router).await {
-                            tracing::warn!(error = %error, "signal loop stopped");
-                        }
-                    });
+                Ok(channel) => {
+                    signal_action_tx = Some(channel.action_sender());
+                    signal_channel = Some(channel);
                 }
                 Err(error) => {
                     tracing::warn!(
@@ -152,6 +137,61 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
                 "signal is configured, but this binary was built without the 'signal' feature"
             );
         }
+    }
+
+    let default_executor = DefaultExecutor::new();
+
+    #[cfg(feature = "signal")]
+    let executor: Arc<dyn coop_core::ToolExecutor> =
+        if let Some(action_tx) = signal_action_tx.clone() {
+            Arc::new(CompositeExecutor::new(vec![
+                Box::new(default_executor),
+                Box::new(SignalToolExecutor::new(action_tx)),
+            ]))
+        } else {
+            Arc::new(default_executor)
+        };
+
+    #[cfg(not(feature = "signal"))]
+    let executor: Arc<dyn coop_core::ToolExecutor> = Arc::new(default_executor);
+
+    #[cfg(feature = "signal")]
+    let typing_notifier: Option<Arc<dyn coop_core::TypingNotifier>> =
+        signal_action_tx.as_ref().map(|action_tx| {
+            Arc::new(SignalTypingNotifier::new(action_tx.clone()))
+                as Arc<dyn coop_core::TypingNotifier>
+        });
+
+    #[cfg(not(feature = "signal"))]
+    let typing_notifier: Option<Arc<dyn coop_core::TypingNotifier>> = None;
+
+    let gateway = Arc::new(Gateway::new(
+        config.clone(),
+        system_prompt,
+        provider,
+        executor,
+        typing_notifier,
+    ));
+    let router = Arc::new(MessageRouter::new(config.clone(), gateway.clone()));
+
+    let working_dir = resolve_working_dir();
+
+    println!(
+        "{}\n",
+        format_tui_welcome(env!("CARGO_PKG_VERSION"), &config.agent.model, &working_dir)
+    );
+
+    let socket = socket_path(&config.agent.id);
+    let server = IpcServer::bind(&socket)?;
+
+    #[cfg(feature = "signal")]
+    if let Some(signal_channel) = signal_channel {
+        let router = router.clone();
+        tokio::spawn(async move {
+            if let Err(error) = run_signal_loop(signal_channel, router).await {
+                tracing::warn!(error = %error, "signal loop stopped");
+            }
+        });
     }
 
     info!(
@@ -260,6 +300,8 @@ async fn handle_send(
         is_group: false,
         timestamp: Utc::now(),
         reply_to: Some(session.clone()),
+        kind: InboundKind::Text,
+        message_timestamp: None,
     };
 
     let (event_tx, mut event_rx) = mpsc::channel(64);
@@ -301,6 +343,10 @@ async fn run_signal_loop(
 ) -> Result<()> {
     loop {
         let inbound = coop_core::Channel::recv(&mut signal_channel).await?;
+        if !should_dispatch_signal_message(&inbound) {
+            continue;
+        }
+
         let Some(target) = signal_reply_target(&inbound) else {
             continue;
         };
@@ -320,6 +366,11 @@ async fn run_signal_loop(
         )
         .await?;
     }
+}
+
+#[cfg(feature = "signal")]
+fn should_dispatch_signal_message(inbound: &InboundMessage) -> bool {
+    !matches!(inbound.kind, InboundKind::Typing | InboundKind::Receipt)
 }
 
 #[cfg(feature = "signal")]
@@ -373,6 +424,7 @@ async fn cmd_chat(config_path: Option<&str>) -> Result<()> {
         system_prompt,
         provider,
         executor,
+        None,
     ));
 
     let session_key = gateway.default_session_key();
@@ -891,5 +943,39 @@ fn clear_chat(tui: &mut Tui) {
         .and_then(|a| a.downcast_mut::<Container>());
     if let Some(c) = chat {
         c.clear();
+    }
+}
+
+#[cfg(all(test, feature = "signal"))]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    fn inbound(kind: InboundKind) -> InboundMessage {
+        InboundMessage {
+            channel: "signal".to_string(),
+            sender: "alice-uuid".to_string(),
+            content: "hello".to_string(),
+            chat_id: None,
+            is_group: false,
+            timestamp: Utc::now(),
+            reply_to: Some("alice-uuid".to_string()),
+            kind,
+            message_timestamp: Some(1234),
+        }
+    }
+
+    #[test]
+    fn signal_loop_filters_typing_and_receipts() {
+        assert!(!should_dispatch_signal_message(&inbound(
+            InboundKind::Typing
+        )));
+        assert!(!should_dispatch_signal_message(&inbound(
+            InboundKind::Receipt
+        )));
+        assert!(should_dispatch_signal_message(&inbound(InboundKind::Text)));
+        assert!(should_dispatch_signal_message(&inbound(
+            InboundKind::Reaction
+        )));
     }
 }

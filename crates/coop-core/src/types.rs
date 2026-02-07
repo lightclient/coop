@@ -445,6 +445,18 @@ pub enum SessionKind {
 // Channel types
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InboundKind {
+    #[default]
+    Text,
+    Reaction,
+    Typing,
+    Receipt,
+    Edit,
+    Attachment,
+}
+
 /// An inbound message from a channel.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InboundMessage {
@@ -456,6 +468,10 @@ pub struct InboundMessage {
     pub timestamp: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_to: Option<String>,
+    #[serde(default)]
+    pub kind: InboundKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_timestamp: Option<u64>,
 }
 
 /// An outbound message to be sent via a channel.
@@ -595,6 +611,49 @@ mod tests {
         assert!(TrustLevel::Full < TrustLevel::Inner);
         assert!(TrustLevel::Inner < TrustLevel::Familiar);
         assert!(TrustLevel::Familiar < TrustLevel::Public);
+    }
+
+    #[test]
+    fn inbound_kind_defaults_to_text() {
+        assert_eq!(InboundKind::default(), InboundKind::Text);
+    }
+
+    #[test]
+    fn inbound_message_serialization_roundtrip_new_fields() {
+        let message = InboundMessage {
+            channel: "signal".to_string(),
+            sender: "alice-uuid".to_string(),
+            content: "hello".to_string(),
+            chat_id: Some("group:deadbeef".to_string()),
+            is_group: true,
+            timestamp: Utc::now(),
+            reply_to: Some("group:deadbeef".to_string()),
+            kind: InboundKind::Reaction,
+            message_timestamp: Some(1234),
+        };
+
+        let json = serde_json::to_string(&message).unwrap();
+        let roundtrip: InboundMessage = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(roundtrip.kind, InboundKind::Reaction);
+        assert_eq!(roundtrip.message_timestamp, Some(1234));
+    }
+
+    #[test]
+    fn inbound_message_deserializes_missing_kind_fields() {
+        let json = serde_json::json!({
+            "channel": "signal",
+            "sender": "alice-uuid",
+            "content": "hello",
+            "chat_id": null,
+            "is_group": false,
+            "timestamp": Utc::now(),
+            "reply_to": null
+        });
+
+        let parsed: InboundMessage = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.kind, InboundKind::Text);
+        assert_eq!(parsed.message_timestamp, None);
     }
 
     #[test]

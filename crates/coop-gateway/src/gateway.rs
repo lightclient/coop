@@ -1,7 +1,7 @@
 use anyhow::Result;
 use coop_core::{
     Message, Provider, SessionKey, SessionKind, ToolContext, ToolDef, ToolExecutor, TrustLevel,
-    TurnConfig, TurnEvent, TurnResult, Usage,
+    TurnConfig, TurnEvent, TurnResult, TypingNotifier, Usage,
 };
 use futures::StreamExt;
 use std::collections::HashMap;
@@ -17,7 +17,32 @@ pub(crate) struct Gateway {
     system_prompt: String,
     provider: Arc<dyn Provider>,
     executor: Arc<dyn ToolExecutor>,
+    typing_notifier: Option<Arc<dyn TypingNotifier>>,
     sessions: Mutex<HashMap<SessionKey, Vec<Message>>>,
+}
+
+struct TypingGuard {
+    notifier: Arc<dyn TypingNotifier>,
+    session_key: SessionKey,
+}
+
+impl TypingGuard {
+    fn new(notifier: Arc<dyn TypingNotifier>, session_key: SessionKey) -> Self {
+        Self {
+            notifier,
+            session_key,
+        }
+    }
+}
+
+impl Drop for TypingGuard {
+    fn drop(&mut self) {
+        let notifier = self.notifier.clone();
+        let session_key = self.session_key.clone();
+        tokio::spawn(async move {
+            notifier.set_typing(&session_key, false).await;
+        });
+    }
 }
 
 impl Gateway {
@@ -26,12 +51,14 @@ impl Gateway {
         system_prompt: String,
         provider: Arc<dyn Provider>,
         executor: Arc<dyn ToolExecutor>,
+        typing_notifier: Option<Arc<dyn TypingNotifier>>,
     ) -> Self {
         Self {
             config,
             system_prompt,
             provider,
             executor,
+            typing_notifier,
             sessions: Mutex::new(HashMap::new()),
         }
     }
@@ -88,6 +115,13 @@ impl Gateway {
         );
 
         async {
+            let _typing_guard = if let Some(notifier) = &self.typing_notifier {
+                notifier.set_typing(session_key, true).await;
+                Some(TypingGuard::new(notifier.clone(), session_key.clone()))
+            } else {
+                None
+            };
+
             self.append_message(session_key, Message::user().with_text(user_input));
 
             let tool_defs = self.executor.tools();
@@ -376,6 +410,62 @@ fn parse_session_key(session: &str, agent_id: &str) -> Option<SessionKey> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use coop_core::fakes::FakeProvider;
+    use coop_core::tools::DefaultExecutor;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use crate::config::Config;
+
+    struct RecordingTypingNotifier {
+        events: tokio::sync::Mutex<Vec<bool>>,
+        notify: tokio::sync::Notify,
+    }
+
+    impl RecordingTypingNotifier {
+        fn new() -> Self {
+            Self {
+                events: tokio::sync::Mutex::new(Vec::new()),
+                notify: tokio::sync::Notify::new(),
+            }
+        }
+
+        async fn wait_for_events(&self, count: usize) {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+            loop {
+                if self.events.lock().await.len() >= count {
+                    return;
+                }
+
+                let now = tokio::time::Instant::now();
+                assert!(now < deadline, "timed out waiting for typing events");
+                let wait = deadline.saturating_duration_since(now);
+                let _ = tokio::time::timeout(wait, self.notify.notified()).await;
+            }
+        }
+    }
+
+    #[async_trait]
+    impl TypingNotifier for RecordingTypingNotifier {
+        async fn set_typing(&self, _session_key: &SessionKey, started: bool) {
+            let mut events = self.events.lock().await;
+            events.push(started);
+            drop(events);
+            self.notify.notify_waiters();
+        }
+    }
+
+    fn test_config() -> Config {
+        serde_yaml::from_str(
+            r"
+agent:
+  id: coop
+  model: test-model
+",
+        )
+        .unwrap()
+    }
 
     #[test]
     fn parse_main_alias() {
@@ -416,5 +506,34 @@ mod tests {
     #[test]
     fn parse_rejects_other_agent() {
         assert!(parse_session_key("other:main", "coop").is_none());
+    }
+
+    #[tokio::test]
+    async fn typing_guard_sends_stop_on_drop() {
+        let provider: Arc<dyn Provider> = Arc::new(FakeProvider::new("hello"));
+        let executor: Arc<dyn ToolExecutor> = Arc::new(DefaultExecutor::new());
+        let notifier = Arc::new(RecordingTypingNotifier::new());
+        let typing_notifier: Arc<dyn TypingNotifier> = notifier.clone();
+
+        let gateway = Gateway::new(
+            test_config(),
+            "system".to_string(),
+            provider,
+            executor,
+            Some(typing_notifier),
+        );
+
+        let session_key = gateway.default_session_key();
+        let (event_tx, _event_rx) = mpsc::channel(16);
+
+        gateway
+            .run_turn_with_trust(&session_key, "hello", TrustLevel::Full, event_tx)
+            .await
+            .unwrap();
+
+        notifier.wait_for_events(2).await;
+        let events = notifier.events.lock().await.clone();
+        assert!(events[0]);
+        assert!(!events[1]);
     }
 }

@@ -9,7 +9,14 @@ workspace = true
 
 [features]
 default = []
-signal = ["dep:futures", "dep:hex", "dep:presage", "dep:presage-store-sqlite"]
+signal = [
+  "dep:futures",
+  "dep:hex",
+  "dep:presage",
+  "dep:presage-store-sqlite",
+  "dep:serde",
+  "dep:serde_json",
+]
 
 [dependencies]
 anyhow = { workspace = true }
@@ -20,5 +27,7 @@ futures = { workspace = true, optional = true }
 hex = { workspace = true, optional = true }
 presage = { git = "https://github.com/whisperfish/presage", optional = true }
 presage-store-sqlite = { git = "https://github.com/whisperfish/presage", optional = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
 tokio = { version = "1", features = ["sync", "time", "macros", "rt", "rt-multi-thread"] }
 tracing = { workspace = true }

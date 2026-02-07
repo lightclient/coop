@@ -224,6 +224,8 @@ users:
             is_group,
             timestamp: Utc::now(),
             reply_to: reply_to.map(ToOwned::to_owned),
+            kind: coop_core::InboundKind::Text,
+            message_timestamp: None,
         }
     }
 
@@ -334,6 +336,7 @@ users:
             "system".to_string(),
             provider,
             executor,
+            None,
         ));
         let router = MessageRouter::new(config, gateway.clone());
 
@@ -373,6 +376,7 @@ users:
             "system".to_string(),
             provider,
             executor,
+            None,
         ));
         let router = MessageRouter::new(config, gateway);
 

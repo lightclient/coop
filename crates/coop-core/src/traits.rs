@@ -28,6 +28,13 @@ pub trait Channel: Send + Sync {
     async fn probe(&self) -> ChannelHealth;
 }
 
+/// Callback for sending typing indicators on a channel.
+#[async_trait]
+pub trait TypingNotifier: Send + Sync {
+    /// Send a typing started/stopped indicator for the given session.
+    async fn set_typing(&self, session_key: &SessionKey, started: bool);
+}
+
 // ---------------------------------------------------------------------------
 // Provider
 // ---------------------------------------------------------------------------

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Utc;
-use coop_core::{Channel, ChannelHealth, InboundMessage, OutboundMessage};
+use coop_core::{Channel, ChannelHealth, InboundKind, InboundMessage, OutboundMessage};
 use tokio::sync::mpsc;
 
 /// Terminal channel that bridges between a TUI and the gateway via mpsc channels.
@@ -61,6 +61,8 @@ impl Channel for TerminalChannel {
             is_group: false,
             timestamp: Utc::now(),
             reply_to: None,
+            kind: InboundKind::Text,
+            message_timestamp: None,
         })
     }
 
