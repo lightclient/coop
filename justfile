@@ -60,6 +60,9 @@ trace:
 trace-gateway:
     COOP_TRACE_FILE=traces.jsonl cargo run --bin coop -- start
 
+trace-gateway-signal:
+    COOP_TRACE_FILE=traces.jsonl cargo run --features signal --bin coop -- start
+
 # Tail recent trace events
 trace-tail n="50":
     tail -n {{n}} traces.jsonl

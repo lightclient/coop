@@ -1,6 +1,9 @@
 mod inbound;
 #[cfg(test)]
 mod target_tests;
+pub mod testkit;
+
+pub use testkit::MockSignalChannel;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;

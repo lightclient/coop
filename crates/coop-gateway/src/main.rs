@@ -2,6 +2,8 @@ mod cli;
 mod config;
 mod gateway;
 mod router;
+#[cfg(feature = "signal")]
+mod signal_loop;
 mod tracing_setup;
 mod trust;
 mod tui_helpers;
@@ -34,6 +36,8 @@ use crate::cli::{Cli, Commands, SignalCommands};
 use crate::config::Config;
 use crate::gateway::Gateway;
 use crate::router::MessageRouter;
+#[cfg(feature = "signal")]
+use crate::signal_loop::run_signal_loop;
 use crate::tui_helpers::{
     build_tui, extract_tool_result, format_tui_welcome, resolve_working_dir, sync_editor_from_app,
     update_chat_messages,
@@ -334,89 +338,6 @@ async fn handle_send(
     }
 
     Ok(())
-}
-
-#[cfg(feature = "signal")]
-async fn run_signal_loop(
-    mut signal_channel: SignalChannel,
-    router: Arc<MessageRouter>,
-) -> Result<()> {
-    loop {
-        let inbound = coop_core::Channel::recv(&mut signal_channel).await?;
-        if !should_dispatch_signal_message(&inbound) {
-            trace_signal_inbound("signal inbound filtered", &inbound);
-            continue;
-        }
-
-        let Some(target) = signal_reply_target(&inbound) else {
-            continue;
-        };
-
-        trace_signal_inbound("signal inbound dispatched", &inbound);
-
-        let (_decision, response) = router.dispatch_collect_text(&inbound).await?;
-        if response.trim().is_empty() {
-            continue;
-        }
-
-        coop_core::Channel::send(
-            &signal_channel,
-            coop_core::OutboundMessage {
-                channel: "signal".to_string(),
-                target,
-                content: response,
-            },
-        )
-        .await?;
-    }
-}
-
-#[cfg(feature = "signal")]
-fn should_dispatch_signal_message(inbound: &InboundMessage) -> bool {
-    !matches!(inbound.kind, InboundKind::Typing | InboundKind::Receipt)
-}
-
-#[cfg(feature = "signal")]
-fn trace_signal_inbound(message: &'static str, inbound: &InboundMessage) {
-    tracing::info!(
-        signal.inbound_kind = signal_inbound_kind_name(&inbound.kind),
-        signal.sender = %inbound.sender,
-        signal.chat_id = ?inbound.chat_id,
-        signal.message_timestamp = ?inbound.message_timestamp,
-        signal.raw_content = %inbound.content,
-        "{message}"
-    );
-}
-
-#[cfg(feature = "signal")]
-fn signal_inbound_kind_name(kind: &InboundKind) -> &'static str {
-    match kind {
-        InboundKind::Text => "text",
-        InboundKind::Reaction => "reaction",
-        InboundKind::Typing => "typing",
-        InboundKind::Receipt => "receipt",
-        InboundKind::Edit => "edit",
-        InboundKind::Attachment => "attachment",
-    }
-}
-
-#[cfg(feature = "signal")]
-fn signal_reply_target(msg: &InboundMessage) -> Option<String> {
-    if let Some(reply_to) = &msg.reply_to {
-        return Some(reply_to.clone());
-    }
-
-    if msg.is_group {
-        return msg.chat_id.as_ref().map(|chat_id| {
-            if chat_id.starts_with("group:") {
-                chat_id.clone()
-            } else {
-                format!("group:{chat_id}")
-            }
-        });
-    }
-
-    Some(msg.sender.clone())
 }
 
 // ---------------------------------------------------------------------------
@@ -970,39 +891,5 @@ fn clear_chat(tui: &mut Tui) {
         .and_then(|a| a.downcast_mut::<Container>());
     if let Some(c) = chat {
         c.clear();
-    }
-}
-
-#[cfg(all(test, feature = "signal"))]
-mod tests {
-    use super::*;
-    use chrono::Utc;
-
-    fn inbound(kind: InboundKind) -> InboundMessage {
-        InboundMessage {
-            channel: "signal".to_string(),
-            sender: "alice-uuid".to_string(),
-            content: "hello".to_string(),
-            chat_id: None,
-            is_group: false,
-            timestamp: Utc::now(),
-            reply_to: Some("alice-uuid".to_string()),
-            kind,
-            message_timestamp: Some(1234),
-        }
-    }
-
-    #[test]
-    fn signal_loop_filters_typing_and_receipts() {
-        assert!(!should_dispatch_signal_message(&inbound(
-            InboundKind::Typing
-        )));
-        assert!(!should_dispatch_signal_message(&inbound(
-            InboundKind::Receipt
-        )));
-        assert!(should_dispatch_signal_message(&inbound(InboundKind::Text)));
-        assert!(should_dispatch_signal_message(&inbound(
-            InboundKind::Reaction
-        )));
     }
 }

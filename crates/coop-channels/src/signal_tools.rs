@@ -238,6 +238,8 @@ mod tests {
     use coop_core::TrustLevel;
     use std::path::PathBuf;
 
+    const GROUP_HEX: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+
     fn context() -> ToolContext {
         ToolContext {
             session_id: "session".to_string(),
@@ -246,24 +248,33 @@ mod tests {
         }
     }
 
+    fn react_args(chat_id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "chat_id": chat_id,
+            "emoji": "👍",
+            "message_timestamp": 42,
+            "author_id": "alice-uuid"
+        })
+    }
+
+    fn reply_args(chat_id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "chat_id": chat_id,
+            "text": "hello",
+            "reply_to_timestamp": 77,
+            "author_id": "alice-uuid"
+        })
+    }
+
     #[tokio::test]
-    async fn react_tool_sends_signal_action() {
+    async fn react_tool_sends_direct_action() {
         let (tx, mut rx) = mpsc::channel(1);
         let tool = SignalReactTool::new(tx);
 
         let result = tool
-            .execute(
-                serde_json::json!({
-                    "chat_id": "alice-uuid",
-                    "emoji": "👍",
-                    "message_timestamp": 42,
-                    "author_id": "alice-uuid"
-                }),
-                &context(),
-            )
+            .execute(react_args("alice-uuid"), &context())
             .await
             .unwrap();
-
         assert_eq!(result.content, "reaction sent");
 
         let action = rx.recv().await.unwrap();
@@ -286,23 +297,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reply_tool_sends_signal_action() {
+    async fn react_tool_sends_group_action() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let tool = SignalReactTool::new(tx);
+
+        let result = tool
+            .execute(react_args(&format!("group:{GROUP_HEX}")), &context())
+            .await
+            .unwrap();
+        assert_eq!(result.content, "reaction sent");
+
+        let action = rx.recv().await.unwrap();
+        match action {
+            SignalAction::React { target, .. } => {
+                assert_eq!(
+                    target,
+                    SignalTarget::Group {
+                        master_key: hex::decode(GROUP_HEX).unwrap(),
+                    }
+                );
+            }
+            _ => panic!("expected react action"),
+        }
+    }
+
+    #[tokio::test]
+    async fn reply_tool_sends_direct_action() {
         let (tx, mut rx) = mpsc::channel(1);
         let tool = SignalReplyTool::new(tx);
 
         let result = tool
-            .execute(
-                serde_json::json!({
-                    "chat_id": "group:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
-                    "text": "hello",
-                    "reply_to_timestamp": 77,
-                    "author_id": "alice-uuid"
-                }),
-                &context(),
-            )
+            .execute(reply_args("alice-uuid"), &context())
             .await
             .unwrap();
-
         assert_eq!(result.content, "reply sent");
 
         let action = rx.recv().await.unwrap();
@@ -313,20 +340,87 @@ mod tests {
                 quote_timestamp,
                 quote_author_aci,
             } => {
-                assert_eq!(
-                    target,
-                    SignalTarget::Group {
-                        master_key: hex::decode(
-                            "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
-                        )
-                        .unwrap(),
-                    }
-                );
+                assert_eq!(target, SignalTarget::Direct("alice-uuid".to_string()));
                 assert_eq!(text, "hello");
                 assert_eq!(quote_timestamp, 77);
                 assert_eq!(quote_author_aci, "alice-uuid");
             }
             _ => panic!("expected reply action"),
         }
+    }
+
+    #[tokio::test]
+    async fn reply_tool_sends_group_action() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let tool = SignalReplyTool::new(tx);
+
+        let result = tool
+            .execute(reply_args(&format!("group:{GROUP_HEX}")), &context())
+            .await
+            .unwrap();
+        assert_eq!(result.content, "reply sent");
+
+        let action = rx.recv().await.unwrap();
+        match action {
+            SignalAction::Reply { target, .. } => {
+                assert_eq!(
+                    target,
+                    SignalTarget::Group {
+                        master_key: hex::decode(GROUP_HEX).unwrap(),
+                    }
+                );
+            }
+            _ => panic!("expected reply action"),
+        }
+    }
+
+    #[tokio::test]
+    async fn react_tool_rejects_invalid_chat_id() {
+        let (tx, _rx) = mpsc::channel(1);
+        let tool = SignalReactTool::new(tx);
+
+        let error = tool
+            .execute(react_args("group:not-hex"), &context())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("invalid group target key"));
+    }
+
+    #[tokio::test]
+    async fn reply_tool_rejects_invalid_chat_id() {
+        let (tx, _rx) = mpsc::channel(1);
+        let tool = SignalReplyTool::new(tx);
+
+        let error = tool
+            .execute(reply_args("group:not-hex"), &context())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("invalid group target key"));
+    }
+
+    #[tokio::test]
+    async fn react_tool_errors_when_action_channel_closed() {
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+        let tool = SignalReactTool::new(tx);
+
+        let error = tool
+            .execute(react_args("alice-uuid"), &context())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("signal action channel closed"));
+    }
+
+    #[tokio::test]
+    async fn reply_tool_errors_when_action_channel_closed() {
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+        let tool = SignalReplyTool::new(tx);
+
+        let error = tool
+            .execute(reply_args("alice-uuid"), &context())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("signal action channel closed"));
     }
 }

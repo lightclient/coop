@@ -570,4 +570,28 @@ mod tests {
         assert_eq!(inbound.kind, InboundKind::Text);
         assert!(inbound.content.contains("sync body"));
     }
+
+    #[test]
+    fn inbound_formats_synchronized_edit_messages() {
+        let sync = SyncMessage {
+            sent: Some(sync_message::Sent {
+                edit_message: Some(EditMessage {
+                    target_sent_timestamp: Some(88),
+                    data_message: Some(DataMessage {
+                        body: Some("sync updated".to_string()),
+                        ..Default::default()
+                    }),
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let content = test_content(ContentBody::SynchronizeMessage(sync), 8000);
+        let inbound = inbound_from_content(&content).unwrap();
+
+        assert_eq!(inbound.kind, InboundKind::Edit);
+        assert!(inbound.content.contains("[edited message at 88]"));
+        assert!(inbound.content.contains("sync updated"));
+    }
 }
