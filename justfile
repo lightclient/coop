@@ -65,6 +65,10 @@ hooks:
     git config core.hooksPath .githooks
     @echo "✅ git hooks installed from .githooks/"
 
+# Link a Signal account to coop
+signal-link:
+    cargo run --features signal --bin coop -- {{_conf}} signal link
+
 # Run TUI with JSONL tracing
 trace:
     COOP_TRACE_FILE={{trace_file}} cargo run {{_feat}} --bin coop -- {{_conf}} chat
