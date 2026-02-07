@@ -7,8 +7,10 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::{Parser, Subcommand};
 use coop_agent::AnthropicProvider;
+#[cfg(feature = "signal")]
+use coop_core::OutboundMessage;
 use coop_core::tools::DefaultExecutor;
-use coop_core::{InboundMessage, OutboundMessage, Provider};
+use coop_core::{InboundMessage, Provider};
 use coop_ipc::{
     ClientMessage, IpcClient, IpcConnection, IpcServer, PROTOCOL_VERSION, ServerMessage,
     socket_path,
@@ -22,7 +24,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::{Terminal, TerminalOptions, Viewport};
 use std::collections::HashMap;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -33,7 +35,7 @@ use crate::gateway::Gateway;
 use crate::router::MessageRouter;
 
 #[cfg(feature = "signal")]
-use coop_channels::{SignalChannel, SignalHandle, signal_pair};
+use coop_channels::SignalChannel;
 
 #[derive(Parser)]
 #[command(name = "coop", version, about = "🐔 Coop — Personal Agent Gateway")]
@@ -66,6 +68,7 @@ enum SignalCommands {
 }
 
 #[tokio::main]
+#[allow(clippy::large_futures)]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -80,7 +83,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Start => cmd_start(cli.config.as_deref()).await,
         Commands::Chat => cmd_chat(cli.config.as_deref()).await,
-        Commands::Signal { command } => cmd_signal(cli.config.as_deref(), command),
+        Commands::Signal { command } => cmd_signal(cli.config.as_deref(), command).await,
         Commands::Version => {
             println!("🐔 coop {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -121,26 +124,34 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
     let socket = socket_path(&config.agent.id);
     let server = IpcServer::bind(&socket)?;
 
-    #[cfg(feature = "signal")]
-    let mut _signal_handle: Option<SignalHandle> = None;
-
-    if config.channels.signal.is_some() {
-        info!("signal channel configured");
-
+    if let Some(signal) = &config.channels.signal {
         #[cfg(feature = "signal")]
         {
-            let (signal_channel, handle) = signal_pair(64);
-            let router = router.clone();
-            tokio::spawn(async move {
-                if let Err(error) = run_signal_loop(signal_channel, router).await {
-                    tracing::warn!(error = %error, "signal loop stopped");
+            let db_path = resolve_config_path(&config_dir, &signal.db_path);
+            info!(db_path = %db_path.display(), "signal channel configured");
+
+            match SignalChannel::connect(&db_path).await {
+                Ok(signal_channel) => {
+                    let router = router.clone();
+                    tokio::spawn(async move {
+                        if let Err(error) = run_signal_loop(signal_channel, router).await {
+                            tracing::warn!(error = %error, "signal loop stopped");
+                        }
+                    });
                 }
-            });
-            _signal_handle = Some(handle);
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        db_path = %db_path.display(),
+                        "failed to initialize signal channel",
+                    );
+                }
+            }
         }
 
         #[cfg(not(feature = "signal"))]
         {
+            let _ = signal;
             tracing::warn!(
                 "signal is configured, but this binary was built without the 'signal' feature"
             );
@@ -583,10 +594,11 @@ async fn cmd_chat(config_path: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn cmd_signal(config_path: Option<&str>, command: SignalCommands) -> Result<()> {
+#[allow(clippy::large_futures)]
+async fn cmd_signal(config_path: Option<&str>, command: SignalCommands) -> Result<()> {
     #[cfg(feature = "signal")]
     {
-        cmd_signal_enabled(config_path, command)
+        cmd_signal_enabled(config_path, command).await
     }
 
     #[cfg(not(feature = "signal"))]
@@ -597,38 +609,37 @@ fn cmd_signal(config_path: Option<&str>, command: SignalCommands) -> Result<()> 
 }
 
 #[cfg(feature = "signal")]
-fn cmd_signal_enabled(config_path: Option<&str>, command: SignalCommands) -> Result<()> {
+#[allow(clippy::large_futures)]
+async fn cmd_signal_enabled(config_path: Option<&str>, command: SignalCommands) -> Result<()> {
     let config_file = Config::find_config_path(config_path);
     let config = Config::load(&config_file)
         .with_context(|| format!("loading config from {}", config_file.display()))?;
+
+    let config_dir = config_file
+        .parent()
+        .unwrap_or(&PathBuf::from("."))
+        .to_path_buf();
 
     let signal = config
         .channels
         .signal
         .ok_or_else(|| anyhow::anyhow!("signal channel is not configured in coop.yaml"))?;
-    let db_path = PathBuf::from(signal.db_path);
+    let db_path = resolve_config_path(&config_dir, &signal.db_path);
 
     match command {
         SignalCommands::Link { device_name } => {
-            if let Some(parent) = db_path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(
-                &db_path,
-                format!("linked_device={device_name}\nlinked_at={}\n", Utc::now()),
-            )?;
-            println!(
-                "linked signal device '{device_name}' using {}",
-                db_path.display()
-            );
+            SignalChannel::link_device(&db_path, device_name.clone(), |url| {
+                println!("Scan this QR code with Signal to link your device:\n");
+                qr2term::print_qr(url).context("failed to render provisioning QR code")?;
+                println!("\nProvisioning URL: {url}");
+                Ok(())
+            })
+            .await?;
+            println!("linked signal device using {}", db_path.display());
         }
         SignalCommands::Unlink => {
-            if db_path.exists() {
-                std::fs::remove_file(&db_path)?;
-                println!("removed signal registration at {}", db_path.display());
-            } else {
-                println!("no signal registration at {}", db_path.display());
-            }
+            SignalChannel::unlink(&db_path).await?;
+            println!("cleared signal registration at {}", db_path.display());
         }
     }
 
@@ -682,4 +693,14 @@ fn print_stream_prefix(
 fn padded_area(area: ratatui::layout::Rect) -> ratatui::layout::Rect {
     let pad = coop_tui::ui::SIDE_PADDING;
     ratatui::layout::Rect::new(pad, area.y, area.width.saturating_sub(pad * 2), area.height)
+}
+
+#[cfg(feature = "signal")]
+fn resolve_config_path(base_dir: &Path, configured_path: &str) -> PathBuf {
+    let path = PathBuf::from(configured_path);
+    if path.is_absolute() {
+        path
+    } else {
+        base_dir.join(path)
+    }
 }

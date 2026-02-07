@@ -9,13 +9,16 @@ workspace = true
 
 [features]
 default = []
-signal = ["dep:hex"]
+signal = ["dep:futures", "dep:hex", "dep:presage", "dep:presage-store-sqlite"]
 
 [dependencies]
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 coop-core = { path = "../coop-core" }
+futures = { workspace = true, optional = true }
 hex = { workspace = true, optional = true }
+presage = { git = "https://github.com/whisperfish/presage", optional = true }
+presage-store-sqlite = { git = "https://github.com/whisperfish/presage", optional = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
