@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "pre-commit: checking formatting..."
+
+if ! cargo fmt --all -- --check 2>/dev/null; then
+    echo "❌ cargo fmt check failed. Run 'cargo fmt --all' to fix."
+    exit 1
+fi
+
+if command -v taplo &>/dev/null; then
+    if ! taplo fmt --check 2>/dev/null; then
+        echo "❌ taplo fmt check failed. Run 'taplo fmt' to fix."
+        exit 1
+    fi
+fi
+
+echo "pre-commit: linting..."
+
+if ! cargo clippy --all-targets --all-features -- -D warnings 2>/dev/null; then
+    echo "❌ clippy failed. Run 'cargo clippy --fix --allow-dirty' to fix."
+    exit 1
+fi
+
+echo "pre-commit: running tests..."
+
+if ! cargo test --all 2>/dev/null; then
+    echo "❌ tests failed."
+    exit 1
+fi
+
+echo "✅ pre-commit checks passed."

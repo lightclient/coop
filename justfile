@@ -46,3 +46,8 @@ fix:
     cargo fmt --all
     cargo clippy --fix --allow-dirty --allow-staged
     taplo fmt
+
+# Install git hooks from .githooks/
+hooks:
+    git config core.hooksPath .githooks
+    @echo "✅ git hooks installed from .githooks/"

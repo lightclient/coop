@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Commit message style:
+#   <scope>: <short description>
+#
+# Scope is a lowercase word identifying the area of change.
+# Description starts lowercase, no trailing period, max 72 chars on first line.
+#
+# Examples:
+#   tui: add welcome logo banner
+#   signal: fix websocket connection
+#   gateway: add session timeout
+#   readme: update quick start docs
+#   ci: add deny check
+#   deps: bump ratatui to 0.28
+#
+# Merge commits and fixups are allowed through.
+
+MSG_FILE="$1"
+MSG=$(head -1 "$MSG_FILE")
+
+# Allow merge commits
+if [[ "$MSG" =~ ^Merge ]]; then
+    exit 0
+fi
+
+# Allow fixup/squash commits
+if [[ "$MSG" =~ ^(fixup|squash)!\  ]]; then
+    exit 0
+fi
+
+# Check max length (72 chars)
+if [ ${#MSG} -gt 72 ]; then
+    echo "❌ commit message first line exceeds 72 characters (${#MSG})."
+    echo "   \"$MSG\""
+    exit 1
+fi
+
+# Check format: <scope>: <description>
+if ! echo "$MSG" | grep -qE '^[a-z][a-z0-9_-]*: .+$'; then
+    echo "❌ commit message must match: <scope>: <description>"
+    echo "   scope: lowercase word (e.g. tui, gateway, signal, deps, ci, readme)"
+    echo "   description: lowercase start, no trailing period"
+    echo ""
+    echo "   got: \"$MSG\""
+    exit 1
+fi
+
+# Check description starts lowercase
+DESC=$(echo "$MSG" | sed 's/^[a-z][a-z0-9_-]*: //')
+if echo "$DESC" | grep -qE '^[A-Z]'; then
+    echo "❌ commit description should start lowercase."
+    echo "   got: \"$MSG\""
+    exit 1
+fi
+
+# Check no trailing period
+if echo "$MSG" | grep -qE '\.$'; then
+    echo "❌ commit message should not end with a period."
+    echo "   got: \"$MSG\""
+    exit 1
+fi
+
+echo "✅ commit message ok."
