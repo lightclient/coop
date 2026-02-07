@@ -7,6 +7,8 @@
 ## Agent
 
 - auto rotation strategy for when rate limits kick in 
+- "tokenization" of human names to unique identites in memories, sessions, etc.
+  maybe with a confidence interface built into the token?
 
 ## Signal
 
