@@ -1,0 +1,9 @@
+# Compile-time optimizations for fast agentic iteration loops.
+# See docs/compile-times.md for rationale and details.
+
+[build]
+rustc-wrapper = "sccache"
+
+[target.x86_64-unknown-linux-gnu]
+linker = "clang"
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]

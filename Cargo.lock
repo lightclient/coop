@@ -549,7 +549,6 @@ dependencies = [
  "crossterm",
  "pulldown-cmark",
  "serde_json",
- "tokio",
  "unicode-width",
 ]
 

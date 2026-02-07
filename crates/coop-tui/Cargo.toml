@@ -14,5 +14,5 @@ coop-core = { path = "../coop-core" }
 crossterm = { workspace = true }
 pulldown-cmark = { workspace = true }
 serde_json.workspace = true
-tokio = { workspace = true }
+# coop-tui does not use tokio directly — removed to reduce compile scope
 unicode-width = { workspace = true }

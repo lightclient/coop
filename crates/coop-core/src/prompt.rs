@@ -7,19 +7,28 @@ use crate::TrustLevel;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
 use std::time::SystemTime;
 
 // ---------------------------------------------------------------------------
 // Token counting
 // ---------------------------------------------------------------------------
 
-static BPE: LazyLock<tiktoken_rs::CoreBPE> =
-    LazyLock::new(|| tiktoken_rs::cl100k_base().expect("failed to load cl100k_base BPE"));
-
 /// Count tokens in a string using cl100k_base encoding.
+///
+/// When the `tokenizer` feature is disabled, falls back to a rough
+/// chars/4 estimate (sufficient for prompt budgeting during dev builds).
+#[cfg(feature = "tokenizer")]
 pub fn count_tokens(text: &str) -> usize {
+    static BPE: std::sync::LazyLock<tiktoken_rs::CoreBPE> = std::sync::LazyLock::new(|| {
+        tiktoken_rs::cl100k_base().expect("failed to load cl100k_base BPE")
+    });
     BPE.encode_ordinary(text).len()
+}
+
+#[cfg(not(feature = "tokenizer"))]
+pub fn count_tokens(text: &str) -> usize {
+    // Rough approximation: ~4 chars per token for English text.
+    text.len() / 4
 }
 
 // ---------------------------------------------------------------------------
@@ -773,10 +782,21 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "tokenizer")]
     fn token_counts_are_exact() {
         let text = "The quick brown fox jumps over the lazy dog.";
-        let expected = BPE.encode_ordinary(text).len();
+        let bpe = tiktoken_rs::cl100k_base().unwrap();
+        let expected = bpe.encode_ordinary(text).len();
         assert_eq!(count_tokens(text), expected);
+    }
+
+    #[test]
+    #[cfg(not(feature = "tokenizer"))]
+    fn token_counts_are_approximate() {
+        let text = "The quick brown fox jumps over the lazy dog.";
+        let approx = count_tokens(text);
+        assert!(approx > 0);
+        assert_eq!(approx, text.len() / 4);
     }
 
     #[test]

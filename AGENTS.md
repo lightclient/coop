@@ -69,6 +69,24 @@ docs/                 # design docs
 workspaces/           # agent workspace data (personality, instructions)
 ```
 
+## Compile Times — Read This
+
+Fast incremental builds are critical. Coop is developed through agentic loops where an AI agent edits, builds, tests, and iterates. Every extra second of compile time compounds across hundreds of iterations per session. See `docs/compile-times.md` for the full rationale and toolchain setup.
+
+**Current targets:** incremental leaf build <1s, incremental root build <1.5s.
+
+**Rules for keeping builds fast:**
+
+1. **Split large files.** Don't let any single `.rs` file grow past ~500 lines. Large files in leaf crates (especially `coop-gateway`) defeat incremental compilation. Extract focused modules: `cli.rs`, `tui_helpers.rs`, etc. Rust's incremental compiler tracks per-function dependencies, so smaller files = less recompilation on change.
+
+2. **Don't bloat `coop-core`.** Every crate depends on it. Adding a heavy dep to `coop-core` adds that dep's compile time to every build. Put heavy deps in leaf crates. Use feature flags for optional heavy deps (e.g. `tiktoken-rs` is behind the `tokenizer` feature).
+
+3. **Use minimal tokio features in library crates.** Only `coop-gateway` (the binary) uses `tokio = { features = ["full"] }`. Library crates declare only the features they need (e.g. `["sync", "time", "macros", "rt"]`).
+
+4. **Don't add `reqwest` to new crates.** HTTP/TLS deps are expensive. Keep them in `coop-agent`.
+
+5. **Check incremental build time after structural changes.** Run `touch crates/coop-gateway/src/main.rs && time cargo build` — if it's over 1s, investigate.
+
 ## Entry Points
 - CLI/TUI: crates/coop-gateway/src/main.rs
 - Gateway: crates/coop-gateway/src/gateway.rs

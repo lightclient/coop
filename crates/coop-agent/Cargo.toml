@@ -16,5 +16,5 @@ futures = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-tokio = { workspace = true }
+tokio = { version = "1", features = ["time", "sync", "macros", "rt"] }
 tracing = { workspace = true }

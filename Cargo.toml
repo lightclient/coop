@@ -47,5 +47,16 @@ uuid = { version = "1", features = ["v4", "serde"] }
 hex = "0.4"
 qr2term = "0.3"
 
+# ---------------------------------------------------------------------------
+# Dev profile: optimize for compile speed, not runtime speed.
+# See docs/compile-times.md for rationale.
+# ---------------------------------------------------------------------------
+
+[profile.dev]
+debug = "line-tables-only"    # faster builds, still get backtraces
+
+[profile.dev.package."*"]
+opt-level = 1                 # slight optimization for deps reduces monomorphization bloat
+
 [patch.crates-io]
 curve25519-dalek = { git = "https://github.com/signalapp/curve25519-dalek", tag = "signal-curve25519-4.1.3" }

@@ -12,5 +12,5 @@ anyhow = { workspace = true }
 coop-core = { path = "../coop-core" }
 serde = { workspace = true }
 serde_json = { workspace = true }
-tokio = { workspace = true }
+tokio = { version = "1", features = ["net", "io-util", "sync", "macros", "rt"] }
 tracing = { workspace = true }
