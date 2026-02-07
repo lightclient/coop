@@ -74,7 +74,11 @@ enum SignalCommands {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    let _tracing_guard = tracing_setup::init();
+    let console_log = matches!(
+        cli.command,
+        Commands::Start | Commands::Signal { .. } | Commands::Version
+    );
+    let _tracing_guard = tracing_setup::init(console_log);
 
     info!(
         version = env!("CARGO_PKG_VERSION"),

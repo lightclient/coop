@@ -12,17 +12,20 @@ pub(crate) struct TracingGuard {
 /// Initialize the layered tracing subscriber.
 ///
 /// Layers:
-/// 1. Console — always on, filtered by `RUST_LOG` (default `info`)
+/// 1. Console — enabled only when `console` is true (daemon mode), filtered by `RUST_LOG`
 /// 2. JSONL file — activated by `COOP_TRACE_FILE` env var, filtered at `debug`
 ///
+/// TUI commands (`chat`, `attach`) pass `console: false` to avoid polluting the terminal.
 /// Returns a guard that must be held in `main()` to ensure buffered writes flush.
-pub(crate) fn init() -> TracingGuard {
+pub(crate) fn init(console: bool) -> TracingGuard {
     let mut guards = Vec::new();
 
-    let console_filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-
-    let console_layer = fmt::layer().with_target(false).with_filter(console_filter);
+    let console_layer = if console {
+        let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+        Some(fmt::layer().with_target(false).with_filter(filter))
+    } else {
+        None
+    };
 
     let jsonl_layer = if let Ok(trace_file) = std::env::var("COOP_TRACE_FILE") {
         let path = std::path::PathBuf::from(&trace_file);
