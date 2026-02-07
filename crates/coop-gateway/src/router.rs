@@ -1,44 +1,86 @@
-use coop_core::{InboundMessage, SessionKey, SessionKind, TrustLevel};
+use anyhow::Result;
+use coop_core::{InboundMessage, SessionKey, SessionKind, TrustLevel, TurnEvent};
+use tokio::sync::mpsc;
+
+use std::sync::Arc;
 
 use crate::config::Config;
+use crate::gateway::Gateway;
 use crate::trust::resolve_trust;
 
-/// Result of routing an inbound message.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct RouteDecision {
     pub session_key: SessionKey,
     pub trust: TrustLevel,
 }
 
-/// Route an inbound message to the appropriate session.
-/// Phase 1: everything goes to the single agent's main session with full trust.
+#[derive(Clone)]
+pub(crate) struct MessageRouter {
+    config: Config,
+    gateway: Arc<Gateway>,
+}
+
+impl MessageRouter {
+    pub(crate) fn new(config: Config, gateway: Arc<Gateway>) -> Self {
+        Self { config, gateway }
+    }
+
+    pub(crate) fn route(&self, msg: &InboundMessage) -> RouteDecision {
+        route_message(msg, &self.config)
+    }
+
+    pub(crate) async fn dispatch(
+        &self,
+        msg: &InboundMessage,
+        event_tx: mpsc::Sender<TurnEvent>,
+    ) -> Result<RouteDecision> {
+        let decision = self.route(msg);
+        self.gateway
+            .run_turn_with_trust(
+                &decision.session_key,
+                &msg.content,
+                decision.trust,
+                event_tx,
+            )
+            .await?;
+        Ok(decision)
+    }
+}
+
 pub(crate) fn route_message(msg: &InboundMessage, config: &Config) -> RouteDecision {
     let agent_id = config.agent.id.clone();
+    let identity = format!("{}:{}", msg.channel, msg.sender);
 
-    // Look up user trust
     let user_trust = config
         .users
         .iter()
-        .find(|u| {
-            u.r#match
-                .iter()
-                .any(|m| m == &msg.channel || m == &msg.sender)
+        .find(|user| {
+            user.r#match.iter().any(|pattern| {
+                pattern == &identity || pattern == &msg.channel || pattern == &msg.sender
+            })
         })
-        .map_or(TrustLevel::Public, |u| u.trust);
+        .map_or(TrustLevel::Public, |user| user.trust);
 
-    // Determine situation ceiling
     let ceiling = if msg.is_group {
         TrustLevel::Familiar
     } else {
         TrustLevel::Full
     };
-
     let trust = resolve_trust(user_trust, ceiling);
 
     let kind = if msg.is_group {
-        SessionKind::Group(msg.chat_id.clone().unwrap_or_else(|| msg.channel.clone()))
+        let group_id = msg.chat_id.clone().unwrap_or_else(|| msg.channel.clone());
+        let namespaced_group = if group_id.starts_with(&format!("{}:", msg.channel)) {
+            group_id
+        } else {
+            format!("{}:{group_id}", msg.channel)
+        };
+        SessionKind::Group(namespaced_group)
     } else {
-        SessionKind::Main
+        match msg.channel.as_str() {
+            "terminal:default" => SessionKind::Main,
+            _ => SessionKind::Dm(identity),
+        }
     };
 
     RouteDecision {
@@ -61,41 +103,75 @@ agent:
 users:
   - name: alice
     trust: full
-    match: ['terminal:default']
+    match: ['terminal:default', 'signal:alice-uuid']
+  - name: bob
+    trust: inner
+    match: ['signal:bob-uuid']
 ",
         )
         .unwrap()
     }
 
-    #[test]
-    fn known_user_dm_routes_to_main() {
-        let msg = InboundMessage {
-            channel: "terminal:default".to_string(),
-            sender: "alice".to_string(),
+    fn inbound(
+        channel: &str,
+        sender: &str,
+        chat_id: Option<&str>,
+        is_group: bool,
+    ) -> InboundMessage {
+        InboundMessage {
+            channel: channel.to_string(),
+            sender: sender.to_string(),
             content: "hello".to_string(),
-            chat_id: None,
-            is_group: false,
+            chat_id: chat_id.map(ToOwned::to_owned),
+            is_group,
             timestamp: Utc::now(),
-        };
+            reply_to: None,
+        }
+    }
 
+    #[test]
+    fn terminal_routes_to_main() {
+        let msg = inbound("terminal:default", "alice", None, false);
         let decision = route_message(&msg, &test_config());
+
         assert_eq!(decision.session_key.agent_id, "reid");
         assert_eq!(decision.session_key.kind, SessionKind::Main);
         assert_eq!(decision.trust, TrustLevel::Full);
     }
 
     #[test]
-    fn unknown_user_gets_public() {
-        let msg = InboundMessage {
-            channel: "signal:+15551234567".to_string(),
-            sender: "unknown".to_string(),
-            content: "hello".to_string(),
-            chat_id: None,
-            is_group: false,
-            timestamp: Utc::now(),
-        };
-
+    fn signal_dm_routes_per_sender() {
+        let msg = inbound("signal", "alice-uuid", None, false);
         let decision = route_message(&msg, &test_config());
+
+        assert_eq!(
+            decision.session_key.kind,
+            SessionKind::Dm("signal:alice-uuid".to_string())
+        );
+        assert_eq!(decision.trust, TrustLevel::Full);
+    }
+
+    #[test]
+    fn unknown_signal_user_is_public() {
+        let msg = inbound("signal", "mallory-uuid", None, false);
+        let decision = route_message(&msg, &test_config());
+
+        assert_eq!(
+            decision.session_key.kind,
+            SessionKind::Dm("signal:mallory-uuid".to_string())
+        );
         assert_eq!(decision.trust, TrustLevel::Public);
+    }
+
+    #[test]
+    fn signal_group_routes_to_group_session_with_familiar_ceiling() {
+        let msg = inbound("signal", "alice-uuid", Some("group:deadbeef"), true);
+        let decision = route_message(&msg, &test_config());
+
+        assert_eq!(
+            decision.session_key.kind,
+            SessionKind::Group("signal:group:deadbeef".to_string())
+        );
+        assert_eq!(decision.trust, TrustLevel::Familiar);
     }
 }

@@ -172,13 +172,13 @@ pub fn format_messages(
                         if i == 0 {
                             lines.push(Line::from(vec![
                                 Span::styled(prefix.clone(), style),
-                                Span::styled(content_line.to_string(), style),
+                                Span::styled((*content_line).to_string(), style),
                             ]));
                         } else {
                             let indent = " ".repeat(prefix_len);
                             lines.push(Line::from(vec![
                                 Span::raw(indent),
-                                Span::styled(content_line.to_string(), style),
+                                Span::styled((*content_line).to_string(), style),
                             ]));
                         }
                     }

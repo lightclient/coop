@@ -9,6 +9,8 @@ pub(crate) struct Config {
     #[serde(default)]
     pub users: Vec<UserConfig>,
     #[serde(default)]
+    pub channels: ChannelsConfig,
+    #[serde(default)]
     pub provider: ProviderConfig,
 }
 
@@ -34,6 +36,17 @@ pub(crate) struct UserConfig {
     pub trust: TrustLevel,
     #[serde(default)]
     pub r#match: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub(crate) struct ChannelsConfig {
+    #[serde(default)]
+    pub signal: Option<SignalChannelConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct SignalChannelConfig {
+    pub db_path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -135,6 +148,7 @@ agent:
         assert_eq!(config.agent.id, "test");
         assert_eq!(config.agent.model, "anthropic/claude-sonnet-4-20250514");
         assert!(config.users.is_empty());
+        assert!(config.channels.signal.is_none());
     }
 
     #[test]
@@ -153,7 +167,11 @@ users:
     match: ['terminal:default']
   - name: bob
     trust: inner
-    match: ['signal:+15555550101']
+    match: ['signal:bob-uuid']
+
+channels:
+  signal:
+    db_path: ./data/signal.db
 
 provider:
   name: anthropic
@@ -163,6 +181,10 @@ provider:
         assert_eq!(config.users.len(), 2);
         assert_eq!(config.users[0].trust, TrustLevel::Full);
         assert_eq!(config.users[1].trust, TrustLevel::Inner);
+        assert_eq!(
+            config.channels.signal.unwrap().db_path,
+            "./data/signal.db".to_string()
+        );
         assert_eq!(config.provider.name, "anthropic");
     }
 }

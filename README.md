@@ -31,8 +31,11 @@ export ANTHROPIC_API_KEY=$(jq -r '.claudeAiOauth.accessToken' ~/.claude/.credent
 ```
 
 ```bash
-# edit coop.yaml with your agent config
-just run    # launch the TUI
+# terminal 1
+cargo run --bin coop -- start
+
+# terminal 2
+cargo run --bin coop -- chat
 ```
 
 ## Architecture
@@ -43,8 +46,9 @@ Five workspace crates:
 |-------|---------|
 | `coop-core` | Domain types, trait boundaries, prompt builder, test fakes |
 | `coop-agent` | LLM provider integration (Anthropic API, Goose runtime) |
-| `coop-gateway` | CLI entry point, TUI event loop, gateway routing, config |
-| `coop-channels` | Channel adapters (terminal; Signal/Telegram/Discord planned) |
+| `coop-gateway` | CLI entry point, daemon lifecycle, gateway routing, config |
+| `coop-ipc` | Unix socket IPC protocol and client/server transport |
+| `coop-channels` | Channel adapters (terminal; Signal scaffolded) |
 | `coop-tui` | Terminal UI (ratatui/crossterm) |
 
 ## Development

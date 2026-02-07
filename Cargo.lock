@@ -317,6 +317,7 @@ dependencies = [
  "coop-agent",
  "coop-channels",
  "coop-core",
+ "coop-ipc",
  "coop-tui",
  "crossterm",
  "futures",
@@ -328,6 +329,17 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "coop-ipc"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "coop-core",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

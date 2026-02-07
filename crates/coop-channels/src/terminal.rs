@@ -60,6 +60,7 @@ impl Channel for TerminalChannel {
             chat_id: None,
             is_group: false,
             timestamp: Utc::now(),
+            reply_to: None,
         })
     }
 

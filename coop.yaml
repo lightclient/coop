@@ -8,7 +8,11 @@ agent:
 users:
   - name: alice
     trust: full
-    match: ["terminal:default"]
+    match: ["terminal:default", "signal:alice-uuid"]
+
+channels:
+  signal:
+    db_path: ./data/signal.db
 
 provider:
   name: anthropic

@@ -454,6 +454,8 @@ pub struct InboundMessage {
     pub chat_id: Option<String>,
     pub is_group: bool,
     pub timestamp: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<String>,
 }
 
 /// An outbound message to be sent via a channel.

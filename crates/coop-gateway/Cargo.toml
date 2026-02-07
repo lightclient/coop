@@ -7,6 +7,10 @@ version.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = []
+signal = ["coop-channels/signal"]
+
 [[bin]]
 name = "coop"
 path = "src/main.rs"
@@ -20,6 +24,7 @@ coop-agent = { path = "../coop-agent" }
 futures = { workspace = true }
 coop-channels = { path = "../coop-channels" }
 coop-core = { path = "../coop-core" }
+coop-ipc = { path = "../coop-ipc" }
 coop-tui = { path = "../coop-tui" }
 crossterm = { workspace = true }
 ratatui = { workspace = true }
