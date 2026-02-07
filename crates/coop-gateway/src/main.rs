@@ -11,7 +11,8 @@ use coop_agent::AnthropicProvider;
 use coop_core::tools::DefaultExecutor;
 use coop_core::{Content, InboundMessage, Provider, TurnEvent};
 use coop_ipc::{
-    ClientMessage, IpcConnection, IpcServer, PROTOCOL_VERSION, ServerMessage, socket_path,
+    ClientMessage, IpcClient, IpcConnection, IpcServer, PROTOCOL_VERSION, ServerMessage,
+    socket_path,
 };
 use coop_tui::{
     App, Container, DisplayMessage, Editor, Footer, InputAction, MarkdownComponent, Spacer,
@@ -48,6 +49,10 @@ struct Cli {
 enum Commands {
     Start,
     Chat,
+    Attach {
+        #[arg(short, long, default_value = "main")]
+        session: String,
+    },
     Signal {
         #[command(subcommand)]
         command: SignalCommands,
@@ -80,6 +85,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Start => cmd_start(cli.config.as_deref()).await,
         Commands::Chat => cmd_chat(cli.config.as_deref()).await,
+        Commands::Attach { session } => cmd_attach(cli.config.as_deref(), &session).await,
         Commands::Signal { command } => cmd_signal(cli.config.as_deref(), command).await,
         Commands::Version => {
             println!("🐔 coop {}", env!("CARGO_PKG_VERSION"));
@@ -630,6 +636,298 @@ async fn cmd_chat(config_path: Option<&str>) -> Result<()> {
             }
         } else {
             // Tick loading animation
+            app.tick_loading();
+            app.tick_error();
+
+            let status = tui.root_mut().children_mut()[STATUS_IDX]
+                .as_any_mut()
+                .and_then(|a| a.downcast_mut::<StatusLine>());
+            if let Some(s) = status {
+                s.tick();
+                s.set_elapsed(&app.elapsed_text());
+                if app.is_loading || app.error_message.is_some() {
+                    needs_render = true;
+                }
+            }
+        }
+
+        if needs_render {
+            tui.request_render();
+            tui.render_if_needed()?;
+        }
+
+        if app.should_quit {
+            break;
+        }
+    }
+
+    tui.stop()?;
+    println!("👋 Goodbye!");
+    Ok(())
+}
+
+// cmd_attach — TUI client that connects to a running gateway via IPC
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::too_many_lines)]
+async fn cmd_attach(config_path: Option<&str>, session: &str) -> Result<()> {
+    const CHAT_IDX: usize = 1;
+    const STATUS_IDX: usize = 3;
+    const EDITOR_IDX: usize = 4;
+    const FOOTER_IDX: usize = 5;
+
+    let config_file = Config::find_config_path(config_path);
+    let config = Config::load(&config_file)
+        .with_context(|| format!("loading config from {}", config_file.display()))?;
+
+    let socket = socket_path(&config.agent.id);
+    let mut client = IpcClient::connect(&socket).await.with_context(|| {
+        format!(
+            "is the gateway running? (coop start)\nsocket: {}",
+            socket.display()
+        )
+    })?;
+
+    // Handshake
+    client
+        .send(ClientMessage::Hello {
+            version: PROTOCOL_VERSION,
+        })
+        .await?;
+    let hello = client.recv().await?;
+    let agent_id = match hello {
+        ServerMessage::Hello {
+            version, agent_id, ..
+        } => {
+            if version != PROTOCOL_VERSION {
+                tracing::warn!(
+                    server_version = version,
+                    client_version = PROTOCOL_VERSION,
+                    "protocol version mismatch"
+                );
+            }
+            agent_id
+        }
+        other => anyhow::bail!("unexpected server response: {other:?}"),
+    };
+
+    info!(agent = %agent_id, session = %session, socket = %socket.display(), "attached to gateway");
+
+    // Gather working directory
+    let cwd = std::env::current_dir()
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
+    let home = std::env::var("HOME").unwrap_or_default();
+    let working_dir = if !home.is_empty() && cwd.starts_with(&home) {
+        format!("~{}", &cwd[home.len()..])
+    } else {
+        cwd
+    };
+
+    let git_branch = detect_git_branch();
+
+    // Build the TUI
+    let mut tui = Tui::new();
+    let mut app = App::new(&agent_id, &config.agent.model, session, 200_000);
+    app.version = env!("CARGO_PKG_VERSION").to_string();
+    app.working_dir.clone_from(&working_dir);
+
+    let welcome = format_tui_welcome(env!("CARGO_PKG_VERSION"), &config.agent.model, &working_dir);
+
+    tui.root_mut().add_child(Box::new(Text::new(welcome, 1, 1)));
+    tui.root_mut().add_child(Box::new(Container::new()));
+    tui.root_mut().add_child(Box::new(Spacer::new(0)));
+    tui.root_mut().add_child(Box::new(StatusLine::new()));
+    tui.root_mut().add_child(Box::new(Editor::new()));
+    let mut footer = Footer::new(&working_dir, &config.agent.model, 200_000);
+    footer.set_git_branch(git_branch);
+    tui.root_mut().add_child(Box::new(footer));
+
+    tui.start()?;
+    tui.request_render();
+    tui.render_if_needed()?;
+
+    let mut tool_names: HashMap<String, String> = HashMap::new();
+
+    // Split client for concurrent read/write
+    let (mut reader, mut writer) = client.into_split();
+
+    // Channel for IPC messages received from gateway
+    let (ipc_tx, mut ipc_rx) = mpsc::channel::<ServerMessage>(128);
+    let session_filter = session.to_string();
+    tokio::spawn(async move {
+        while let Ok(msg) = reader.recv().await {
+            if ipc_tx.send(msg).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    let session_name = session.to_string();
+
+    loop {
+        let mut needs_render = false;
+
+        // 1. Receive ServerMessages from IPC
+        while let Ok(msg) = ipc_rx.try_recv() {
+            needs_render = true;
+            match msg {
+                ServerMessage::TextDelta { text, session: s } if s == session_filter => {
+                    app.append_or_create_assistant(&text);
+                    update_chat_messages(&mut tui, &app, CHAT_IDX);
+                }
+                ServerMessage::ToolStart {
+                    id,
+                    name,
+                    arguments,
+                    session: s,
+                } if s == session_filter => {
+                    tool_names.insert(id, name.clone());
+                    app.push_message(DisplayMessage::tool_call(&name, &arguments));
+                    update_chat_messages(&mut tui, &app, CHAT_IDX);
+                }
+                ServerMessage::ToolResult {
+                    id,
+                    output,
+                    is_error,
+                    session: s,
+                } if s == session_filter => {
+                    let name = tool_names
+                        .get(&id)
+                        .cloned()
+                        .unwrap_or_else(|| "unknown".to_string());
+                    app.push_message(DisplayMessage::tool_output(&name, output, is_error));
+                    update_chat_messages(&mut tui, &app, CHAT_IDX);
+                }
+                ServerMessage::AssistantMessage { session: s, .. } if s == session_filter => {}
+                ServerMessage::Done {
+                    tokens, session: s, ..
+                } if s == session_filter => {
+                    app.end_turn(tokens);
+                    let status = tui.root_mut().children_mut()[STATUS_IDX]
+                        .as_any_mut()
+                        .and_then(|a| a.downcast_mut::<StatusLine>());
+                    if let Some(s) = status {
+                        s.set_loading(false);
+                        s.set_error(None);
+                    }
+                    let footer = tui.root_mut().children_mut()[FOOTER_IDX]
+                        .as_any_mut()
+                        .and_then(|a| a.downcast_mut::<Footer>());
+                    if let Some(f) = footer {
+                        f.set_usage(0, 0, 0, 0, tokens);
+                    }
+                    update_chat_messages(&mut tui, &app, CHAT_IDX);
+                }
+                ServerMessage::Error {
+                    message,
+                    session: s,
+                } if s == session_filter => {
+                    app.push_message(DisplayMessage::system(format!("Error: {message}")));
+                    if app.is_loading {
+                        app.end_turn(0);
+                    }
+                    let status = tui.root_mut().children_mut()[STATUS_IDX]
+                        .as_any_mut()
+                        .and_then(|a| a.downcast_mut::<StatusLine>());
+                    if let Some(s) = status {
+                        s.set_loading(false);
+                        s.set_error(Some(message));
+                    }
+                    update_chat_messages(&mut tui, &app, CHAT_IDX);
+                }
+                _ => {} // ignore messages for other sessions
+            }
+        }
+
+        // 2. Poll for keyboard/mouse events
+        if let Some(event) = poll_event(Duration::from_millis(50)) {
+            if let Event::Key(key_event) = event {
+                app.clear_error();
+
+                match handle_key_event(&mut app, key_event) {
+                    InputAction::Submit(input) => {
+                        if app.is_loading {
+                            app.input = input;
+                            app.cursor_pos = app.input.len();
+                            app.set_error("Cannot send while agent is responding");
+                            let status = tui.root_mut().children_mut()[STATUS_IDX]
+                                .as_any_mut()
+                                .and_then(|a| a.downcast_mut::<StatusLine>());
+                            if let Some(s) = status {
+                                s.set_error(app.error_message.clone());
+                            }
+                        } else {
+                            let editor = tui.root_mut().children_mut()[EDITOR_IDX]
+                                .as_any_mut()
+                                .and_then(|a| a.downcast_mut::<Editor>());
+                            if let Some(e) = editor {
+                                e.clear();
+                            }
+
+                            app.push_message(DisplayMessage::user(&input));
+                            app.start_turn();
+
+                            let status = tui.root_mut().children_mut()[STATUS_IDX]
+                                .as_any_mut()
+                                .and_then(|a| a.downcast_mut::<StatusLine>());
+                            if let Some(s) = status {
+                                s.set_loading(true);
+                            }
+
+                            update_chat_messages(&mut tui, &app, CHAT_IDX);
+
+                            // Send via IPC
+                            if let Err(error) = writer
+                                .send(ClientMessage::Send {
+                                    session: session_name.clone(),
+                                    content: input,
+                                })
+                                .await
+                            {
+                                app.push_message(DisplayMessage::system(format!(
+                                    "Error: {error:#}"
+                                )));
+                                app.end_turn(0);
+                                update_chat_messages(&mut tui, &app, CHAT_IDX);
+                            }
+                        }
+                    }
+                    InputAction::Quit => {
+                        app.should_quit = true;
+                    }
+                    InputAction::Clear => {
+                        if !app.is_loading {
+                            app.clear();
+                            let chat = tui.root_mut().children_mut()[CHAT_IDX]
+                                .as_any_mut()
+                                .and_then(|a| a.downcast_mut::<Container>());
+                            if let Some(c) = chat {
+                                c.clear();
+                            }
+                            tui.force_render();
+
+                            if let Err(error) = writer
+                                .send(ClientMessage::Clear {
+                                    session: session_name.clone(),
+                                })
+                                .await
+                            {
+                                tracing::warn!(error = %error, "failed to send clear");
+                            }
+                        }
+                    }
+                    InputAction::ToggleVerbose => {
+                        app.toggle_verbose();
+                        update_chat_messages(&mut tui, &app, CHAT_IDX);
+                    }
+                    InputAction::None => {}
+                }
+
+                sync_editor_from_app(&mut tui, &app, EDITOR_IDX);
+                needs_render = true;
+            }
+        } else {
             app.tick_loading();
             app.tick_error();
 
