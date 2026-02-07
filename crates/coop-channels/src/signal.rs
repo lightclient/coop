@@ -10,8 +10,8 @@ use presage::manager::Registered;
 use presage::model::identity::OnNewIdentity;
 use presage::model::messages::Received;
 use presage::{Manager, store::StateStore};
-use presage_store_sqlite::SqliteStore;
-use std::path::{Path, PathBuf};
+use presage_store_sqlite::{SqliteConnectOptions, SqliteStore};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, UNIX_EPOCH};
 use tokio::sync::mpsc;
@@ -375,8 +375,13 @@ async fn open_store(db_path: &Path) -> Result<SqliteStore> {
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
 
-    let db_url: PathBuf = db_path.to_path_buf();
-    SqliteStore::open(db_url.to_string_lossy().as_ref(), OnNewIdentity::Trust)
+    let options: SqliteConnectOptions = db_path
+        .to_string_lossy()
+        .parse()
+        .context("invalid signal db path")?;
+    let options = options.create_if_missing(true);
+
+    SqliteStore::open_with_options(options, OnNewIdentity::Trust)
         .await
         .context("failed to open signal sqlite store")
 }
