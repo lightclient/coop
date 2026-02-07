@@ -97,7 +97,7 @@ fn imessage_group_detection_from_guid() {
 ```
 
 ### 2. Agent Runtime Trait
-The interface between Coop and the LLM execution engine (Goose).
+The interface between Coop and the LLM execution engine.
 
 ```rust
 #[async_trait]
@@ -349,11 +349,10 @@ Adapter Tests (per real integration, with fixtures)
 ├── Signal: parse real JSON payloads, serialize outbound
 ├── Telegram: parse webhook payloads, serialize Bot API calls
 ├── iMessage: parse imsg binary output, handle guid quirks
-├── Goose: serialize/deserialize subprocess communication
 └── SQLite: session store CRUD operations
 
 End-to-End Tests (slow, optional, real services)
-├── Goose with real LLM API (needs API key)
+├── Anthropic with real LLM API (needs API key)
 └── SQLite with real database
 ```
 
@@ -409,8 +408,8 @@ fn fake_runtime_fulfills_contract() {
 }
 
 #[test]
-fn goose_runtime_fulfills_contract() {
-    test_runtime_contract(GooseRuntime::new(test_config()));
+fn anthropic_provider_fulfills_contract() {
+    test_runtime_contract(AnthropicProvider::new(test_config()));
 }
 ```
 

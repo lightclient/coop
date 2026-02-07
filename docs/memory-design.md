@@ -222,7 +222,7 @@ The recent observation index at boot looks like:
 | ID | Time | Type | Title | Tokens |
 |----|------|------|-------|--------|
 | 847 | 2h ago | decision | Trust model: Bell-LaPadula inspired | ~120 |
-| 846 | 2h ago | technical | Coop architecture: Rust + Goose runtime | ~350 |
+| 846 | 2h ago | technical | Coop architecture: Rust agent gateway | ~350 |
 | 845 | 3h ago | discovery | OpenClaw competitors: nothing matches full stack | ~200 |
 | 844 | 5h ago | technical | Config patch bug: arrays replaced not merged | ~90 |
 

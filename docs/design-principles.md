@@ -9,7 +9,7 @@ These are non-negotiable. Every PR, every design decision, every refactor should
 Coop must be small enough to reason about. If you can't hold the entire architecture in your head, it's too complex.
 
 **Targets:**
-- Core gateway: under 5,000 lines of Rust (excluding Goose dependency)
+- Core gateway: under 5,000 lines of Rust
 - Under 10 source files in the hot path (message in → response out)
 - A new contributor should understand the full request lifecycle in under 30 minutes
 - Zero abstraction layers that don't earn their keep. If a trait has one implementor, it's a function.

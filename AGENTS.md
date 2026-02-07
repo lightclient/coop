@@ -59,7 +59,7 @@ just fix                      # auto-fix formatting + clippy
 ## Structure
 ```
 crates/
-├── coop-agent        # provider integration (Anthropic, Goose)
+├── coop-agent        # provider integration (Anthropic)
 ├── coop-channels     # channel adapters (terminal, future: Signal, etc.)
 ├── coop-core         # shared types, traits, prompt builder, test fakes
 ├── coop-gateway      # gateway server, CLI entry, session management

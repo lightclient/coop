@@ -159,7 +159,7 @@ impl fmt::Display for Content {
 
 /// A message in a conversation.
 ///
-/// Inspired by Goose's multi-content message model but owned by Coop.
+/// Multi-content message model.
 /// Messages can contain multiple content blocks (e.g., text + tool calls).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {

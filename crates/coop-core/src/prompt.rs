@@ -51,8 +51,8 @@ impl Counted {
 /// stable content comes first in the flat string — Anthropic's prefix caching automatically
 /// gives ~90% input token discount on identical leading bytes across API calls.
 ///
-/// Note: Anthropic's only cache type is `"ephemeral"` (~5 min TTL). Goose sends the entire
-/// system prompt as one block. These hints drive *ordering*, not explicit cache breakpoints.
+/// Note: Anthropic's only cache type is `"ephemeral"` (~5 min TTL). These hints drive
+/// *ordering*, not explicit cache breakpoints.
 /// See `docs/system-prompt-design.md` for full details.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CacheHint {

@@ -45,7 +45,7 @@ Five workspace crates:
 | Crate | Purpose |
 |-------|---------|
 | `coop-core` | Domain types, trait boundaries, prompt builder, test fakes |
-| `coop-agent` | LLM provider integration (Anthropic API, Goose runtime) |
+| `coop-agent` | LLM provider integration (Anthropic API) |
 | `coop-gateway` | CLI entry point, daemon lifecycle, gateway routing, config |
 | `coop-ipc` | Unix socket IPC protocol and client/server transport |
 | `coop-channels` | Channel adapters (terminal; Signal scaffolded) |

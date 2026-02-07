@@ -3,7 +3,7 @@
 ## What Is Coop
 A personal agent gateway built in Rust. Coop manages the lifecycle of AI agents — routing messages from channels (Signal, Telegram, terminal, etc.) to agent sessions, enforcing trust-based access control, persisting conversations, and scheduling background work.
 
-The agent runtime (LLM tool-calling loop, MCP, compaction) is delegated to Goose. Coop is everything around it.
+Coop owns the full agent runtime: LLM tool-calling loop, provider integration, prompt construction, session management, and channel routing.
 
 ## Core Concepts
 

@@ -27,7 +27,7 @@ cargo test -p coop-core -- prompt  # Run tests matching "prompt"
 Five workspace crates under `crates/`:
 
 - **coop-core** — Domain types (`Message`, `Role`, `Content`, `SessionKey`, `TrustLevel`), trait boundaries (`Provider`, `Channel`, `Tool`, `ToolExecutor`, `SessionStore`), prompt builder with token counting, and testing fakes for all traits
-- **coop-agent** — LLM provider integration: direct Anthropic API client with OAuth support, Goose runtime wrapper, and a conversion layer (`convert.rs`) bridging Coop ↔ Goose types at the boundary
+- **coop-agent** — LLM provider integration: direct Anthropic API client with OAuth support
 - **coop-gateway** — Main binary entry point, CLI (Start/Chat/Version), TUI event loop, gateway message routing, YAML config parsing
 - **coop-channels** — Channel adapters (currently terminal only)
 - **coop-tui** — Terminal UI built on ratatui/crossterm
@@ -42,7 +42,6 @@ Five workspace crates under `crates/`:
 **Key design patterns:**
 - All external integrations are behind traits in `coop-core/traits.rs` — providers, channels, tools, session stores
 - Matching fake implementations in `coop-core/fakes.rs` (`FakeProvider`, `FakeChannel`, `FakeTool`, `MemorySessionStore`) for testing without real dependencies
-- Goose is an implementation detail wrapped behind the `Provider` trait; Coop types are the source of truth
 - System prompts assembled via layered `PromptBuilder` with token budgeting and Anthropic cache hints
 - Trust model uses Bell-LaPadula ordering: `Full < Inner < Familiar < Public`
 - Config loaded from YAML (`coop.yaml`) with hierarchical path resolution

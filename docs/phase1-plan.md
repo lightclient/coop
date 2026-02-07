@@ -1,7 +1,7 @@
 # Phase 1: Gateway + Terminal TUI
 
 ## Goal
-A running Coop gateway daemon that accepts messages from a terminal TUI, routes them to a Goose agent session, and streams responses back. No channels, no multi-user, no persistence yet — just the core loop proving the architecture works.
+A running Coop gateway daemon that accepts messages from a terminal TUI, routes them to an agent session, and streams responses back. No channels, no multi-user, no persistence yet — just the core loop proving the architecture works.
 
 ## What We're Building
 
@@ -11,7 +11,7 @@ A running Coop gateway daemon that accepts messages from a terminal TUI, routes 
 │  (ratatui)    │         │                            │
 │               │         │  Config → Agent Pool       │
 │  input bar    │         │           ↓                │
-│  message list │         │     Goose Runtime          │
+│  message list │         │     Agent Runtime           │
 │  status bar   │         │      (tool loop)           │
 │               │         │           ↓                │
 └──────────────┘         │     Tool Results           │
@@ -27,20 +27,18 @@ A running Coop gateway daemon that accepts messages from a terminal TUI, routes 
 - [ ] Tokio runtime boots, logs "gateway started", shuts down on ctrl-c
 - [ ] Structured logging with `tracing` (stdout + optional file)
 
-### M2: Goose Integration
-- [ ] Investigate Goose as a library vs. fork
-  - Can we import `goose-core` as a crate?
-  - Or do we shell out to `goose` CLI via stdio JSON?
-  - Or fork and extract the session/tool loop?
-- [ ] Wrap Goose in an `AgentRuntime` trait so we can swap later
-- [ ] Send a hardcoded prompt, get a response, print it
-- [ ] Verify tool calling works (e.g. agent calls a simple built-in tool)
+### M2: Provider Integration
+- [x] Direct Anthropic API client with streaming support
+- [x] OAuth token support (Claude Code subscriptions)
+- [x] Wrap behind `Provider` trait so we can swap later
+- [x] Send a hardcoded prompt, get a response, print it
+- [x] Verify tool calling works (e.g. agent calls a simple built-in tool)
 
 ### M3: Session Manager
 - [ ] `SessionManager` struct — creates/retrieves sessions by key
 - [ ] In-memory conversation history (Vec<Message>)
 - [ ] Session key: `(agent_id, user_id, kind)` 
-- [ ] Pass conversation history to Goose on each turn
+- [ ] Pass conversation history to provider on each turn
 - [ ] Handle streaming responses (token-by-token callback)
 
 ### M4: Terminal TUI
@@ -104,11 +102,11 @@ coop/
 │   │       ├── session.rs  # SessionStore trait
 │   │       └── fakes.rs    # FakeChannel, FakeRuntime, FakeTool, etc.
 │   │
-│   ├── coop-agent/         # agent runtime — Goose integration
+│   ├── coop-agent/         # agent runtime — Anthropic provider
 │   │   ├── Cargo.toml
 │   │   └── src/
 │   │       ├── lib.rs
-│   │       ├── goose.rs    # Goose subprocess implementation
+│   │       ├── anthropic_provider.rs  # Anthropic API client
 │   │       └── tools/
 │   │           ├── mod.rs
 │   │           ├── read.rs
@@ -150,7 +148,7 @@ coop/
 coop-core (traits, types, fakes — zero external deps)
     ↑            ↑             ↑
 coop-agent   coop-channels   coop-gateway
-(goose)      (signal, etc.)  (router, config)
+(anthropic)  (signal, etc.)  (router, config)
     ↑            ↑             ↑
     └────────────┴─────────────┘
                  ↑
@@ -159,21 +157,10 @@ coop-agent   coop-channels   coop-gateway
 
 Key rule: **coop-core has no external dependencies** beyond serde. It defines the contracts. Everything else depends on it. Tests live close to the logic they test — integration tests in coop-gateway test the full flow using fakes from coop-core.
 
-## Key Decisions to Make First
+## Key Decisions Made
 
-### 1. Goose Integration Strategy
-This is the critical unknown. Three options:
-
-**A) Goose as a library crate**
-Import Goose's core session/tool loop directly. Best performance, tightest integration. Depends on whether Goose's code is structured for this — it may be tightly coupled to its own CLI.
-
-**B) Goose as a subprocess**
-Shell out to `goose` CLI, communicate via stdin/stdout JSON. Simplest to start, loosest coupling. Adds latency and complexity for streaming. Similar to how OpenClaw wraps Claude Code.
-
-**C) Fork Goose, extract core**
-Fork the repo, pull out the session management and tool-calling loop into a standalone crate. Most work upfront, most control long-term.
-
-**Recommendation:** Start with B (subprocess) to unblock everything else. Investigate A in parallel. Move to A or C once we understand Goose's internals.
+### 1. Provider Strategy
+**Decided:** Build our own direct Anthropic API client with OAuth support. No external agent runtime dependency. Coop owns the full tool-calling loop, session management, and streaming.
 
 ### 2. TUI Framework
 `ratatui` is the standard. Alternatives: `cursive`, `tui-rs` (deprecated, ratatui is the successor). Go with `ratatui`.
@@ -199,7 +186,7 @@ anyhow = "1"
 ## Success Criteria
 - `coop start` launches the gateway daemon
 - `coop chat` opens a terminal TUI connected to the gateway
-- Type a message, get a streamed response from Claude/GPT via Goose
+- Type a message, get a streamed response from Claude via Anthropic API
 - Agent can read/write files in its workspace
 - Ctrl-C shuts down cleanly
 - Config loads from `coop.yaml`

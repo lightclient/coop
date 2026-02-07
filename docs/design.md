@@ -2,7 +2,7 @@
 ## Design Document (WIP)
 
 ### What Is This
-An OpenClaw competitor built in Rust, using Goose's agent runtime for the LLM tool-calling loop. Coop is the gateway layer — channels, sessions, memory, scheduling, multi-agent orchestration. Reliability-first.
+A personal agent gateway built in Rust. Coop owns the full stack — provider integration, tool-calling loop, channels, sessions, memory, scheduling, multi-agent orchestration. Reliability-first.
 
 ---
 
@@ -191,7 +191,7 @@ agent:
 │                  │                                             │
 │       ┌──────────▼──────────┐                                 │
 │       │    Agent Pool        │                                │
-│       │   (Goose runtimes)   │                                │
+│       │   (provider pool)    │                                │
 │       └──────────┬──────────┘                                 │
 │                  │                                             │
 │          ┌───────▼────────┐                                   │
@@ -217,7 +217,7 @@ agent:
 - Sub-agent spawning into isolated sessions
 
 ### Agent Pool
-- Uses Goose's `Provider` trait for LLM calls (not Goose's `Agent` — see [goose-integration.md](goose-integration.md))
+- Uses `Provider` trait for LLM calls (see `crates/coop-core/src/traits.rs`)
 - Coop owns the agent loop: tool call → execute → loop, compaction, retry
 - MCP extensions via `rmcp` crate directly
 - Built-in tools (exec, fs, memory, messaging, browser, http) as Coop-native tool executors
@@ -262,7 +262,7 @@ agent:
 
 ### Phase 1: Core Loop
 - Gateway daemon with graceful shutdown
-- Single agent with Goose runtime
+- Single agent with Anthropic provider
 - Webchat channel (HTTP/WebSocket)
 - File-based memory (read/write/search)
 - Config loading + validation
@@ -311,25 +311,23 @@ cron          # cron parsing
 reqwest       # HTTP client
 qdrant/lance  # vector search
 fastembed     # local embeddings (optional)
-# goose-runtime (fork or library)
+
 ```
 
 ---
 
 ## Subagent Strategy
 
-Goose has a built-in `subagent` tool — the parent agent spawns child agents with their own sessions, tool sets, and (optionally) different models. Subagents run inside Goose's tool loop and return a summary to the parent. Coop delegates all subagent orchestration to Goose rather than building its own.
+Coop can spawn subagents as child sessions with their own tool sets, trust levels, and (optionally) different models. Subagents run within the gateway's agent loop and return a summary to the parent.
 
-**Known limitation: opacity.** Coop has no visibility into subagent progress. A subagent running for 5 minutes looks like a long tool call from the gateway's perspective — no turn counts, no intermediate status, no per-subagent cost breakdown. This is acceptable for now.
+**Known limitation: opacity.** A subagent running for 5 minutes looks like a long tool call from the gateway's perspective — no turn counts, no intermediate status, no per-subagent cost breakdown. This is acceptable for now. Tracing spans provide some visibility.
 
 **Future options:**
-- Contribute upstream to Goose to surface subagent events on the parent's event stream
-- Build a lightweight Coop-level subagent system on top of Goose for cases where gateway-level orchestration/monitoring is needed (e.g., spawning a coding agent with different trust/prompt config)
-- Once Goose is integrated as a library (not subprocess), tap subagent event streams directly
+- Surface subagent events on the parent's event stream
+- Per-subagent cost breakdown and progress reporting
 
 ## Open Questions
 
-- ~~How does Goose expose its runtime as a library?~~ **Decided:** Use Goose at the Provider layer only. See [goose-integration.md](goose-integration.md).
 - Sandboxing strategy: Wasmtime? Direct process with seccomp? Or keep Docker as an option?
 - Should channels be compiled-in or dynamically loadable (shared libs / WASM plugins)?
 - Multi-agent: do agents share a process or run as separate processes coordinated by the gateway?
