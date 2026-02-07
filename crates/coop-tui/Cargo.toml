@@ -1,6 +1,6 @@
 [package]
 edition.workspace = true
-license.workspace = true
+license = "MIT"
 name = "coop-tui"
 version.workspace = true
 
@@ -12,6 +12,7 @@ anyhow = { workspace = true }
 chrono = { workspace = true }
 coop-core = { path = "../coop-core" }
 crossterm = { workspace = true }
-ratatui = { workspace = true }
+pulldown-cmark = { workspace = true }
 serde_json.workspace = true
 tokio = { workspace = true }
+unicode-width = { workspace = true }

@@ -1,0 +1,13 @@
+coop-tui
+========
+
+This crate is licensed under the MIT License only (not dual-licensed like the
+rest of the coop workspace).
+
+Portions of this crate are derived from the TUI component of pi
+(@mariozechner/pi-coding-agent) by Mario Zechner, which is licensed under the
+MIT License.
+
+  pi — https://github.com/mariozechner/pi
+  Copyright (c) Mario Zechner
+  Licensed under the MIT License

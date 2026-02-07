@@ -316,14 +316,20 @@ pub fn format_welcome_header(
         .add_modifier(Modifier::BOLD);
     let gray = Style::default().fg(Color::Gray);
 
-    // ASCII pixel-art robot face (Coop mascot)
+    // Original Coop logo from README
     let art = [
-        "    ████████       ",
-        "  ██▓▓▓▓▓▓▓▓██     ",
-        "  ██▓▓▓▓▓▓▓▓██     ",
-        "  ██▓▓██▓▓██▓▓██   ",
-        "  ██▓▓▓▓▓▓▓▓██     ",
-        "    ████████       ",
+        "        ████████████████         ",
+        "        ████████████████         ",
+        "    ████▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓████   ",
+        "    ████▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓████   ",
+        "    ████▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓████   ",
+        "    ████▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓████   ",
+        "    ████▓▓▓▓████▓▓▓▓████▓▓▓▓████",
+        "    ████▓▓▓▓████▓▓▓▓████▓▓▓▓████",
+        "    ████▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓████   ",
+        "    ████▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓████   ",
+        "        ████████████████         ",
+        "        ████████████████         ",
     ];
 
     let text_line0 = format!("Coop v{version}");
@@ -336,9 +342,9 @@ pub fn format_welcome_header(
     for (i, art_line) in art.iter().enumerate() {
         let mut spans = vec![Span::styled((*art_line).to_string(), pink)];
         match i {
-            1 => spans.push(Span::styled(text_line0.clone(), bold_white)),
-            2 => spans.push(Span::styled(text_line1.clone(), gray)),
-            3 => spans.push(Span::styled(text_line2.clone(), gray)),
+            4 => spans.push(Span::styled(text_line0.clone(), bold_white)),
+            6 => spans.push(Span::styled(text_line1.clone(), gray)),
+            8 => spans.push(Span::styled(text_line2.clone(), gray)),
             _ => {}
         }
         lines.push(Line::from(spans));

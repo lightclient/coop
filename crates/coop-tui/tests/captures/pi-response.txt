@@ -1,0 +1,45 @@
+ ctrl+d to exit (empty)
+ ctrl+z to suspend
+ ctrl+k to delete to end
+ shift+tab to cycle thinking level
+ ctrl+p/shift+ctrl+p to cycle models
+ ctrl+l to select model
+ ctrl+o to expand tools
+ ctrl+t to expand thinking
+ ctrl+g for external editor
+ / for commands
+ ! to run bash
+ !! to run bash (no context)
+ alt+enter to queue follow-up
+ alt+up to edit all queued messages
+ ctrl+v to paste image
+ drop files to attach
+
+
+[Context]
+  ~/coop/coop/AGENTS.md
+
+[Skills]
+  user
+    ~/.pi/agent/git/github.com/mitsuhiko/agent-stuff/skills/tmux/SKILL.md
+    ~/.pi/agent/git/github.com/mitsuhiko/agent-stuff/skills/uv/SKILL.md
+    ~/.pi/agent/git/github.com/mitsuhiko/agent-stuff/skills/web-browser/SKILL.md
+
+[Themes]
+  user
+    ~/.pi/agent/git/github.com/mitsuhiko/agent-stuff/pi-themes/nightowl.json
+
+
+
+ What is 2+2?
+
+
+ 4
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+~/coop/coop (main)
+↑3 ↓5 W4.2k $0.026 (sub) 2.1%/200k (auto)                                                                                claude-opus-4-6 • medium
+
+

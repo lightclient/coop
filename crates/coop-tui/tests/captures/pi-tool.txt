@@ -1,0 +1,45 @@
+
+
+
+ What is 2+2?
+
+
+ 4
+
+
+ List the files in the docs directory
+
+
+
+ $ ls docs/
+
+ ... (7 earlier lines, ctrl+o to expand)
+ prompts
+ system-prompt-design.md
+ testing-strategy.md
+ TODO.md
+ tui-scrollback.md
+
+
+ Here are the files in the docs/ directory:
+
+ - architecture.md
+ - design.md
+ - design-principles.md
+ - goose-agent-design.md
+ - goose-integration.md
+ - memory-design.md
+ - phase1-plan.md
+ - prompts/ (subdirectory)
+ - system-prompt-design.md
+ - testing-strategy.md
+ - TODO.md
+ - tui-scrollback.md
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+~/coop/coop (main)
+↑7 ↓189 R8.4k W4.4k $0.036 (sub) 2.2%/200k (auto)                                                                        claude-opus-4-6 • medium
+
+
