@@ -1,5 +1,9 @@
 # TODO
 
+## Gateway
+
+- add encryption and authentication flow to channel connections
+
 ## Agent
 
 - auto rotation strategy for when rate limits kick in 
