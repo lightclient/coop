@@ -11,6 +11,9 @@ workspace = true
 default = []
 signal = ["coop-channels/signal", "dep:qr2term"]
 
+[dev-dependencies]
+tempfile = "3"
+
 [[bin]]
 name = "coop"
 path = "src/main.rs"
@@ -33,5 +36,6 @@ serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+tracing-appender = { workspace = true }
 tracing-subscriber = { workspace = true }
 uuid = { workspace = true }

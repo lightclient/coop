@@ -106,6 +106,58 @@ Simplicity: Don't make things optional that don't need to be — the compiler wi
 Simplicity: Booleans should default to false, not be optional
 Errors: Don't add error context that doesn't add useful information (e.g., `.context("Failed to X")` when error already says it failed)
 Logging: Use tracing. Don't over-log — errors and key state transitions only.
+Tracing: All new features must include tracing spans and events
+Tracing: Use `#[instrument]` or manual `info_span!` on public async functions in gateway, provider, and tool crates
+Tracing: Log tool inputs/outputs, API request/response metadata, and session state transitions
+Tracing: Use `info!` for key events, `debug!` for details, `trace!` for IPC chatter
+Tracing: JSONL traces (`COOP_TRACE_FILE`) are the primary debugging interface for AI agents
+Tracing: Console output must be a superset of JSONL trace content
+
+## Tracing (Dev)
+
+Coop uses `tracing` with layered subscribers. Console output is always on. JSONL file output is opt-in via environment variable.
+
+### Quick start
+```bash
+just trace          # TUI + traces.jsonl
+just trace-gateway  # daemon + traces.jsonl
+just trace-errors   # grep errors from traces
+just trace-tools    # grep tool executions
+just trace-turns    # grep agent turns
+```
+
+### Environment variables
+- `COOP_TRACE_FILE` — path to JSONL trace file (e.g. `traces.jsonl`). Enables file output at `debug` level.
+- `RUST_LOG` — filter for both console and file (default: `info` console, `debug` file)
+
+### Span hierarchy
+```
+route_message → agent_turn → turn_iteration → provider_request
+                                             → tool_execute
+```
+
+### Reading traces (for AI agents)
+The `traces.jsonl` file contains one JSON object per line. Each object has:
+- `timestamp`, `level`, `message` — standard fields
+- `span` — current span name
+- `spans` — full span ancestry list
+- `target`, `file`, `line` — source location
+
+Filter with standard tools: `grep`, `jq`, `rg`. The `just trace-*` recipes provide common queries.
+
+Each process run starts with a `"coop starting"` event containing version and PID — use `grep "coop starting"` to find run boundaries in the append-only file.
+
+### Debugging with traces
+
+When debugging coop behavior, always start with the traces:
+
+1. **Check existing traces first.** Look for `traces.jsonl` in the working directory. If it exists, search for spans and events related to the bug — the trace may already contain the evidence you need.
+2. **Reproduce with tracing if needed.** If no trace exists or the relevant behavior isn't captured, reproduce the bug with `COOP_TRACE_FILE=traces.jsonl` to capture a full trace of the failing behavior.
+3. **Identify the bug in the trace.** Read the JSONL to find where the actual behavior diverges from expected — wrong span fields, missing events, error-level entries, unexpected ordering, etc.
+4. **Fix and verify via trace.** After applying a fix, re-run with tracing enabled. Confirm the trace now shows the correct behavior (right spans, right field values, no errors). The trace should map directly to the observable effect.
+5. **Verify the effect.** The trace tells you what the code *did* — still verify the user-visible outcome is correct (test output, TUI rendering, API response, etc.).
+
+The goal is trace-driven debugging: traces are the primary evidence, not println or guesswork. If a bug can't be diagnosed from the trace, that's a sign the relevant code path needs better instrumentation.
 
 ## Anthropic OAuth (Claude Code Tokens)
 
@@ -191,3 +243,4 @@ Never: Commit personal information, real names, real credentials, or PII
 Never: Skip `cargo fmt`
 Never: Merge without `cargo clippy --all-targets --all-features -- -D warnings` passing
 Never: Edit `Cargo.toml` dependency versions manually when `cargo add` works
+Never: Ship features without tracing instrumentation

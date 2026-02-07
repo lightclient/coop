@@ -9,7 +9,7 @@ use futures::StreamExt;
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tracing::{debug, warn};
+use tracing::{Instrument, debug, info, info_span, warn};
 
 use coop_core::traits::{Provider, ProviderStream};
 use coop_core::types::{Content, Message, ModelInfo, Role, ToolDef, Usage};
@@ -124,6 +124,8 @@ impl AnthropicProvider {
                 .context("failed to send request to Anthropic")?;
 
             let status = response.status();
+            debug!(status = %status, attempt = attempt + 1, "http response");
+
             if status.is_success() {
                 return Ok(response);
             }
@@ -136,13 +138,6 @@ impl AnthropicProvider {
             }
 
             let error_text = response.text().await.unwrap_or_default();
-            warn!(
-                attempt = attempt + 1,
-                max = MAX_RETRIES,
-                status = %status,
-                "retryable Anthropic error, backing off: {error_text}"
-            );
-
             let base_ms = 1000u64 * 2u64.pow(attempt);
             // Simple jitter without rand crate
             let jitter_ms = u64::from(
@@ -152,7 +147,16 @@ impl AnthropicProvider {
                     .subsec_nanos()
                     % 500,
             );
-            tokio::time::sleep(std::time::Duration::from_millis(base_ms + jitter_ms)).await;
+            let backoff_ms = base_ms + jitter_ms;
+            warn!(
+                attempt = attempt + 1,
+                max = MAX_RETRIES,
+                status = %status,
+                backoff_ms,
+                "retryable Anthropic error, backing off: {error_text}"
+            );
+
+            tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
 
             last_err = Some(format!("{status} - {error_text}"));
         }
@@ -348,20 +352,39 @@ impl Provider for AnthropicProvider {
         messages: &[Message],
         tools: &[ToolDef],
     ) -> Result<(Message, Usage)> {
-        let has_tools = !tools.is_empty();
-        let body = self.build_body(system, messages, tools, false);
+        let span = info_span!(
+            "anthropic_request",
+            model = %self.model.name,
+            method = "complete",
+            message_count = messages.len(),
+            tool_count = tools.len(),
+        );
 
-        let response = self.send_with_retry(&body, has_tools).await?;
+        async {
+            let has_tools = !tools.is_empty();
+            let body = self.build_body(system, messages, tools, false);
 
-        let api_response: AnthropicResponse = response
-            .json()
-            .await
-            .context("failed to parse Anthropic response")?;
+            let response = self.send_with_retry(&body, has_tools).await?;
 
-        let message = Self::parse_response(&api_response, self.is_oauth);
-        let usage = Self::parse_usage(&api_response);
+            let api_response: AnthropicResponse = response
+                .json()
+                .await
+                .context("failed to parse Anthropic response")?;
 
-        Ok((message, usage))
+            let message = Self::parse_response(&api_response, self.is_oauth);
+            let usage = Self::parse_usage(&api_response);
+
+            info!(
+                input_tokens = usage.input_tokens,
+                output_tokens = usage.output_tokens,
+                stop_reason = %api_response.stop_reason.as_deref().unwrap_or("unknown"),
+                "anthropic response"
+            );
+
+            Ok((message, usage))
+        }
+        .instrument(span)
+        .await
     }
 
     fn supports_streaming(&self) -> bool {
@@ -374,6 +397,15 @@ impl Provider for AnthropicProvider {
         messages: &[Message],
         tools: &[ToolDef],
     ) -> Result<ProviderStream> {
+        let span = info_span!(
+            "anthropic_request",
+            model = %self.model.name,
+            method = "stream",
+            message_count = messages.len(),
+            tool_count = tools.len(),
+        );
+        let _enter = span.enter();
+
         let has_tools = !tools.is_empty();
         let body = self.build_body(system, messages, tools, true);
 

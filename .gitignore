@@ -5,3 +5,5 @@
 /root/workspace/
 workspace/
 dev.yaml
+traces.jsonl
+*.jsonl

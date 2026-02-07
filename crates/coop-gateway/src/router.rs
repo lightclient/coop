@@ -1,6 +1,7 @@
 use anyhow::Result;
 use coop_core::{InboundMessage, SessionKey, SessionKind, TrustLevel, TurnEvent};
 use tokio::sync::mpsc;
+use tracing::{Instrument, debug, info_span};
 
 use std::sync::Arc;
 
@@ -35,6 +36,13 @@ impl MessageRouter {
         event_tx: mpsc::Sender<TurnEvent>,
     ) -> Result<RouteDecision> {
         let decision = self.route(msg);
+        let span = info_span!(
+            "route_message",
+            session = %decision.session_key,
+            trust = ?decision.trust,
+            source = %msg.channel,
+        );
+        debug!(parent: &span, sender = %msg.sender, "routing message");
         self.gateway
             .run_turn_with_trust(
                 &decision.session_key,
@@ -42,6 +50,7 @@ impl MessageRouter {
                 decision.trust,
                 event_tx,
             )
+            .instrument(span)
             .await?;
         Ok(decision)
     }

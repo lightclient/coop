@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{UnixListener, UnixStream};
+use tracing::{debug, trace};
 
 #[allow(missing_debug_implementations)]
 pub struct IpcServer {
@@ -45,6 +46,7 @@ impl IpcServer {
             .accept()
             .await
             .context("failed to accept IPC connection")?;
+        debug!("ipc client connected");
         Ok(IpcConnection::new(stream))
     }
 }
@@ -83,11 +85,15 @@ impl IpcConnection {
                 continue;
             }
 
-            return serde_json::from_str(&line).context("failed to decode client message");
+            let msg: ClientMessage =
+                serde_json::from_str(&line).context("failed to decode client message")?;
+            trace!(msg = ?msg, "ipc recv");
+            return Ok(msg);
         }
     }
 
     pub async fn send(&mut self, message: ServerMessage) -> Result<()> {
+        trace!(msg = ?message, "ipc send");
         let encoded = serde_json::to_string(&message).context("failed to encode server message")?;
         self.writer
             .write_all(encoded.as_bytes())

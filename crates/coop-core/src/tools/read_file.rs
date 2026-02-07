@@ -3,6 +3,7 @@ use crate::types::{ToolDef, ToolOutput};
 use anyhow::Result;
 use async_trait::async_trait;
 use std::path::PathBuf;
+use tracing::debug;
 
 const MAX_OUTPUT_BYTES: usize = 100_000;
 
@@ -85,7 +86,10 @@ impl Tool for ReadFileTool {
         };
 
         let content = match tokio::fs::read_to_string(&resolved).await {
-            Ok(c) => c,
+            Ok(c) => {
+                debug!(path = %path_str, bytes_read = c.len(), "read_file complete");
+                c
+            }
             Err(e) => return Ok(ToolOutput::error(format!("failed to read file: {e}"))),
         };
 

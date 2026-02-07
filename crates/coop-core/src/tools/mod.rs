@@ -7,6 +7,7 @@ use crate::traits::{Tool, ToolContext, ToolExecutor};
 use crate::types::{ToolDef, ToolOutput};
 use anyhow::Result;
 use async_trait::async_trait;
+use tracing::{Instrument, debug, info_span};
 
 pub use bash::BashTool;
 pub use list_directory::ListDirectoryTool;
@@ -45,12 +46,18 @@ impl ToolExecutor for DefaultExecutor {
         arguments: serde_json::Value,
         ctx: &ToolContext,
     ) -> Result<ToolOutput> {
-        for tool in &self.tools {
-            if tool.definition().name == name {
-                return tool.execute(arguments, ctx).await;
+        let span = info_span!("tool_execute", tool = %name);
+        async {
+            debug!(arguments = %arguments, "tool arguments");
+            for tool in &self.tools {
+                if tool.definition().name == name {
+                    return tool.execute(arguments, ctx).await;
+                }
             }
+            Ok(ToolOutput::error(format!("unknown tool: {name}")))
         }
-        Ok(ToolOutput::error(format!("unknown tool: {name}")))
+        .instrument(span)
+        .await
     }
 
     fn tools(&self) -> Vec<ToolDef> {

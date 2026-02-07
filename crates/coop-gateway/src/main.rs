@@ -1,6 +1,7 @@
 mod config;
 mod gateway;
 mod router;
+mod tracing_setup;
 mod trust;
 
 use anyhow::{Context, Result};
@@ -68,13 +69,13 @@ enum SignalCommands {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .with_target(false)
-        .init();
+    let _tracing_guard = tracing_setup::init();
+
+    info!(
+        version = env!("CARGO_PKG_VERSION"),
+        pid = std::process::id(),
+        "coop starting"
+    );
 
     match cli.command {
         Commands::Start => cmd_start(cli.config.as_deref()).await,

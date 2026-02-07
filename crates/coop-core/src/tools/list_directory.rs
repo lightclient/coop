@@ -3,6 +3,7 @@ use crate::types::{ToolDef, ToolOutput};
 use anyhow::Result;
 use async_trait::async_trait;
 use std::path::PathBuf;
+use tracing::debug;
 
 #[derive(Debug)]
 pub struct ListDirectoryTool;
@@ -91,6 +92,7 @@ impl Tool for ListDirectoryTool {
 
         dirs.sort();
         files.sort();
+        debug!(path = %path_str, entry_count = dirs.len() + files.len(), "list_directory complete");
 
         let mut output = Vec::new();
         if !dirs.is_empty() {

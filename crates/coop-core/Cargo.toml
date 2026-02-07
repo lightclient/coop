@@ -16,6 +16,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tiktoken-rs = "0.6.0"
 tokio = { workspace = true }
+tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]

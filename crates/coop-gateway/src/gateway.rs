@@ -7,7 +7,7 @@ use futures::StreamExt;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
-use tracing::error;
+use tracing::{Instrument, debug, error, info, info_span};
 use uuid::Uuid;
 
 use crate::config::Config;
@@ -79,88 +79,146 @@ impl Gateway {
         trust: TrustLevel,
         event_tx: mpsc::Sender<TurnEvent>,
     ) -> Result<()> {
-        self.append_message(session_key, Message::user().with_text(user_input));
+        let span = info_span!(
+            "agent_turn",
+            session = %session_key,
+            input_len = user_input.len(),
+            trust = ?trust,
+        );
 
-        let tool_defs = self.executor.tools();
-        let ctx = self.tool_context(session_key, trust);
-        let turn_config = TurnConfig::default();
+        async {
+            self.append_message(session_key, Message::user().with_text(user_input));
 
-        let mut total_usage = Usage::default();
-        let mut new_messages = Vec::new();
-        let mut hit_limit = false;
+            let tool_defs = self.executor.tools();
+            let ctx = self.tool_context(session_key, trust);
+            let turn_config = TurnConfig::default();
 
-        for iteration in 0..turn_config.max_iterations {
-            let messages = self.messages(session_key);
-            let (response, usage) = self
-                .assistant_response(&messages, &tool_defs, &event_tx)
+            let mut total_usage = Usage::default();
+            let mut new_messages = Vec::new();
+            let mut hit_limit = false;
+
+            for iteration in 0..turn_config.max_iterations {
+                let iter_span = info_span!(
+                    "turn_iteration",
+                    iteration,
+                    max = turn_config.max_iterations,
+                );
+
+                let (response, should_break) = async {
+                    let messages = self.messages(session_key);
+                    let (response, usage) = self
+                        .assistant_response(&messages, &tool_defs, &event_tx)
+                        .await?;
+
+                    total_usage += usage;
+                    self.append_message(session_key, response.clone());
+                    new_messages.push(response.clone());
+
+                    let _ = event_tx
+                        .send(TurnEvent::AssistantMessage(response.clone()))
+                        .await;
+
+                    info!(
+                        has_tool_requests = response.has_tool_requests(),
+                        response_text_len = response.text().len(),
+                        "iteration complete"
+                    );
+
+                    let has_tool_requests = response.has_tool_requests();
+                    Ok::<_, anyhow::Error>((response, !has_tool_requests))
+                }
+                .instrument(iter_span)
                 .await?;
 
-            total_usage += usage;
-            self.append_message(session_key, response.clone());
-            new_messages.push(response.clone());
+                if should_break {
+                    break;
+                }
+
+                let mut result_msg = Message::user();
+
+                for req in response.tool_requests() {
+                    let _ = event_tx
+                        .send(TurnEvent::ToolStart {
+                            id: req.id.clone(),
+                            name: req.name.clone(),
+                            arguments: req.arguments.clone(),
+                        })
+                        .await;
+
+                    let tool_span = info_span!(
+                        "tool_execute",
+                        tool.name = %req.name,
+                        tool.id = %req.id,
+                    );
+
+                    let output = async {
+                        debug!(arguments = %req.arguments, "tool arguments");
+                        match self
+                            .executor
+                            .execute(&req.name, req.arguments.clone(), &ctx)
+                            .await
+                        {
+                            Ok(output) => {
+                                let preview_len = output.content.len().min(500);
+                                info!(
+                                    output_len = output.content.len(),
+                                    is_error = output.is_error,
+                                    output_preview = &output.content[..preview_len],
+                                    "tool complete"
+                                );
+                                output
+                            }
+                            Err(err) => {
+                                error!(tool = %req.name, error = %err, "tool execution failed");
+                                coop_core::ToolOutput::error(format!("internal error: {err}"))
+                            }
+                        }
+                    }
+                    .instrument(tool_span)
+                    .await;
+
+                    result_msg =
+                        result_msg.with_tool_result(&req.id, &output.content, output.is_error);
+
+                    let _ = event_tx
+                        .send(TurnEvent::ToolResult {
+                            id: req.id.clone(),
+                            message: Message::user().with_tool_result(
+                                &req.id,
+                                &output.content,
+                                output.is_error,
+                            ),
+                        })
+                        .await;
+                }
+
+                self.append_message(session_key, result_msg.clone());
+                new_messages.push(result_msg);
+
+                if iteration + 1 >= turn_config.max_iterations {
+                    hit_limit = true;
+                }
+            }
+
+            info!(
+                input_tokens = total_usage.input_tokens,
+                output_tokens = total_usage.output_tokens,
+                hit_limit,
+                "turn complete"
+            );
 
             let _ = event_tx
-                .send(TurnEvent::AssistantMessage(response.clone()))
+                .send(TurnEvent::Done(TurnResult {
+                    messages: new_messages,
+                    usage: total_usage,
+                    hit_limit,
+                }))
                 .await;
 
-            if !response.has_tool_requests() {
-                break;
-            }
-
-            let mut result_msg = Message::user();
-
-            for req in response.tool_requests() {
-                let _ = event_tx
-                    .send(TurnEvent::ToolStart {
-                        id: req.id.clone(),
-                        name: req.name.clone(),
-                        arguments: req.arguments.clone(),
-                    })
-                    .await;
-
-                let output = match self
-                    .executor
-                    .execute(&req.name, req.arguments.clone(), &ctx)
-                    .await
-                {
-                    Ok(output) => output,
-                    Err(err) => {
-                        error!(tool = %req.name, error = %err, "tool execution failed");
-                        coop_core::ToolOutput::error(format!("internal error: {err}"))
-                    }
-                };
-
-                result_msg = result_msg.with_tool_result(&req.id, &output.content, output.is_error);
-
-                let _ = event_tx
-                    .send(TurnEvent::ToolResult {
-                        id: req.id.clone(),
-                        message: Message::user().with_tool_result(
-                            &req.id,
-                            &output.content,
-                            output.is_error,
-                        ),
-                    })
-                    .await;
-            }
-
-            self.append_message(session_key, result_msg.clone());
-            new_messages.push(result_msg);
-
-            if iteration + 1 >= turn_config.max_iterations {
-                hit_limit = true;
-            }
+            Ok(())
         }
-
-        let _ = event_tx
-            .send(TurnEvent::Done(TurnResult {
-                messages: new_messages,
-                usage: total_usage,
-                hit_limit,
-            }))
-            .await;
-
-        Ok(())
+        .instrument(span)
+        .await
     }
 
     pub(crate) fn clear_session(&self, session_key: &SessionKey) {
@@ -187,13 +245,25 @@ impl Gateway {
         tool_defs: &[ToolDef],
         event_tx: &mpsc::Sender<TurnEvent>,
     ) -> Result<(Message, Usage)> {
-        if self.provider.supports_streaming() {
-            self.assistant_response_streaming(messages, tool_defs, event_tx)
-                .await
-        } else {
-            self.assistant_response_non_streaming(messages, tool_defs, event_tx)
-                .await
+        let streaming = self.provider.supports_streaming();
+        let span = info_span!(
+            "provider_request",
+            message_count = messages.len(),
+            tool_count = tool_defs.len(),
+            streaming,
+        );
+
+        async {
+            if streaming {
+                self.assistant_response_streaming(messages, tool_defs, event_tx)
+                    .await
+            } else {
+                self.assistant_response_non_streaming(messages, tool_defs, event_tx)
+                    .await
+            }
         }
+        .instrument(span)
+        .await
     }
 
     async fn assistant_response_streaming(
@@ -226,6 +296,12 @@ impl Gateway {
             }
         }
 
+        info!(
+            input_tokens = usage.input_tokens,
+            output_tokens = usage.output_tokens,
+            "provider response complete"
+        );
+
         Ok((response, usage))
     }
 
@@ -244,6 +320,12 @@ impl Gateway {
         if !text.is_empty() {
             let _ = event_tx.send(TurnEvent::TextDelta(text)).await;
         }
+
+        info!(
+            input_tokens = usage.input_tokens,
+            output_tokens = usage.output_tokens,
+            "provider response complete"
+        );
 
         Ok((response, usage))
     }

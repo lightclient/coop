@@ -2,6 +2,7 @@ use crate::traits::{Tool, ToolContext};
 use crate::types::{ToolDef, ToolOutput, TrustLevel};
 use anyhow::Result;
 use async_trait::async_trait;
+use tracing::debug;
 
 #[derive(Debug)]
 pub struct WriteFileTool;
@@ -68,9 +69,12 @@ impl Tool for WriteFileTool {
 
         let bytes = content.len();
         match tokio::fs::write(&resolved, content).await {
-            Ok(()) => Ok(ToolOutput::success(format!(
-                "wrote {bytes} bytes to {path_str}"
-            ))),
+            Ok(()) => {
+                debug!(path = %path_str, bytes_written = bytes, "write_file complete");
+                Ok(ToolOutput::success(format!(
+                    "wrote {bytes} bytes to {path_str}"
+                )))
+            }
             Err(e) => Ok(ToolOutput::error(format!("failed to write file: {e}"))),
         }
     }

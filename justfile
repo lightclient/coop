@@ -51,3 +51,39 @@ fix:
 hooks:
     git config core.hooksPath .githooks
     @echo "✅ git hooks installed from .githooks/"
+
+# Run TUI with JSONL tracing to traces.jsonl
+trace:
+    COOP_TRACE_FILE=traces.jsonl cargo run --bin coop -- chat
+
+# Run gateway daemon with JSONL tracing
+trace-gateway:
+    COOP_TRACE_FILE=traces.jsonl cargo run --bin coop -- start
+
+# Tail recent trace events
+trace-tail n="50":
+    tail -n {{n}} traces.jsonl
+
+# Show errors from traces
+trace-errors:
+    grep '"level":"ERROR"' traces.jsonl | tail -20
+
+# Show warnings from traces
+trace-warnings:
+    grep '"level":"WARN"' traces.jsonl | tail -20
+
+# Show tool execution spans
+trace-tools:
+    grep 'tool_execute' traces.jsonl | tail -20
+
+# Show API request spans
+trace-api:
+    grep 'anthropic_request' traces.jsonl | tail -20
+
+# Show agent turn spans
+trace-turns:
+    grep 'agent_turn' traces.jsonl | tail -20
+
+# Clear trace file
+trace-clear:
+    rm -f traces.jsonl
