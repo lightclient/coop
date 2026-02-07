@@ -1,5 +1,14 @@
 # Development commands for coop
 
+# Defaults — override via env or `just features=signal run`
+features   := env_var_or_default("COOP_FEATURES", "")
+trace_file := env_var_or_default("COOP_TRACE_FILE", "traces.jsonl")
+config     := env_var_or_default("COOP_CONFIG", "")
+
+# Internal: build cargo flag strings from the above
+_feat := if features != "" { "--features " + features } else { "" }
+_conf := if config != "" { "--config " + config } else { "" }
+
 # Run all checks (what CI will run)
 check: fmt-check toml-check lint deny test
 
@@ -35,11 +44,15 @@ machete:
 
 # Build in release mode
 build:
-    cargo build --release
+    cargo build {{_feat}} --release
 
 # Run the TUI
 run:
-    cargo run --bin coop
+    cargo run {{_feat}} --bin coop -- {{_conf}} chat
+
+# Start the gateway daemon
+start:
+    cargo run {{_feat}} --bin coop -- {{_conf}} start
 
 # Fix all auto-fixable issues
 fix:
@@ -52,46 +65,43 @@ hooks:
     git config core.hooksPath .githooks
     @echo "✅ git hooks installed from .githooks/"
 
-# Run TUI with JSONL tracing to traces.jsonl
+# Run TUI with JSONL tracing
 trace:
-    COOP_TRACE_FILE=traces.jsonl cargo run --bin coop -- chat
+    COOP_TRACE_FILE={{trace_file}} cargo run {{_feat}} --bin coop -- {{_conf}} chat
 
 # Run gateway daemon with JSONL tracing
 trace-gateway:
-    COOP_TRACE_FILE=traces.jsonl cargo run --bin coop -- start
-
-trace-gateway-signal:
-    COOP_TRACE_FILE=traces.jsonl cargo run --features signal --bin coop -- start
+    COOP_TRACE_FILE={{trace_file}} cargo run {{_feat}} --bin coop -- {{_conf}} start
 
 # Tail recent trace events
 trace-tail n="50":
-    tail -n {{n}} traces.jsonl
+    tail -n {{n}} {{trace_file}}
 
-# Follow traces.jsonl with friendly colors (live tail)
+# Follow traces with friendly colors (live tail)
 trace-follow:
-    touch traces.jsonl
-    tail -f traces.jsonl | jq -r --unbuffered -f scripts/trace-colorize.jq
+    touch {{trace_file}}
+    tail -f {{trace_file}} | jq -r --unbuffered -f scripts/trace-colorize.jq
 
 # Show errors from traces
 trace-errors:
-    grep '"level":"ERROR"' traces.jsonl | tail -20
+    grep '"level":"ERROR"' {{trace_file}} | tail -20
 
 # Show warnings from traces
 trace-warnings:
-    grep '"level":"WARN"' traces.jsonl | tail -20
+    grep '"level":"WARN"' {{trace_file}} | tail -20
 
 # Show tool execution spans
 trace-tools:
-    grep 'tool_execute' traces.jsonl | tail -20
+    grep 'tool_execute' {{trace_file}} | tail -20
 
 # Show API request spans
 trace-api:
-    grep 'anthropic_request' traces.jsonl | tail -20
+    grep 'anthropic_request' {{trace_file}} | tail -20
 
 # Show agent turn spans
 trace-turns:
-    grep 'agent_turn' traces.jsonl | tail -20
+    grep 'agent_turn' {{trace_file}} | tail -20
 
 # Clear trace file
 trace-clear:
-    rm -f traces.jsonl
+    rm -f {{trace_file}}
