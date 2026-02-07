@@ -112,6 +112,7 @@ Tracing: Log tool inputs/outputs, API request/response metadata, and session sta
 Tracing: Use `info!` for key events, `debug!` for details, `trace!` for IPC chatter
 Tracing: JSONL traces (`COOP_TRACE_FILE`) are the primary debugging interface for AI agents
 Tracing: Console output must be a superset of JSONL trace content
+Tracing: When modifying tracing spans or events, verify by running the binary with `COOP_TRACE_FILE=traces.jsonl` and confirming the expected fields appear in the output. A successful `cargo build` is not sufficient verification.
 
 ## Tracing (Dev)
 

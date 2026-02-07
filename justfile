@@ -64,6 +64,11 @@ trace-gateway:
 trace-tail n="50":
     tail -n {{n}} traces.jsonl
 
+# Follow traces.jsonl with friendly colors (live tail)
+trace-follow:
+    touch traces.jsonl
+    tail -f traces.jsonl | jq -r --unbuffered -f scripts/trace-colorize.jq
+
 # Show errors from traces
 trace-errors:
     grep '"level":"ERROR"' traces.jsonl | tail -20

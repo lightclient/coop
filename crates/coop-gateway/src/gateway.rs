@@ -83,6 +83,7 @@ impl Gateway {
             "agent_turn",
             session = %session_key,
             input_len = user_input.len(),
+            user_input = user_input,
             trust = ?trust,
         );
 
