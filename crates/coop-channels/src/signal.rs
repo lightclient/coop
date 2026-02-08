@@ -53,6 +53,11 @@ pub enum SignalAction {
         target: SignalTarget,
         started: bool,
     },
+    SendReceipt {
+        sender_uuid: String,
+        timestamps: Vec<u64>,
+        receipt_type: SignalReceiptType,
+    },
     Shutdown,
 }
 
@@ -62,6 +67,12 @@ pub struct SignalChannel {
     inbound_rx: mpsc::Receiver<InboundMessage>,
     action_tx: mpsc::Sender<SignalAction>,
     health: HealthState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignalReceiptType {
+    Delivery,
+    Read,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,7 +150,13 @@ impl SignalChannel {
         let (action_tx, action_rx) = mpsc::channel(64);
         let health = Arc::new(Mutex::new(ChannelHealth::Healthy));
 
-        start_signal_runtime(manager, inbound_tx, action_rx, Arc::clone(&health));
+        start_signal_runtime(
+            manager,
+            inbound_tx,
+            action_tx.clone(),
+            action_rx,
+            Arc::clone(&health),
+        );
 
         Ok(Self {
             id: "signal".to_owned(),
@@ -214,6 +231,7 @@ impl SignalChannel {
 fn start_signal_runtime(
     manager: SignalManager,
     inbound_tx: mpsc::Sender<InboundMessage>,
+    action_tx: mpsc::Sender<SignalAction>,
     action_rx: mpsc::Receiver<SignalAction>,
     health: HealthState,
 ) {
@@ -246,6 +264,7 @@ fn start_signal_runtime(
                 let receive_task = tokio::task::spawn_local(Box::pin(receive_task(
                     receive_manager,
                     inbound_tx,
+                    action_tx,
                     receive_health,
                 )));
                 let send_task =
@@ -286,6 +305,7 @@ impl Channel for SignalChannel {
 async fn receive_task(
     mut manager: SignalManager,
     inbound_tx: mpsc::Sender<InboundMessage>,
+    action_tx: mpsc::Sender<SignalAction>,
     health: HealthState,
 ) {
     let mut backoff = Duration::from_secs(1);
@@ -305,6 +325,11 @@ async fn receive_task(
                     let sender = content.metadata.sender.raw_uuid().to_string();
                     let content_body = signal_content_body_name(&content.body);
                     let timestamp = content.metadata.timestamp;
+                    let needs_receipt = content.metadata.needs_receipt
+                        || matches!(
+                            &content.body,
+                            ContentBody::DataMessage(_) | ContentBody::EditMessage(_)
+                        );
 
                     let receive_span = info_span!(
                         "signal_receive_event",
@@ -318,7 +343,24 @@ async fn receive_task(
                         inbound_from_content(&content)
                     };
 
-                    if let Some(inbound) = inbound {
+                    if let Some(ref inbound) = inbound {
+                        if needs_receipt && inbound.message_timestamp.is_some() {
+                            let _ = action_tx
+                                .send(SignalAction::SendReceipt {
+                                    sender_uuid: sender.clone(),
+                                    timestamps: vec![timestamp],
+                                    receipt_type: SignalReceiptType::Delivery,
+                                })
+                                .await;
+                            let _ = action_tx
+                                .send(SignalAction::SendReceipt {
+                                    sender_uuid: sender.clone(),
+                                    timestamps: vec![timestamp],
+                                    receipt_type: SignalReceiptType::Read,
+                                })
+                                .await;
+                        }
+
                         debug!(
                             signal.inbound_kind = ?inbound.kind,
                             signal.sender = %inbound.sender,
@@ -328,7 +370,7 @@ async fn receive_task(
                             "received signal inbound"
                         );
 
-                        if inbound_tx.send(inbound).await.is_err() {
+                        if inbound_tx.send(inbound.clone()).await.is_err() {
                             return;
                         }
                     }
@@ -504,6 +546,36 @@ async fn send_signal_action(manager: &mut SignalManager, action: SignalAction) -
                 },
             };
             send_action_with_trace(manager, span, target, typing, timestamp).await
+        }
+        SignalAction::SendReceipt {
+            sender_uuid,
+            timestamps,
+            receipt_type,
+        } => {
+            let (action_name, proto_type) = match receipt_type {
+                SignalReceiptType::Delivery => (
+                    "delivery_receipt",
+                    presage::proto::receipt_message::Type::Delivery,
+                ),
+                SignalReceiptType::Read => {
+                    ("read_receipt", presage::proto::receipt_message::Type::Read)
+                }
+            };
+            let timestamp = now_epoch_millis();
+            let span = info_span!(
+                "signal_action_send",
+                signal.action = action_name,
+                signal.target_kind = "direct",
+                signal.target = %sender_uuid,
+                signal.timestamp = timestamp,
+                signal.receipt_timestamps = ?timestamps,
+            );
+            let receipt = presage::proto::ReceiptMessage {
+                r#type: Some(proto_type.into()),
+                timestamp: timestamps,
+            };
+            let target = SignalTarget::Direct(sender_uuid);
+            send_action_with_trace(manager, span, target, receipt, timestamp).await
         }
         SignalAction::Shutdown => Ok(()),
     }

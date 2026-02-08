@@ -1,5 +1,9 @@
 # TODO
 
+## Project
+
+- make it clear that deps like sccache need to be installed to compile
+
 ## Gateway
 
 - add encryption and authentication flow to channel connections
@@ -8,6 +12,9 @@
   list
 - convert config to toml
 - per channel prompt on how to use the channel
+- config checking, to see how coop will behave on restart. would be good to have
+  info about files loaded into memory after, etc so the agent can decide if it
+  working as expected even if it is syntactically correct
 
 ## Agent
 
@@ -18,6 +25,9 @@
 ## Signal
 
 - add support for chat history
+- resolve user via phone number instead of uuid
+- typing should last until the agent responds
+- ~~should send delivered / read receipts~~
 
 ## TUI
 
