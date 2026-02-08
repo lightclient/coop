@@ -7,10 +7,58 @@ use presage::proto::{
 };
 use tracing::{field, info, info_span};
 
-enum ParseOutcome {
-    Parsed(InboundMessage),
-    UnsupportedBodyVariant,
-    DroppedEmpty,
+/// Parse a Signal Content into an InboundMessage without tracing.
+/// Used by the history query path to avoid trace noise.
+pub(crate) fn parse_content(content: &Content) -> Option<InboundMessage> {
+    let sender = content.metadata.sender.raw_uuid().to_string();
+    let timestamp = content.metadata.timestamp;
+
+    match &content.body {
+        ContentBody::DataMessage(data_message) => {
+            inbound_from_data_message(data_message, &sender, timestamp)
+        }
+        ContentBody::EditMessage(edit_message) => {
+            inbound_from_edit_message(edit_message, &sender, timestamp)
+        }
+        ContentBody::TypingMessage(typing_message) => {
+            let (chat_id, is_group, reply_to) =
+                chat_context_from_typing_message(typing_message, &sender);
+            Some(InboundMessage {
+                channel: "signal".to_owned(),
+                sender,
+                content: String::new(),
+                chat_id,
+                is_group,
+                timestamp: from_epoch_millis(timestamp),
+                reply_to,
+                kind: InboundKind::Typing,
+                message_timestamp: Some(timestamp),
+            })
+        }
+        ContentBody::ReceiptMessage(receipt_message) => {
+            let content_text = prepend_sender_context(
+                &format_receipt_message(receipt_message),
+                &sender,
+                None,
+                timestamp,
+            );
+            Some(InboundMessage {
+                channel: "signal".to_owned(),
+                sender: sender.clone(),
+                content: content_text,
+                chat_id: None,
+                is_group: false,
+                timestamp: from_epoch_millis(timestamp),
+                reply_to: Some(sender),
+                kind: InboundKind::Receipt,
+                message_timestamp: Some(timestamp),
+            })
+        }
+        ContentBody::SynchronizeMessage(sync_message) => {
+            inbound_from_sync_message(sync_message, &sender, timestamp)
+        }
+        _ => None,
+    }
 }
 
 pub(super) fn inbound_from_content(content: &Content) -> Option<InboundMessage> {
@@ -31,90 +79,43 @@ pub(super) fn inbound_from_content(content: &Content) -> Option<InboundMessage> 
 
     let _guard = span.enter();
 
-    let outcome = match &content.body {
-        ContentBody::DataMessage(data_message) => {
-            inbound_from_data_message(data_message, &sender, timestamp)
-                .map_or(ParseOutcome::DroppedEmpty, ParseOutcome::Parsed)
-        }
-        ContentBody::EditMessage(edit_message) => {
-            inbound_from_edit_message(edit_message, &sender, timestamp)
-                .map_or(ParseOutcome::DroppedEmpty, ParseOutcome::Parsed)
-        }
-        ContentBody::TypingMessage(typing_message) => {
-            let (chat_id, is_group, reply_to) =
-                chat_context_from_typing_message(typing_message, &sender);
-            ParseOutcome::Parsed(InboundMessage {
-                channel: "signal".to_owned(),
-                sender,
-                content: String::new(),
-                chat_id,
-                is_group,
-                timestamp: from_epoch_millis(timestamp),
-                reply_to,
-                kind: InboundKind::Typing,
-                message_timestamp: Some(timestamp),
-            })
-        }
-        ContentBody::ReceiptMessage(receipt_message) => {
-            let content_text = prepend_sender_context(
-                &format_receipt_message(receipt_message),
-                &sender,
-                None,
-                timestamp,
-            );
-            ParseOutcome::Parsed(InboundMessage {
-                channel: "signal".to_owned(),
-                sender: sender.clone(),
-                content: content_text,
-                chat_id: None,
-                is_group: false,
-                timestamp: from_epoch_millis(timestamp),
-                reply_to: Some(sender),
-                kind: InboundKind::Receipt,
-                message_timestamp: Some(timestamp),
-            })
-        }
-        ContentBody::SynchronizeMessage(sync_message) => {
-            inbound_from_sync_message(sync_message, &sender, timestamp)
-                .map_or(ParseOutcome::DroppedEmpty, ParseOutcome::Parsed)
-        }
-        _ => ParseOutcome::UnsupportedBodyVariant,
-    };
+    let inbound = parse_content(content);
 
-    match outcome {
-        ParseOutcome::Parsed(inbound) => {
-            span.record(
-                "signal.inbound_kind",
-                signal_inbound_kind_name(&inbound.kind),
-            );
-            if let Some(chat_id) = inbound.chat_id.as_deref() {
-                span.record("signal.chat_id", chat_id);
-            }
-            span.record("signal.is_group", inbound.is_group);
-            if let Some(message_timestamp) = inbound.message_timestamp {
-                span.record("signal.message_timestamp", message_timestamp);
-            }
-            span.record("signal.raw_content", field::display(&inbound.content));
-
-            info!(
-                signal.inbound_kind = signal_inbound_kind_name(&inbound.kind),
-                signal.chat_id = ?inbound.chat_id,
-                signal.is_group = inbound.is_group,
-                signal.message_timestamp = ?inbound.message_timestamp,
-                signal.raw_content = %inbound.content,
-                "signal inbound parsed and emitted"
-            );
-
-            Some(inbound)
+    if let Some(inbound) = inbound {
+        span.record(
+            "signal.inbound_kind",
+            signal_inbound_kind_name(&inbound.kind),
+        );
+        if let Some(chat_id) = inbound.chat_id.as_deref() {
+            span.record("signal.chat_id", chat_id);
         }
-        ParseOutcome::UnsupportedBodyVariant => {
-            info!("signal inbound unsupported body variant");
-            None
+        span.record("signal.is_group", inbound.is_group);
+        if let Some(message_timestamp) = inbound.message_timestamp {
+            span.record("signal.message_timestamp", message_timestamp);
         }
-        ParseOutcome::DroppedEmpty => {
+        span.record("signal.raw_content", field::display(&inbound.content));
+
+        info!(
+            signal.inbound_kind = signal_inbound_kind_name(&inbound.kind),
+            signal.chat_id = ?inbound.chat_id,
+            signal.is_group = inbound.is_group,
+            signal.message_timestamp = ?inbound.message_timestamp,
+            signal.raw_content = %inbound.content,
+            "signal inbound parsed and emitted"
+        );
+
+        Some(inbound)
+    } else {
+        let body_name = signal_content_body_name(&content.body);
+        if matches!(
+            body_name,
+            "data_message" | "edit_message" | "synchronize_message"
+        ) {
             info!("signal inbound dropped/empty");
-            None
+        } else {
+            info!("signal inbound unsupported body variant");
         }
+        None
     }
 }
 

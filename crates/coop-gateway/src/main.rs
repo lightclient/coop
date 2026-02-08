@@ -5,6 +5,7 @@ mod config;
 mod gateway;
 mod router;
 mod scheduler;
+mod session_store;
 #[cfg(feature = "signal")]
 mod signal_loop;
 mod tracing_setup;
@@ -140,6 +141,8 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
     let mut signal_channel: Option<SignalChannel> = None;
     #[cfg(feature = "signal")]
     let mut signal_action_tx: Option<mpsc::Sender<coop_channels::SignalAction>> = None;
+    #[cfg(feature = "signal")]
+    let mut signal_query_tx: Option<mpsc::Sender<coop_channels::SignalQuery>> = None;
 
     if let Some(signal) = &config.channels.signal {
         #[cfg(feature = "signal")]
@@ -150,6 +153,7 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
             match SignalChannel::connect(&db_path).await {
                 Ok(channel) => {
                     signal_action_tx = Some(channel.action_sender());
+                    signal_query_tx = Some(channel.query_sender());
                     signal_channel = Some(channel);
                 }
                 Err(error) => {
@@ -174,15 +178,16 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
     let default_executor = DefaultExecutor::new();
 
     #[cfg(feature = "signal")]
-    let executor: Arc<dyn coop_core::ToolExecutor> =
-        if let Some(action_tx) = signal_action_tx.clone() {
-            Arc::new(CompositeExecutor::new(vec![
-                Box::new(default_executor),
-                Box::new(SignalToolExecutor::new(action_tx)),
-            ]))
-        } else {
-            Arc::new(default_executor)
-        };
+    let executor: Arc<dyn coop_core::ToolExecutor> = if let (Some(action_tx), Some(query_tx)) =
+        (signal_action_tx.clone(), signal_query_tx.clone())
+    {
+        Arc::new(CompositeExecutor::new(vec![
+            Box::new(default_executor),
+            Box::new(SignalToolExecutor::new(action_tx, query_tx)),
+        ]))
+    } else {
+        Arc::new(default_executor)
+    };
 
     #[cfg(not(feature = "signal"))]
     let executor: Arc<dyn coop_core::ToolExecutor> = Arc::new(default_executor);

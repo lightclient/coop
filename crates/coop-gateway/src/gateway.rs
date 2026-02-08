@@ -3,8 +3,8 @@ use coop_core::prompt::{
     PromptBuilder, SkillEntry, WorkspaceIndex, default_file_configs, scan_skills,
 };
 use coop_core::{
-    Message, Provider, SessionKey, SessionKind, ToolContext, ToolDef, ToolExecutor, TrustLevel,
-    TurnConfig, TurnEvent, TurnResult, TypingNotifier, Usage,
+    InboundMessage, Message, Provider, SessionKey, SessionKind, ToolContext, ToolDef, ToolExecutor,
+    TrustLevel, TurnConfig, TurnEvent, TurnResult, TypingNotifier, Usage,
 };
 use futures::StreamExt;
 use std::collections::HashMap;
@@ -13,10 +13,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::{Instrument, debug, error, info, info_span};
+use tracing::{Instrument, debug, error, info, info_span, warn};
 use uuid::Uuid;
 
 use crate::config::Config;
+use crate::session_store::DiskSessionStore;
 
 pub(crate) struct Gateway {
     config: Config,
@@ -27,6 +28,7 @@ pub(crate) struct Gateway {
     executor: Arc<dyn ToolExecutor>,
     typing_notifier: Option<Arc<dyn TypingNotifier>>,
     sessions: Mutex<HashMap<SessionKey, Vec<Message>>>,
+    session_store: DiskSessionStore,
 }
 
 /// Re-send interval for typing indicators. Signal's client-side timeout is
@@ -129,6 +131,8 @@ impl Gateway {
             debug!(count = skills.len(), "loaded skills");
         }
 
+        let session_store = DiskSessionStore::new(workspace.join("sessions"))?;
+
         Ok(Self {
             config,
             workspace,
@@ -138,6 +142,7 @@ impl Gateway {
             executor,
             typing_notifier,
             sessions: Mutex::new(HashMap::new()),
+            session_store,
         })
     }
 
@@ -401,11 +406,19 @@ impl Gateway {
     }
 
     pub(crate) fn clear_session(&self, session_key: &SessionKey) {
-        let mut sessions = self.sessions.lock().expect("sessions mutex poisoned");
-        sessions.remove(session_key);
+        self.sessions
+            .lock()
+            .expect("sessions mutex poisoned")
+            .remove(session_key);
+        if let Err(e) = self.session_store.delete(session_key) {
+            warn!(session = %session_key, error = %e, "failed to delete persisted session");
+        }
     }
 
     fn append_message(&self, session_key: &SessionKey, message: Message) {
+        if let Err(e) = self.session_store.append(session_key, &message) {
+            warn!(session = %session_key, error = %e, "failed to persist message");
+        }
         let mut sessions = self.sessions.lock().expect("sessions mutex poisoned");
         sessions
             .entry(session_key.clone())
@@ -418,12 +431,57 @@ impl Gateway {
         let mut sessions = self.sessions.lock().expect("sessions mutex poisoned");
         if let Some(msgs) = sessions.get_mut(session_key) {
             msgs.truncate(len);
+            if let Err(e) = self.session_store.replace(session_key, msgs) {
+                warn!(session = %session_key, error = %e, "failed to persist truncated session");
+            }
         }
     }
 
     fn messages(&self, session_key: &SessionKey) -> Vec<Message> {
-        let sessions = self.sessions.lock().expect("sessions mutex poisoned");
+        let mut sessions = self.sessions.lock().expect("sessions mutex poisoned");
+        if !sessions.contains_key(session_key) {
+            match self.session_store.load(session_key) {
+                Ok(msgs) if !msgs.is_empty() => {
+                    sessions.insert(session_key.clone(), msgs);
+                }
+                Err(e) => {
+                    warn!(session = %session_key, error = %e, "failed to load session from disk");
+                }
+                _ => {}
+            }
+        }
         sessions.get(session_key).cloned().unwrap_or_default()
+    }
+
+    /// Returns true if a session has no messages (checks disk too).
+    pub(crate) fn session_is_empty(&self, session_key: &SessionKey) -> bool {
+        self.messages(session_key).is_empty()
+    }
+
+    /// Seed a session with formatted Signal chat history for context.
+    pub(crate) fn seed_signal_history(&self, session_key: &SessionKey, history: &[InboundMessage]) {
+        if history.is_empty() {
+            return;
+        }
+
+        let mut context = String::from("[Recent Signal chat history for context]\n");
+        for msg in history {
+            context.push_str(&msg.content);
+            context.push('\n');
+        }
+        context.push_str("[End of history context]");
+
+        info!(
+            session = %session_key,
+            message_count = history.len(),
+            "seeding session with signal history"
+        );
+
+        self.append_message(session_key, Message::user().with_text(context));
+        self.append_message(
+            session_key,
+            Message::assistant().with_text("I have context from the recent conversation history."),
+        );
     }
 
     async fn assistant_response(

@@ -1,20 +1,58 @@
 use anyhow::Result;
-use coop_channels::SignalChannel;
+use coop_channels::{SignalChannel, SignalTarget};
 use coop_core::{Channel, InboundKind, InboundMessage, OutboundMessage, TurnEvent};
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use tracing::warn;
 
 use crate::router::MessageRouter;
+
+/// Max messages to load from Signal history when bootstrapping a new session.
+const HISTORY_BOOTSTRAP_LIMIT: usize = 20;
 
 pub(crate) async fn run_signal_loop(
     mut signal_channel: SignalChannel,
     router: Arc<MessageRouter>,
 ) -> Result<()> {
     loop {
-        handle_signal_inbound_once(&mut signal_channel, router.as_ref()).await?;
+        let inbound = Channel::recv(&mut signal_channel).await?;
+        if !should_dispatch_signal_message(&inbound) {
+            trace_signal_inbound("signal inbound filtered", &inbound);
+            continue;
+        }
+
+        let Some(target) = signal_reply_target(&inbound) else {
+            continue;
+        };
+
+        trace_signal_inbound("signal inbound dispatched", &inbound);
+
+        // Bootstrap: seed session with recent Signal history if this is a new session
+        let decision = router.route(&inbound);
+        if router.session_is_empty(&decision.session_key)
+            && let Ok(signal_target) = SignalTarget::parse(&target)
+        {
+            match signal_channel
+                .query_messages(&signal_target, HISTORY_BOOTSTRAP_LIMIT, None, None)
+                .await
+            {
+                Ok(history) if !history.is_empty() => {
+                    router.seed_signal_history(&decision.session_key, &history);
+                }
+                Err(e) => {
+                    warn!(error = %e, "failed to load signal history for bootstrap");
+                }
+                _ => {}
+            }
+        }
+
+        dispatch_signal_turn(&mut signal_channel, router.as_ref(), &inbound, &target).await?;
     }
 }
 
+/// Handle a single inbound Signal message (without history bootstrap).
+/// Used by tests; the production path goes through `run_signal_loop`.
+#[cfg(test)]
 pub(crate) async fn handle_signal_inbound_once<C: Channel>(
     signal_channel: &mut C,
     router: &MessageRouter,
@@ -30,7 +68,17 @@ pub(crate) async fn handle_signal_inbound_once<C: Channel>(
     };
 
     trace_signal_inbound("signal inbound dispatched", &inbound);
+    dispatch_signal_turn(signal_channel, router, &inbound, &target).await
+}
 
+/// Dispatch a single inbound message: run the agent turn and stream
+/// text/tool events to the channel.
+async fn dispatch_signal_turn<C: Channel>(
+    signal_channel: &mut C,
+    router: &MessageRouter,
+    inbound: &InboundMessage,
+    target: &str,
+) -> Result<()> {
     // Process turn events inline so that text produced before a tool call
     // is flushed to the channel *before* the tool executes. This prevents
     // tool side-effects (e.g. signal_reply) from arriving before the
@@ -48,7 +96,7 @@ pub(crate) async fn handle_signal_inbound_once<C: Channel>(
                 text.push_str(&delta);
             }
             TurnEvent::ToolStart { .. } => {
-                flush_text(signal_channel, &target, &mut text).await?;
+                flush_text(signal_channel, target, &mut text).await?;
             }
             TurnEvent::Error(message) => {
                 text = message;
@@ -60,7 +108,7 @@ pub(crate) async fn handle_signal_inbound_once<C: Channel>(
         }
     }
 
-    flush_text(signal_channel, &target, &mut text).await?;
+    flush_text(signal_channel, target, &mut text).await?;
 
     match dispatch_task.await {
         Ok(result) => result.map(|_| ()),

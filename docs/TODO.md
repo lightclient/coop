@@ -15,6 +15,8 @@
 - config checking, to see how coop will behave on restart. would be good to have
   info about files loaded into memory after, etc so the agent can decide if it
   working as expected even if it is syntactically correct
+- sessions persist across reboots
+- multi agent and subagent support
 
 ## Agent
 

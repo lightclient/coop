@@ -1,9 +1,11 @@
 mod inbound;
+mod query;
 #[allow(clippy::unwrap_used)]
 #[cfg(test)]
 mod target_tests;
 pub mod testkit;
 
+pub use query::SignalQuery;
 pub use testkit::MockSignalChannel;
 
 use anyhow::{Context, Result};
@@ -30,7 +32,7 @@ use std::time::{Duration, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use tracing::{Instrument, debug, info, info_span, warn};
 
-type SignalManager = Manager<SqliteStore, Registered>;
+pub(crate) type SignalManager = Manager<SqliteStore, Registered>;
 type HealthState = Arc<Mutex<ChannelHealth>>;
 
 #[derive(Debug, Clone)]
@@ -66,6 +68,7 @@ pub struct SignalChannel {
     id: String,
     inbound_rx: mpsc::Receiver<InboundMessage>,
     action_tx: mpsc::Sender<SignalAction>,
+    query_tx: mpsc::Sender<SignalQuery>,
     health: HealthState,
 }
 
@@ -148,6 +151,7 @@ impl SignalChannel {
 
         let (inbound_tx, inbound_rx) = mpsc::channel(64);
         let (action_tx, action_rx) = mpsc::channel(64);
+        let (query_tx, query_rx) = mpsc::channel(16);
         let health = Arc::new(Mutex::new(ChannelHealth::Healthy));
 
         start_signal_runtime(
@@ -155,6 +159,7 @@ impl SignalChannel {
             inbound_tx,
             action_tx.clone(),
             action_rx,
+            query_rx,
             Arc::clone(&health),
         );
 
@@ -162,12 +167,42 @@ impl SignalChannel {
             id: "signal".to_owned(),
             inbound_rx,
             action_tx,
+            query_tx,
             health,
         })
     }
 
     pub fn action_sender(&self) -> mpsc::Sender<SignalAction> {
         self.action_tx.clone()
+    }
+
+    pub fn query_sender(&self) -> mpsc::Sender<SignalQuery> {
+        self.query_tx.clone()
+    }
+
+    /// Query recent messages from the Signal store for a given target.
+    pub async fn query_messages(
+        &self,
+        target: &SignalTarget,
+        limit: usize,
+        before: Option<u64>,
+        after: Option<u64>,
+    ) -> Result<Vec<InboundMessage>> {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        self.query_tx
+            .send(SignalQuery::RecentMessages {
+                target: target.clone(),
+                limit,
+                before,
+                after,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_send_err| anyhow::anyhow!("signal query channel closed"))?;
+
+        reply_rx
+            .await
+            .map_err(|_recv_err| anyhow::anyhow!("signal query response lost"))?
     }
 
     pub async fn link_device<F>(
@@ -233,6 +268,7 @@ fn start_signal_runtime(
     inbound_tx: mpsc::Sender<InboundMessage>,
     action_tx: mpsc::Sender<SignalAction>,
     action_rx: mpsc::Receiver<SignalAction>,
+    query_rx: mpsc::Receiver<SignalQuery>,
     health: HealthState,
 ) {
     std::thread::Builder::new()
@@ -258,6 +294,7 @@ fn start_signal_runtime(
             let local = tokio::task::LocalSet::new();
             local.block_on(&runtime, async move {
                 let receive_manager = manager.clone();
+                let query_manager = manager.clone();
                 let receive_health = Arc::clone(&health);
                 let send_health = Arc::clone(&health);
 
@@ -269,8 +306,10 @@ fn start_signal_runtime(
                 )));
                 let send_task =
                     tokio::task::spawn_local(Box::pin(send_task(manager, action_rx, send_health)));
+                let query_task =
+                    tokio::task::spawn_local(Box::pin(query::query_task(query_manager, query_rx)));
 
-                let _ = futures::future::join(receive_task, send_task).await;
+                let _ = futures::future::join3(receive_task, send_task, query_task).await;
             });
         })
         .expect("failed to spawn signal runtime thread");

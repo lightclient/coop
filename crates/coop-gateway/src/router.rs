@@ -31,6 +31,14 @@ impl MessageRouter {
         route_message(msg, &self.config)
     }
 
+    pub(crate) fn session_is_empty(&self, session_key: &SessionKey) -> bool {
+        self.gateway.session_is_empty(session_key)
+    }
+
+    pub(crate) fn seed_signal_history(&self, session_key: &SessionKey, history: &[InboundMessage]) {
+        self.gateway.seed_signal_history(session_key, history);
+    }
+
     pub(crate) async fn dispatch(
         &self,
         msg: &InboundMessage,

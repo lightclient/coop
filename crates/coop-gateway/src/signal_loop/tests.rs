@@ -3,7 +3,8 @@ use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Utc;
 use coop_channels::{
-    MockSignalChannel, SignalAction, SignalTarget, SignalToolExecutor, SignalTypingNotifier,
+    MockSignalChannel, SignalAction, SignalQuery, SignalTarget, SignalToolExecutor,
+    SignalTypingNotifier,
 };
 use coop_core::fakes::FakeProvider;
 use coop_core::tools::DefaultExecutor;
@@ -155,6 +156,11 @@ users:
 ",
     )
     .unwrap()
+}
+
+fn dummy_query_tx() -> mpsc::Sender<SignalQuery> {
+    let (tx, _rx) = mpsc::channel(1);
+    tx
 }
 
 fn build_router(
@@ -472,8 +478,10 @@ async fn handle_signal_inbound_once_does_not_send_empty_response() {
 async fn handle_signal_inbound_once_executes_signal_reply_tool() {
     let mut channel = MockSignalChannel::new();
     let provider = scripted_signal_reply_provider();
-    let executor: Arc<dyn ToolExecutor> =
-        Arc::new(SignalToolExecutor::new(channel.action_sender()));
+    let executor: Arc<dyn ToolExecutor> = Arc::new(SignalToolExecutor::new(
+        channel.action_sender(),
+        dummy_query_tx(),
+    ));
     let router = build_router(provider, executor, None);
 
     channel
@@ -513,8 +521,10 @@ async fn handle_signal_inbound_once_executes_signal_reply_tool() {
 async fn router_dispatch_emits_tool_events_and_queues_signal_action() {
     let mut channel = MockSignalChannel::new();
     let provider = scripted_signal_reply_provider();
-    let executor: Arc<dyn ToolExecutor> =
-        Arc::new(SignalToolExecutor::new(channel.action_sender()));
+    let executor: Arc<dyn ToolExecutor> = Arc::new(SignalToolExecutor::new(
+        channel.action_sender(),
+        dummy_query_tx(),
+    ));
     let router = build_router(provider, executor, None);
 
     let inbound = inbound_message(
@@ -616,8 +626,10 @@ fn scripted_text_before_tool_provider() -> Arc<dyn Provider> {
 async fn text_before_tool_call_is_flushed_separately() {
     let mut channel = MockSignalChannel::new();
     let provider = scripted_text_before_tool_provider();
-    let executor: Arc<dyn ToolExecutor> =
-        Arc::new(SignalToolExecutor::new(channel.action_sender()));
+    let executor: Arc<dyn ToolExecutor> = Arc::new(SignalToolExecutor::new(
+        channel.action_sender(),
+        dummy_query_tx(),
+    ));
     let router = build_router(provider, executor, None);
 
     channel
