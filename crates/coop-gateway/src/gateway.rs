@@ -10,7 +10,9 @@ use futures::StreamExt;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, error, info, info_span};
 use uuid::Uuid;
 
@@ -27,28 +29,45 @@ pub(crate) struct Gateway {
     sessions: Mutex<HashMap<SessionKey, Vec<Message>>>,
 }
 
+/// Re-send interval for typing indicators. Signal's client-side timeout is
+/// ~10 s, so we refresh well within that window.
+const TYPING_REFRESH_INTERVAL: Duration = Duration::from_secs(8);
+
 struct TypingGuard {
-    notifier: Arc<dyn TypingNotifier>,
-    session_key: SessionKey,
+    cancel: CancellationToken,
 }
 
 impl TypingGuard {
     fn new(notifier: Arc<dyn TypingNotifier>, session_key: SessionKey) -> Self {
-        Self {
-            notifier,
-            session_key,
-        }
+        let cancel = CancellationToken::new();
+        let child = cancel.child_token();
+
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    () = tokio::time::sleep(TYPING_REFRESH_INTERVAL) => {
+                        info!(
+                            session = %session_key,
+                            "typing notifier refresh",
+                        );
+                        notifier.set_typing(&session_key, true).await;
+                    }
+                    () = child.cancelled() => {
+                        emit_typing_notifier_event(&session_key, false);
+                        notifier.set_typing(&session_key, false).await;
+                        break;
+                    }
+                }
+            }
+        });
+
+        Self { cancel }
     }
 }
 
 impl Drop for TypingGuard {
     fn drop(&mut self) {
-        let notifier = Arc::clone(&self.notifier);
-        let session_key = self.session_key.clone();
-        emit_typing_notifier_event(&session_key, false);
-        tokio::spawn(async move {
-            notifier.set_typing(&session_key, false).await;
-        });
+        self.cancel.cancel();
     }
 }
 
@@ -990,5 +1009,52 @@ agent:
         let events = notifier.events.lock().await.clone();
         assert!(events[0]);
         assert!(!events[1]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn typing_guard_refreshes_periodically() {
+        let notifier = Arc::new(RecordingTypingNotifier::new());
+        let session_key = SessionKey {
+            agent_id: "coop".to_owned(),
+            kind: SessionKind::Main,
+        };
+
+        // Initial set_typing(true) as the callsite does
+        notifier.set_typing(&session_key, true).await;
+        let guard = TypingGuard::new(
+            Arc::clone(&notifier) as Arc<dyn TypingNotifier>,
+            session_key,
+        );
+
+        // Let the spawned background task register its first sleep.
+        tokio::task::yield_now().await;
+
+        // Advance past one refresh interval and let the task fully
+        // re-enter its loop before advancing again.
+        tokio::time::advance(TYPING_REFRESH_INTERVAL).await;
+        // Yield a few times so the background task processes the
+        // wakeup, calls set_typing, and re-registers its next sleep.
+        for _ in 0..5 {
+            tokio::task::yield_now().await;
+        }
+
+        let events = notifier.events.lock().await.clone();
+        assert_eq!(events, vec![true, true], "after first refresh");
+
+        tokio::time::advance(TYPING_REFRESH_INTERVAL).await;
+        for _ in 0..5 {
+            tokio::task::yield_now().await;
+        }
+
+        // initial true + 2 refresh trues = 3 events
+        let events = notifier.events.lock().await.clone();
+        assert_eq!(events, vec![true, true, true], "after second refresh");
+
+        // Drop the guard → cancellation triggers stop
+        drop(guard);
+        tokio::task::yield_now().await;
+
+        let events = notifier.events.lock().await.clone();
+        assert_eq!(events, vec![true, true, true, false]);
     }
 }
