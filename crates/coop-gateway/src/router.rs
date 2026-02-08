@@ -326,18 +326,28 @@ users:
         assert_eq!(decision.trust, TrustLevel::Full);
     }
 
+    fn test_workspace() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("SOUL.md"), "You are a test agent.").unwrap();
+        dir
+    }
+
     #[tokio::test]
     async fn dispatch_routes_and_runs_turn() {
+        let workspace = test_workspace();
         let config = test_config();
         let provider: Arc<dyn Provider> = Arc::new(FakeProvider::new("hello from fake"));
         let executor = Arc::new(DefaultExecutor::new());
-        let gateway = Arc::new(Gateway::new(
-            config.clone(),
-            "system".to_string(),
-            provider,
-            executor,
-            None,
-        ));
+        let gateway = Arc::new(
+            Gateway::new(
+                config.clone(),
+                workspace.path().to_path_buf(),
+                provider,
+                executor,
+                None,
+            )
+            .unwrap(),
+        );
         let router = MessageRouter::new(config, gateway.clone());
 
         let msg = inbound("signal", "bob-uuid", None, false, None);
@@ -368,16 +378,20 @@ users:
 
     #[tokio::test]
     async fn dispatch_collect_text_returns_assistant_reply() {
+        let workspace = test_workspace();
         let config = test_config();
         let provider: Arc<dyn Provider> = Arc::new(FakeProvider::new("hi from fake"));
         let executor = Arc::new(DefaultExecutor::new());
-        let gateway = Arc::new(Gateway::new(
-            config.clone(),
-            "system".to_string(),
-            provider,
-            executor,
-            None,
-        ));
+        let gateway = Arc::new(
+            Gateway::new(
+                config.clone(),
+                workspace.path().to_path_buf(),
+                provider,
+                executor,
+                None,
+            )
+            .unwrap(),
+        );
         let router = MessageRouter::new(config, gateway);
 
         let msg = inbound("signal", "alice-uuid", None, false, None);

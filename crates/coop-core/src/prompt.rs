@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
+use tracing::{debug, info_span, trace};
 
 // ---------------------------------------------------------------------------
 // Token counting
@@ -196,15 +197,32 @@ pub struct WorkspaceIndex {
 }
 
 impl WorkspaceIndex {
+    /// Create an empty index (no files).
+    pub fn empty() -> Self {
+        Self {
+            files: HashMap::new(),
+        }
+    }
+
     /// Scan workspace files and build the index.
     pub fn scan(workspace: &Path, file_configs: &[PromptFileConfig]) -> Result<Self> {
+        let _span = info_span!("workspace_scan", workspace = %workspace.display()).entered();
         let mut files = HashMap::new();
         for cfg in file_configs {
             let full_path = workspace.join(&cfg.path);
             if let Some(indexed) = Self::index_file(&full_path, cfg)? {
+                debug!(
+                    file = %cfg.path,
+                    tokens = indexed.entry.tokens,
+                    min_trust = ?cfg.min_trust,
+                    "indexed workspace file"
+                );
                 files.insert(cfg.path.clone(), indexed);
+            } else {
+                trace!(file = %cfg.path, "workspace file not found");
             }
         }
+        debug!(file_count = files.len(), "workspace scan complete");
         Ok(Self { files })
     }
 
@@ -216,6 +234,7 @@ impl WorkspaceIndex {
             let Ok(meta) = std::fs::metadata(&full_path) else {
                 // File removed — drop from index.
                 if self.files.remove(&cfg.path).is_some() {
+                    debug!(file = %cfg.path, "workspace file removed from index");
                     changed = true;
                 }
                 continue;
@@ -228,6 +247,11 @@ impl WorkspaceIndex {
             };
 
             if needs_update && let Some(indexed) = Self::index_file(&full_path, cfg)? {
+                debug!(
+                    file = %cfg.path,
+                    tokens = indexed.entry.tokens,
+                    "workspace file re-indexed"
+                );
                 self.files.insert(cfg.path.clone(), indexed);
                 changed = true;
             }
@@ -414,63 +438,20 @@ impl PromptBuilder {
 
     /// Build the prompt, using a pre-scanned workspace index.
     pub fn build(&self, index: &WorkspaceIndex) -> Result<BuiltPrompt> {
-        let mut layers: Vec<PromptLayer> = Vec::new();
-        let mut used_tokens: usize = 0;
-        let mut overflow: Vec<MemoryIndexEntry> = Vec::new();
+        let _span = info_span!(
+            "prompt_build",
+            trust = ?self.trust,
+            budget = self.token_budget,
+            agent = %self.agent_id,
+        )
+        .entered();
 
-        // Reserve tokens for runtime context + memory index (layers 3-4).
         let runtime_reserve = 500;
         let file_budget = self.token_budget.saturating_sub(runtime_reserve);
 
-        // --- Layers 0-2: Workspace files, ordered by config, trust-gated ---
-        for cfg in &self.file_configs {
-            // Trust gate: skip files the current trust level can't see.
-            if self.trust > cfg.min_trust {
-                continue;
-            }
+        let (mut layers, mut used_tokens, overflow) = self.build_file_layers(index, file_budget)?;
 
-            let Some(indexed) = index.get(&cfg.path) else {
-                continue; // Missing files are skipped silently.
-            };
-
-            let remaining = file_budget.saturating_sub(used_tokens);
-            if remaining == 0 {
-                // No budget left — everything goes to the menu.
-                overflow.push(indexed.entry.clone());
-                continue;
-            }
-
-            if indexed.entry.tokens <= remaining {
-                // File fits entirely.
-                let content = std::fs::read_to_string(self.workspace.join(&cfg.path))
-                    .with_context(|| format!("failed to read {}", cfg.path))?;
-                let counted = Counted::new(content);
-                used_tokens += counted.tokens;
-                layers.push(PromptLayer {
-                    name: Self::layer_name(&cfg.path),
-                    content: format!("## {}\n{}", cfg.path, counted.content),
-                    tokens: counted.tokens,
-                    cache: cfg.cache,
-                });
-            } else if remaining >= 200 {
-                // Partial fit — truncate with marker.
-                let content = std::fs::read_to_string(self.workspace.join(&cfg.path))
-                    .with_context(|| format!("failed to read {}", cfg.path))?;
-                let truncated = truncate_to_budget(&content, &cfg.path, remaining);
-                used_tokens += truncated.tokens;
-                layers.push(PromptLayer {
-                    name: Self::layer_name(&cfg.path),
-                    content: format!("## {}\n{}", cfg.path, truncated.content),
-                    tokens: truncated.tokens,
-                    cache: cfg.cache,
-                });
-            } else {
-                // Too little room even for a truncation — send to menu.
-                overflow.push(indexed.entry.clone());
-            }
-        }
-
-        // --- Layer 3: Runtime context ---
+        // Runtime context layer.
         let runtime = self.build_runtime_context();
         used_tokens += runtime.tokens;
         layers.push(PromptLayer {
@@ -480,12 +461,15 @@ impl PromptBuilder {
             cache: CacheHint::Volatile,
         });
 
-        // --- Layer 4: Memory index (priced menu) ---
-        // Show overflow files + any trust-visible files not already inlined.
+        // Memory index (priced menu) for overflow + not-inlined files.
         let budget_remaining = self.token_budget.saturating_sub(used_tokens);
         let menu_entries = self.build_menu(index, &layers, &overflow);
         if !menu_entries.is_empty() {
             let menu = Self::render_menu(&menu_entries, budget_remaining);
+            debug!(
+                menu_items = menu_entries.len(),
+                budget_remaining, "memory index menu added"
+            );
             layers.push(PromptLayer {
                 name: "memory_index",
                 content: menu.content,
@@ -497,12 +481,106 @@ impl PromptBuilder {
         let total_tokens = layers.iter().map(|l| l.tokens).sum();
         let budget_remaining = self.token_budget.saturating_sub(total_tokens);
 
+        let layer_names: Vec<&str> = layers.iter().map(|l| l.name).collect();
+        debug!(
+            total_tokens,
+            budget_remaining,
+            layer_count = layers.len(),
+            ?layer_names,
+            "prompt built"
+        );
+
         Ok(BuiltPrompt {
             layers,
             total_tokens,
             available_via_tool: menu_entries,
             budget_remaining,
         })
+    }
+
+    /// Process workspace files: trust-gate, budget-check, include or overflow each.
+    fn build_file_layers(
+        &self,
+        index: &WorkspaceIndex,
+        file_budget: usize,
+    ) -> Result<(Vec<PromptLayer>, usize, Vec<MemoryIndexEntry>)> {
+        let mut layers = Vec::new();
+        let mut used_tokens: usize = 0;
+        let mut overflow = Vec::new();
+
+        for cfg in &self.file_configs {
+            if self.trust > cfg.min_trust {
+                debug!(
+                    file = %cfg.path,
+                    file_trust = ?cfg.min_trust,
+                    session_trust = ?self.trust,
+                    "file excluded by trust gate"
+                );
+                continue;
+            }
+
+            let Some(indexed) = index.get(&cfg.path) else {
+                trace!(file = %cfg.path, "file not in workspace");
+                continue;
+            };
+
+            let remaining = file_budget.saturating_sub(used_tokens);
+            if remaining == 0 {
+                debug!(
+                    file = %cfg.path,
+                    tokens = indexed.entry.tokens,
+                    "file overflowed to menu (no budget remaining)"
+                );
+                overflow.push(indexed.entry.clone());
+                continue;
+            }
+
+            if indexed.entry.tokens <= remaining {
+                let content = std::fs::read_to_string(self.workspace.join(&cfg.path))
+                    .with_context(|| format!("failed to read {}", cfg.path))?;
+                let counted = Counted::new(content);
+                used_tokens += counted.tokens;
+                debug!(
+                    file = %cfg.path,
+                    tokens = counted.tokens,
+                    used_tokens,
+                    "file included in prompt"
+                );
+                layers.push(PromptLayer {
+                    name: Self::layer_name(&cfg.path),
+                    content: format!("## {}\n{}", cfg.path, counted.content),
+                    tokens: counted.tokens,
+                    cache: cfg.cache,
+                });
+            } else if remaining >= 200 {
+                let content = std::fs::read_to_string(self.workspace.join(&cfg.path))
+                    .with_context(|| format!("failed to read {}", cfg.path))?;
+                let truncated = truncate_to_budget(&content, &cfg.path, remaining);
+                used_tokens += truncated.tokens;
+                debug!(
+                    file = %cfg.path,
+                    original_tokens = indexed.entry.tokens,
+                    truncated_tokens = truncated.tokens,
+                    "file truncated to fit budget"
+                );
+                layers.push(PromptLayer {
+                    name: Self::layer_name(&cfg.path),
+                    content: format!("## {}\n{}", cfg.path, truncated.content),
+                    tokens: truncated.tokens,
+                    cache: cfg.cache,
+                });
+            } else {
+                debug!(
+                    file = %cfg.path,
+                    tokens = indexed.entry.tokens,
+                    remaining,
+                    "file overflowed to menu (insufficient budget)"
+                );
+                overflow.push(indexed.entry.clone());
+            }
+        }
+
+        Ok((layers, used_tokens, overflow))
     }
 
     fn build_runtime_context(&self) -> Counted {

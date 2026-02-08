@@ -18,8 +18,8 @@
 A personal agent gateway in Rust. Coop routes messages between channels (Signal, Telegram, Discord, terminal, webhooks) and AI agent sessions running on your machine. It enforces trust-based access control, persists conversations, and manages agent lifecycles.
 
 - ~~Phase 1 — gateway + terminal TUI.~~
-- **Phase 2 - separate gateway + telemetry = dogfooding, tight LLM loop**
-- Phase 3 - chat channel integration
+- ~~Phase 2 - separate gateway + telemetry = dogfooding, tight LLM loop~~
+- **Phase 3 - chat channel integration**
 - Phase 4 - user and permissions
 
 ## Quick start

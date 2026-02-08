@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use coop_core::TrustLevel;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use tracing::debug;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Config {
@@ -18,10 +19,6 @@ pub(crate) struct Config {
 pub(crate) struct AgentConfig {
     pub id: String,
     pub model: String,
-    #[serde(default)]
-    pub personality: Option<String>,
-    #[serde(default)]
-    pub instructions: Option<String>,
     #[serde(default = "default_workspace")]
     pub workspace: String,
 }
@@ -69,35 +66,23 @@ impl Config {
         Ok(config)
     }
 
-    /// Build the system prompt from personality + instructions files.
-    pub(crate) fn build_system_prompt(&self, base_dir: &Path) -> Result<String> {
-        let mut parts = Vec::new();
-
-        if let Some(personality_path) = &self.agent.personality {
-            let path = base_dir.join(personality_path);
-            if path.exists() {
-                let content = std::fs::read_to_string(&path).with_context(|| {
-                    format!("failed to read personality file: {}", path.display())
-                })?;
-                parts.push(content);
-            }
-        }
-
-        if let Some(instructions_path) = &self.agent.instructions {
-            let path = base_dir.join(instructions_path);
-            if path.exists() {
-                let content = std::fs::read_to_string(&path).with_context(|| {
-                    format!("failed to read instructions file: {}", path.display())
-                })?;
-                parts.push(content);
-            }
-        }
-
-        if parts.is_empty() {
-            parts.push("You are a helpful AI assistant.".to_string());
-        }
-
-        Ok(parts.join("\n\n"))
+    /// Resolve the workspace directory to an absolute path.
+    ///
+    /// Fails if the directory does not exist.
+    pub(crate) fn resolve_workspace(&self, base_dir: &Path) -> Result<PathBuf> {
+        let workspace = PathBuf::from(&self.agent.workspace);
+        let resolved = if workspace.is_absolute() {
+            workspace
+        } else {
+            base_dir.join(workspace)
+        };
+        anyhow::ensure!(
+            resolved.is_dir(),
+            "workspace directory not found: {}",
+            resolved.display()
+        );
+        debug!(workspace = %resolved.display(), "resolved workspace path");
+        Ok(resolved)
     }
 
     /// Resolve config path: check arg, then default locations.
@@ -157,8 +142,6 @@ agent:
 agent:
   id: reid
   model: anthropic/claude-sonnet-4-20250514
-  personality: ./soul.md
-  instructions: ./agents.md
   workspace: ./workspaces/default
 
 users:
@@ -186,5 +169,37 @@ provider:
             "./data/signal.db".to_string()
         );
         assert_eq!(config.provider.name, "anthropic");
+    }
+
+    #[test]
+    fn resolve_workspace_fails_for_missing_dir() {
+        let config: Config = serde_yaml::from_str(
+            r"
+agent:
+  id: test
+  model: test
+  workspace: ./does-not-exist
+",
+        )
+        .unwrap();
+
+        let err = config.resolve_workspace(Path::new("/tmp")).unwrap_err();
+        assert!(
+            err.to_string().contains("workspace directory not found"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_workspace_succeeds_for_existing_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let config: Config = serde_yaml::from_str(&format!(
+            "agent:\n  id: test\n  model: test\n  workspace: {}",
+            dir.path().display()
+        ))
+        .unwrap();
+
+        let resolved = config.resolve_workspace(Path::new("/unused")).unwrap();
+        assert_eq!(resolved, dir.path());
     }
 }

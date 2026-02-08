@@ -95,7 +95,7 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
         .parent()
         .unwrap_or(&PathBuf::from("."))
         .to_path_buf();
-    let system_prompt = config.build_system_prompt(&config_dir)?;
+    let workspace = config.resolve_workspace(&config_dir)?;
 
     anyhow::ensure!(
         config.provider.name == "anthropic",
@@ -171,11 +171,11 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
 
     let gateway = Arc::new(Gateway::new(
         config.clone(),
-        system_prompt,
+        workspace,
         provider,
         executor,
         typing_notifier,
-    ));
+    )?);
     let router = Arc::new(MessageRouter::new(config.clone(), gateway.clone()));
 
     let working_dir = resolve_working_dir();
@@ -361,7 +361,7 @@ async fn cmd_chat(config_path: Option<&str>) -> Result<()> {
         .parent()
         .unwrap_or(&PathBuf::from("."))
         .to_path_buf();
-    let system_prompt = config.build_system_prompt(&config_dir)?;
+    let workspace = config.resolve_workspace(&config_dir)?;
 
     anyhow::ensure!(
         config.provider.name == "anthropic",
@@ -376,11 +376,11 @@ async fn cmd_chat(config_path: Option<&str>) -> Result<()> {
     let executor = Arc::new(DefaultExecutor::new());
     let gateway = Arc::new(Gateway::new(
         config.clone(),
-        system_prompt,
+        workspace,
         provider,
         executor,
         None,
-    ));
+    )?);
 
     let session_key = gateway.default_session_key();
     let working_dir = resolve_working_dir();

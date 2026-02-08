@@ -1,10 +1,12 @@
 use anyhow::Result;
+use coop_core::prompt::{PromptBuilder, WorkspaceIndex, default_file_configs};
 use coop_core::{
     Message, Provider, SessionKey, SessionKind, ToolContext, ToolDef, ToolExecutor, TrustLevel,
     TurnConfig, TurnEvent, TurnResult, TypingNotifier, Usage,
 };
 use futures::StreamExt;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tracing::{Instrument, debug, error, info, info_span};
@@ -14,7 +16,8 @@ use crate::config::Config;
 
 pub(crate) struct Gateway {
     config: Config,
-    system_prompt: String,
+    workspace: PathBuf,
+    workspace_index: Mutex<WorkspaceIndex>,
     provider: Arc<dyn Provider>,
     executor: Arc<dyn ToolExecutor>,
     typing_notifier: Option<Arc<dyn TypingNotifier>>,
@@ -92,19 +95,42 @@ fn signal_target_from_session(session_key: &SessionKey) -> Option<(&'static str,
 impl Gateway {
     pub(crate) fn new(
         config: Config,
-        system_prompt: String,
+        workspace: PathBuf,
         provider: Arc<dyn Provider>,
         executor: Arc<dyn ToolExecutor>,
         typing_notifier: Option<Arc<dyn TypingNotifier>>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        let file_configs = default_file_configs();
+        let workspace_index = WorkspaceIndex::scan(&workspace, &file_configs)?;
+
+        Ok(Self {
             config,
-            system_prompt,
+            workspace,
+            workspace_index: Mutex::new(workspace_index),
             provider,
             executor,
             typing_notifier,
             sessions: Mutex::new(HashMap::new()),
+        })
+    }
+
+    /// Build a trust-gated system prompt for this turn.
+    fn build_prompt(&self, trust: TrustLevel) -> Result<String> {
+        let file_configs = default_file_configs();
+        let mut index = self.workspace_index.lock().unwrap();
+        let refreshed = index
+            .refresh(&self.workspace, &file_configs)
+            .unwrap_or(false);
+        if refreshed {
+            debug!("workspace index refreshed");
         }
+
+        let prompt = PromptBuilder::new(self.workspace.clone(), self.config.agent.id.clone())
+            .trust(trust)
+            .model(&self.config.agent.model)
+            .build(&index)?;
+
+        Ok(prompt.to_flat_string())
     }
 
     pub(crate) fn default_session_key(&self) -> SessionKey {
@@ -128,17 +154,10 @@ impl Gateway {
     }
 
     fn tool_context(&self, session_key: &SessionKey, trust: TrustLevel) -> ToolContext {
-        let workspace = std::path::PathBuf::from(&self.config.agent.workspace);
-        let workspace = if workspace.is_relative() {
-            std::env::current_dir().unwrap_or_default().join(workspace)
-        } else {
-            workspace
-        };
-
         ToolContext {
             session_id: session_key.to_string(),
             trust,
-            workspace,
+            workspace: self.workspace.clone(),
         }
     }
 
@@ -167,6 +186,7 @@ impl Gateway {
                 None
             };
 
+            let system_prompt = self.build_prompt(trust)?;
             self.append_message(session_key, Message::user().with_text(user_input));
 
             let tool_defs = self.executor.tools();
@@ -187,7 +207,7 @@ impl Gateway {
                 let (response, should_break) = async {
                     let messages = self.messages(session_key);
                     let (response, usage) = self
-                        .assistant_response(&messages, &tool_defs, &event_tx)
+                        .assistant_response(&system_prompt, &messages, &tool_defs, &event_tx)
                         .await?;
 
                     total_usage += usage;
@@ -321,6 +341,7 @@ impl Gateway {
 
     async fn assistant_response(
         &self,
+        system_prompt: &str,
         messages: &[Message],
         tool_defs: &[ToolDef],
         event_tx: &mpsc::Sender<TurnEvent>,
@@ -335,10 +356,10 @@ impl Gateway {
 
         async {
             if streaming {
-                self.assistant_response_streaming(messages, tool_defs, event_tx)
+                self.assistant_response_streaming(system_prompt, messages, tool_defs, event_tx)
                     .await
             } else {
-                self.assistant_response_non_streaming(messages, tool_defs, event_tx)
+                self.assistant_response_non_streaming(system_prompt, messages, tool_defs, event_tx)
                     .await
             }
         }
@@ -348,13 +369,14 @@ impl Gateway {
 
     async fn assistant_response_streaming(
         &self,
+        system_prompt: &str,
         messages: &[Message],
         tool_defs: &[ToolDef],
         event_tx: &mpsc::Sender<TurnEvent>,
     ) -> Result<(Message, Usage)> {
         let mut stream = self
             .provider
-            .stream(&self.system_prompt, messages, tool_defs)
+            .stream(system_prompt, messages, tool_defs)
             .await?;
 
         let mut response = Message::assistant();
@@ -388,13 +410,14 @@ impl Gateway {
 
     async fn assistant_response_non_streaming(
         &self,
+        system_prompt: &str,
         messages: &[Message],
         tool_defs: &[ToolDef],
         event_tx: &mpsc::Sender<TurnEvent>,
     ) -> Result<(Message, Usage)> {
         let (response, usage) = self
             .provider
-            .complete(&self.system_prompt, messages, tool_defs)
+            .complete(system_prompt, messages, tool_defs)
             .await?;
 
         let text = response.text();
@@ -555,8 +578,15 @@ agent:
         assert!(parse_session_key("other:main", "coop").is_none());
     }
 
+    fn test_workspace() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("SOUL.md"), "You are a test agent.").unwrap();
+        dir
+    }
+
     #[tokio::test]
     async fn typing_guard_sends_stop_on_drop() {
+        let workspace = test_workspace();
         let provider: Arc<dyn Provider> = Arc::new(FakeProvider::new("hello"));
         let executor: Arc<dyn ToolExecutor> = Arc::new(DefaultExecutor::new());
         let notifier = Arc::new(RecordingTypingNotifier::new());
@@ -564,11 +594,12 @@ agent:
 
         let gateway = Gateway::new(
             test_config(),
-            "system".to_string(),
+            workspace.path().to_path_buf(),
             provider,
             executor,
             Some(typing_notifier),
-        );
+        )
+        .unwrap();
 
         let session_key = gateway.default_session_key();
         let (event_tx, _event_rx) = mpsc::channel(16);

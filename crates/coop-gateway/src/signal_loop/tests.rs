@@ -161,13 +161,18 @@ fn build_router(
     typing_notifier: Option<Arc<dyn TypingNotifier>>,
 ) -> Arc<MessageRouter> {
     let config = test_config();
-    let gateway = Arc::new(Gateway::new(
-        config.clone(),
-        "system".to_string(),
-        provider,
-        executor,
-        typing_notifier,
-    ));
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::write(workspace.path().join("SOUL.md"), "You are a test agent.").unwrap();
+    let gateway = Arc::new(
+        Gateway::new(
+            config.clone(),
+            workspace.path().to_path_buf(),
+            provider,
+            executor,
+            typing_notifier,
+        )
+        .unwrap(),
+    );
 
     Arc::new(MessageRouter::new(config, gateway))
 }
