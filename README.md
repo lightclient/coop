@@ -46,6 +46,7 @@ Five workspace crates:
 |-------|---------|
 | `coop-core` | Domain types, trait boundaries, prompt builder, test fakes |
 | `coop-agent` | LLM provider integration (Anthropic API) |
+| `coop-memory` | Structured memory store (SQLite observations + retrieval) |
 | `coop-gateway` | CLI entry point, daemon lifecycle, gateway routing, config |
 | `coop-ipc` | Unix socket IPC protocol and client/server transport |
 | `coop-channels` | Channel adapters (terminal; Signal scaffolded) |

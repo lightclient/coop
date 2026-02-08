@@ -6,6 +6,7 @@ mod config_check;
 mod config_tool;
 mod config_write;
 mod gateway;
+mod memory_tools;
 mod router;
 mod scheduler;
 mod session_store;
@@ -25,6 +26,7 @@ use coop_ipc::{
     ClientMessage, IpcClient, IpcConnection, IpcServer, PROTOCOL_VERSION, ServerMessage,
     socket_path,
 };
+use coop_memory::{Memory, SqliteMemory};
 use coop_tui::{
     App, Container, DisplayMessage, Editor, Footer, InputAction, StatusLine, Tui, handle_key_event,
     poll_event,
@@ -41,6 +43,7 @@ use tracing::info;
 use crate::cli::{Cli, Commands, SignalCommands};
 use crate::config::Config;
 use crate::gateway::Gateway;
+use crate::memory_tools::MemoryToolExecutor;
 use crate::router::MessageRouter;
 #[cfg(feature = "signal")]
 use crate::signal_loop::run_signal_loop;
@@ -202,12 +205,27 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
         }
     }
 
+    let memory_db_path = tui_helpers::resolve_config_path(&config_dir, &config.memory.db_path);
+    info!(path = %memory_db_path.display(), "initializing memory store");
+    let memory: Arc<dyn Memory> = Arc::new(
+        SqliteMemory::open(&memory_db_path, config.agent.id.clone()).with_context(|| {
+            format!(
+                "failed to initialize memory db at {}",
+                memory_db_path.display()
+            )
+        })?,
+    );
+
     let default_executor = DefaultExecutor::new();
     let config_executor = config_tool::ConfigToolExecutor::new(config_file.clone());
+    let memory_executor = MemoryToolExecutor::new(Arc::clone(&memory));
 
     #[allow(unused_mut)]
-    let mut executors: Vec<Box<dyn coop_core::ToolExecutor>> =
-        vec![Box::new(default_executor), Box::new(config_executor)];
+    let mut executors: Vec<Box<dyn coop_core::ToolExecutor>> = vec![
+        Box::new(default_executor),
+        Box::new(config_executor),
+        Box::new(memory_executor),
+    ];
 
     #[cfg(feature = "signal")]
     if let (Some(action_tx), Some(query_tx)) = (signal_action_tx.clone(), signal_query_tx.clone()) {
@@ -232,6 +250,7 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
         provider,
         executor,
         typing_notifier,
+        Some(memory),
     )?);
     let router = Arc::new(MessageRouter::new(config.clone(), Arc::clone(&gateway)));
 
@@ -455,11 +474,24 @@ async fn cmd_chat(config_path: Option<&str>, user_flag: Option<&str>) -> Result<
         AnthropicProvider::from_env(&config.agent.model)
             .context("failed to initialize Anthropic provider")?,
     );
+
+    let memory_db_path = tui_helpers::resolve_config_path(&config_dir, &config.memory.db_path);
+    let memory: Arc<dyn Memory> = Arc::new(
+        SqliteMemory::open(&memory_db_path, config.agent.id.clone()).with_context(|| {
+            format!(
+                "failed to initialize memory db at {}",
+                memory_db_path.display()
+            )
+        })?,
+    );
+
     let default_executor = DefaultExecutor::new();
     let config_executor = config_tool::ConfigToolExecutor::new(config_file.clone());
+    let memory_executor = MemoryToolExecutor::new(Arc::clone(&memory));
     let executor: Arc<dyn coop_core::ToolExecutor> = Arc::new(CompositeExecutor::new(vec![
         Box::new(default_executor),
         Box::new(config_executor),
+        Box::new(memory_executor),
     ]));
     let gateway = Arc::new(Gateway::new(
         config.clone(),
@@ -467,6 +499,7 @@ async fn cmd_chat(config_path: Option<&str>, user_flag: Option<&str>) -> Result<
         provider,
         executor,
         None,
+        Some(memory),
     )?);
 
     let session_key = gateway.default_session_key();

@@ -129,6 +129,7 @@ impl CheckReport {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) fn validate_config(config_path: &Path, config_dir: &Path) -> CheckReport {
     let mut report = CheckReport::default();
 
@@ -221,15 +222,18 @@ pub(crate) fn validate_config(config_path: &Path, config_dir: &Path) -> CheckRep
         },
     });
 
-    // 6-7 depend on workspace
+    // 6. memory config
+    check_memory(&mut report, &config, config_dir);
+
+    // 7-8 depend on workspace
     if let Some(ref ws) = workspace {
         check_workspace_files(&mut report, ws, &config);
     }
 
-    // 8. users
+    // 9. users
     check_users(&mut report, &config);
 
-    // 9. signal_channel
+    // 10. signal_channel
     if let Some(ref signal) = config.channels.signal {
         let db_path = crate::tui_helpers::resolve_config_path(config_dir, &signal.db_path);
         let exists = db_path.exists();
@@ -245,10 +249,60 @@ pub(crate) fn validate_config(config_path: &Path, config_dir: &Path) -> CheckRep
         });
     }
 
-    // 10-12. cron checks
+    // 11-13. cron checks
     check_cron(&mut report, &config);
 
     report
+}
+
+fn check_memory(report: &mut CheckReport, config: &Config, config_dir: &Path) {
+    let db_path = crate::tui_helpers::resolve_config_path(config_dir, &config.memory.db_path);
+    let (passed, message) = match db_path.parent() {
+        Some(parent) if parent.exists() && parent.is_dir() => {
+            (true, format!("memory db: {}", db_path.display()))
+        }
+        Some(parent) if !parent.exists() => (
+            true,
+            format!(
+                "memory db parent will be created on first start: {}",
+                parent.display()
+            ),
+        ),
+        Some(parent) => (
+            false,
+            format!("memory db parent is not a directory: {}", parent.display()),
+        ),
+        None => (
+            false,
+            format!("invalid memory db path: {}", db_path.display()),
+        ),
+    };
+
+    report.push(CheckResult {
+        name: "memory_db_path",
+        severity: Severity::Error,
+        passed,
+        message,
+    });
+
+    if let Some(embedding) = &config.memory.embedding {
+        let valid = !embedding.provider.trim().is_empty()
+            && !embedding.model.trim().is_empty()
+            && embedding.dimensions > 0;
+        report.push(CheckResult {
+            name: "memory_embedding",
+            severity: Severity::Warning,
+            passed: valid,
+            message: if valid {
+                format!(
+                    "embedding: provider={}, model={}, dimensions={}",
+                    embedding.provider, embedding.model, embedding.dimensions
+                )
+            } else {
+                "memory.embedding requires non-empty provider/model and dimensions > 0".to_owned()
+            },
+        });
+    }
 }
 
 fn check_workspace_files(report: &mut CheckReport, ws: &Path, config: &Config) {
@@ -499,6 +553,31 @@ mod tests {
             .unwrap();
         assert!(!provider_check.passed);
         assert!(provider_check.message.contains("openai"));
+    }
+
+    #[test]
+    fn test_invalid_memory_embedding() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        let config_path = dir.path().join("coop.yaml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "agent:\n  id: test\n  model: test-model\n  workspace: {}\nmemory:\n  db_path: ./data/memory.db\n  embedding:\n    provider: ''\n    model: ''\n    dimensions: 0\n",
+                workspace.display()
+            ),
+        )
+        .unwrap();
+
+        let report = validate_config(&config_path, dir.path());
+        let embedding_check = report
+            .results
+            .iter()
+            .find(|r| r.name == "memory_embedding")
+            .unwrap();
+        assert!(!embedding_check.passed);
     }
 
     #[test]

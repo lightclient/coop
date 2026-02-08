@@ -14,6 +14,8 @@ pub(crate) struct Config {
     #[serde(default)]
     pub provider: ProviderConfig,
     #[serde(default)]
+    pub memory: MemoryConfig,
+    #[serde(default)]
     pub cron: Vec<CronConfig>,
 }
 
@@ -55,6 +57,30 @@ pub(crate) struct ProviderConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct MemoryConfig {
+    #[serde(default = "default_memory_db_path")]
+    pub db_path: String,
+    #[serde(default)]
+    pub embedding: Option<MemoryEmbeddingConfig>,
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            db_path: default_memory_db_path(),
+            embedding: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct MemoryEmbeddingConfig {
+    pub provider: String,
+    pub model: String,
+    pub dimensions: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CronDelivery {
     /// Channel to deliver through (e.g. "signal").
     pub channel: String,
@@ -75,6 +101,10 @@ pub(crate) struct CronConfig {
 
 fn default_provider() -> String {
     "anthropic".to_owned()
+}
+
+fn default_memory_db_path() -> String {
+    "./data/memory.db".to_owned()
 }
 
 impl Config {
@@ -156,6 +186,7 @@ agent:
         assert_eq!(config.agent.model, "anthropic/claude-sonnet-4-20250514");
         assert!(config.users.is_empty());
         assert!(config.channels.signal.is_none());
+        assert_eq!(config.memory.db_path, "./data/memory.db");
         assert!(config.cron.is_empty());
     }
 
@@ -192,6 +223,7 @@ provider:
             "./data/signal.db".to_owned()
         );
         assert_eq!(config.provider.name, "anthropic");
+        assert_eq!(config.memory.db_path, "./data/memory.db");
     }
 
     #[test]
@@ -262,6 +294,27 @@ cron:
         let delivery = config.cron[0].deliver.as_ref().unwrap();
         assert_eq!(delivery.channel, "signal");
         assert!(delivery.target.starts_with("group:"));
+    }
+
+    #[test]
+    fn parse_config_with_memory_settings() {
+        let yaml = "
+agent:
+  id: coop
+  model: test
+memory:
+  db_path: ./state/memory.db
+  embedding:
+    provider: voyage
+    model: voyage-3-large
+    dimensions: 1024
+";
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.memory.db_path, "./state/memory.db");
+        let embedding = config.memory.embedding.as_ref().unwrap();
+        assert_eq!(embedding.provider, "voyage");
+        assert_eq!(embedding.model, "voyage-3-large");
+        assert_eq!(embedding.dimensions, 1024);
     }
 
     #[test]

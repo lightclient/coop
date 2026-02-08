@@ -121,6 +121,8 @@ fn tool_label(name: &str) -> (&'static str, &'static str) {
         "bash" => ("⚡", "Execute"),
         "read_file" | "Read" => ("📄", "Read"),
         "write_file" | "Write" => ("✏️", "Write"),
+        "memory_search" | "memory_timeline" | "memory_get" | "memory_write" | "memory_history"
+        | "memory_people" => ("🧠", "Memory"),
         _ => ("🔧", "Run"),
     }
 }

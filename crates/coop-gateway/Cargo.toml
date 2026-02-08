@@ -28,6 +28,7 @@ coop-agent = { path = "../coop-agent" }
 coop-channels = { path = "../coop-channels" }
 coop-core = { path = "../coop-core" }
 coop-ipc = { path = "../coop-ipc" }
+coop-memory = { version = "0.1.0", path = "../coop-memory" }
 coop-tui = { path = "../coop-tui" }
 cron = "0.15.0"
 crossterm = { workspace = true }

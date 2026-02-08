@@ -6,6 +6,7 @@ use coop_core::{
     InboundMessage, Message, Provider, SessionKey, SessionKind, ToolContext, ToolDef, ToolExecutor,
     TrustLevel, TurnConfig, TurnEvent, TurnResult, TypingNotifier, Usage,
 };
+use coop_memory::{Memory, NewObservation, min_trust_for_store, trust_to_store};
 use futures::StreamExt;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -26,6 +27,7 @@ pub(crate) struct Gateway {
     skills: Vec<SkillEntry>,
     provider: Arc<dyn Provider>,
     executor: Arc<dyn ToolExecutor>,
+    memory: Option<Arc<dyn Memory>>,
     typing_notifier: Option<Arc<dyn TypingNotifier>>,
     sessions: Mutex<HashMap<SessionKey, Vec<Message>>>,
     session_store: DiskSessionStore,
@@ -123,6 +125,7 @@ impl Gateway {
         provider: Arc<dyn Provider>,
         executor: Arc<dyn ToolExecutor>,
         typing_notifier: Option<Arc<dyn TypingNotifier>>,
+        memory: Option<Arc<dyn Memory>>,
     ) -> Result<Self> {
         let file_configs = default_file_configs();
         let workspace_index = WorkspaceIndex::scan(&workspace, &file_configs)?;
@@ -140,6 +143,7 @@ impl Gateway {
             skills,
             provider,
             executor,
+            memory,
             typing_notifier,
             sessions: Mutex::new(HashMap::new()),
             session_store,
@@ -210,6 +214,75 @@ impl Gateway {
             workspace: self.workspace.clone(),
             user_name: user_name.map(str::to_owned),
         }
+    }
+
+    fn capture_tool_observation(
+        &self,
+        session_key: &SessionKey,
+        trust: TrustLevel,
+        tool_name: &str,
+        arguments: &serde_json::Value,
+        output: &coop_core::ToolOutput,
+    ) {
+        let Some(memory) = self.memory.as_ref().map(Arc::clone) else {
+            return;
+        };
+
+        if tool_name.starts_with("memory_") {
+            return;
+        }
+
+        let args = serde_json::to_string(arguments).unwrap_or_default();
+        let mut output_text = output.content.clone();
+        if output_text.len() > 1200 {
+            output_text.truncate(1200);
+            output_text.push_str("... [truncated]");
+        }
+
+        let mut related_files = Vec::new();
+        for key in ["path", "file", "target", "from", "to"] {
+            if let Some(path) = arguments.get(key).and_then(serde_json::Value::as_str) {
+                related_files.push(path.to_owned());
+            }
+        }
+
+        let store = trust_to_store(trust).to_owned();
+        let min_trust = min_trust_for_store(&store);
+
+        let tool_name_owned = tool_name.to_owned();
+        let obs = NewObservation {
+            session_key: Some(session_key.to_string()),
+            store,
+            obs_type: "technical".to_owned(),
+            title: format!("Tool run: {tool_name}"),
+            narrative: format!("arguments={args}\noutput={output_text}"),
+            facts: vec![
+                format!("tool={tool_name}"),
+                format!("error={}", output.is_error),
+            ],
+            tags: vec!["tool".to_owned(), tool_name.to_owned()],
+            source: "auto".to_owned(),
+            related_files,
+            related_people: Vec::new(),
+            token_count: None,
+            expires_at: None,
+            min_trust,
+        };
+
+        tokio::spawn(async move {
+            match memory.write(obs).await {
+                Ok(outcome) => {
+                    debug!(?outcome, tool = %tool_name_owned, "auto-captured tool observation");
+                }
+                Err(err) => {
+                    warn!(
+                        error = %err,
+                        tool = %tool_name_owned,
+                        "failed to auto-capture tool observation"
+                    );
+                }
+            }
+        });
     }
 
     #[allow(clippy::too_many_lines)]
@@ -374,6 +447,14 @@ impl Gateway {
                             ),
                         })
                         .await;
+
+                    self.capture_tool_observation(
+                        session_key,
+                        trust,
+                        &req.name,
+                        &req.arguments,
+                        &output,
+                    );
                 }
 
                 self.append_message(session_key, result_msg.clone());
@@ -454,11 +535,13 @@ impl Gateway {
     }
 
     /// Returns true if a session has no messages (checks disk too).
+    #[allow(dead_code)]
     pub(crate) fn session_is_empty(&self, session_key: &SessionKey) -> bool {
         self.messages(session_key).is_empty()
     }
 
     /// Seed a session with formatted Signal chat history for context.
+    #[allow(dead_code)]
     pub(crate) fn seed_signal_history(&self, session_key: &SessionKey, history: &[InboundMessage]) {
         if history.is_empty() {
             return;
@@ -884,6 +967,7 @@ agent:
                 provider,
                 executor,
                 None,
+                None,
             )
             .unwrap(),
         );
@@ -940,6 +1024,7 @@ agent:
                 workspace.path().to_path_buf(),
                 provider,
                 executor,
+                None,
                 None,
             )
             .unwrap(),
@@ -1002,6 +1087,7 @@ agent:
                 provider,
                 executor,
                 None,
+                None,
             )
             .unwrap(),
         );
@@ -1046,6 +1132,7 @@ agent:
             provider,
             executor,
             Some(typing_notifier),
+            None,
         )
         .unwrap();
 

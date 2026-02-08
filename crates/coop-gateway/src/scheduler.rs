@@ -730,6 +730,7 @@ mod tests {
                 provider,
                 executor,
                 None,
+                None,
             )
             .unwrap(),
         );
