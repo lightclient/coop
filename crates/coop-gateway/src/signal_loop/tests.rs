@@ -590,3 +590,66 @@ async fn router_dispatch_emits_typing_start_and_stop_actions() {
         } if target == "alice-uuid"
     ));
 }
+
+/// Provider that returns text + tool_request in the first response,
+/// then text in the second. Used to test that pre-tool text is flushed
+/// separately from post-tool text.
+fn scripted_text_before_tool_provider() -> Arc<dyn Provider> {
+    Arc::new(ScriptedProvider::new(vec![
+        Message::assistant()
+            .with_text("before tool")
+            .with_tool_request(
+                "tool-1",
+                "signal_reply",
+                serde_json::json!({
+                    "chat_id": "alice-uuid",
+                    "text": "tool reply",
+                    "reply_to_timestamp": 42,
+                    "author_id": "alice-uuid"
+                }),
+            ),
+        Message::assistant().with_text("after tool"),
+    ]))
+}
+
+#[tokio::test]
+async fn text_before_tool_call_is_flushed_separately() {
+    let mut channel = MockSignalChannel::new();
+    let provider = scripted_text_before_tool_provider();
+    let executor: Arc<dyn ToolExecutor> =
+        Arc::new(SignalToolExecutor::new(channel.action_sender()));
+    let router = build_router(provider, executor, None);
+
+    channel
+        .inject_inbound(inbound_message(
+            InboundKind::Text,
+            "alice-uuid",
+            None,
+            false,
+            Some("alice-uuid"),
+        ))
+        .await
+        .unwrap();
+
+    handle_signal_inbound_once(&mut channel, router.as_ref())
+        .await
+        .unwrap();
+
+    let actions = channel.take_actions();
+    assert_eq!(actions.len(), 1);
+    assert!(matches!(&actions[0], SignalAction::Reply { .. }));
+
+    // Pre-tool text and post-tool text must arrive as separate messages.
+    // Before this fix, they were concatenated and sent as one message
+    // *after* the tool had already sent its reply — arriving out of order.
+    let outbound = channel.take_outbound();
+    assert_eq!(
+        outbound.len(),
+        2,
+        "expected 2 outbound messages (pre-tool + post-tool), got {}: {:?}",
+        outbound.len(),
+        outbound.iter().map(|m| &m.content).collect::<Vec<_>>()
+    );
+    assert_eq!(outbound[0].content, "before tool");
+    assert_eq!(outbound[1].content, "after tool");
+}

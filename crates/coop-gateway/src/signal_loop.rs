@@ -1,7 +1,8 @@
 use anyhow::Result;
 use coop_channels::SignalChannel;
-use coop_core::{Channel, InboundKind, InboundMessage, OutboundMessage};
+use coop_core::{Channel, InboundKind, InboundMessage, OutboundMessage, TurnEvent};
 use std::sync::Arc;
+use tokio::sync::mpsc;
 
 use crate::router::MessageRouter;
 
@@ -30,20 +31,60 @@ pub(crate) async fn handle_signal_inbound_once<C: Channel>(
 
     trace_signal_inbound("signal inbound dispatched", &inbound);
 
-    let (_decision, response) = router.dispatch_collect_text(&inbound).await?;
-    if response.trim().is_empty() {
-        return Ok(());
+    // Process turn events inline so that text produced before a tool call
+    // is flushed to the channel *before* the tool executes. This prevents
+    // tool side-effects (e.g. signal_reply) from arriving before the
+    // preceding text.
+    let (event_tx, mut event_rx) = mpsc::channel(64);
+    let router = router.clone();
+    let message = inbound.clone();
+    let dispatch_task = tokio::spawn(async move { router.dispatch(&message, event_tx).await });
+
+    let mut text = String::new();
+
+    while let Some(event) = event_rx.recv().await {
+        match event {
+            TurnEvent::TextDelta(delta) => {
+                text.push_str(&delta);
+            }
+            TurnEvent::ToolStart { .. } => {
+                flush_text(signal_channel, &target, &mut text).await?;
+            }
+            TurnEvent::Error(message) => {
+                text = message;
+            }
+            TurnEvent::Done(_) => {
+                break;
+            }
+            TurnEvent::AssistantMessage(_) | TurnEvent::ToolResult { .. } => {}
+        }
     }
 
-    Channel::send(
-        signal_channel,
-        OutboundMessage {
-            channel: "signal".to_owned(),
-            target,
-            content: response,
-        },
-    )
-    .await
+    flush_text(signal_channel, &target, &mut text).await?;
+
+    match dispatch_task.await {
+        Ok(result) => result.map(|_| ()),
+        Err(error) => anyhow::bail!("router task failed: {error}"),
+    }
+}
+
+/// Send accumulated text to the channel and clear the buffer.
+async fn flush_text<C: Channel>(channel: &C, target: &str, text: &mut String) -> Result<()> {
+    if text.trim().is_empty() {
+        text.clear();
+    } else {
+        let content = std::mem::take(text);
+        Channel::send(
+            channel,
+            OutboundMessage {
+                channel: "signal".to_owned(),
+                target: target.to_owned(),
+                content,
+            },
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 fn should_dispatch_signal_message(inbound: &InboundMessage) -> bool {
