@@ -13,6 +13,8 @@ pub(crate) struct Config {
     pub channels: ChannelsConfig,
     #[serde(default)]
     pub provider: ProviderConfig,
+    #[serde(default)]
+    pub cron: Vec<CronConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -50,6 +52,25 @@ pub(crate) struct SignalChannelConfig {
 pub(crate) struct ProviderConfig {
     #[serde(default = "default_provider")]
     pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct CronDelivery {
+    /// Channel to deliver through (e.g. "signal").
+    pub channel: String,
+    /// Target on that channel (e.g. a UUID for DM, "group:<hex>" for group).
+    pub target: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct CronConfig {
+    pub name: String,
+    pub cron: String,
+    pub message: String,
+    #[serde(default)]
+    pub user: Option<String>,
+    #[serde(default)]
+    pub deliver: Option<CronDelivery>,
 }
 
 fn default_provider() -> String {
@@ -135,6 +156,7 @@ agent:
         assert_eq!(config.agent.model, "anthropic/claude-sonnet-4-20250514");
         assert!(config.users.is_empty());
         assert!(config.channels.signal.is_none());
+        assert!(config.cron.is_empty());
     }
 
     #[test]
@@ -170,6 +192,76 @@ provider:
             "./data/signal.db".to_owned()
         );
         assert_eq!(config.provider.name, "anthropic");
+    }
+
+    #[test]
+    fn parse_config_with_cron() {
+        let yaml = "
+agent:
+  id: coop
+  model: test
+cron:
+  - name: heartbeat
+    cron: '*/30 * * * *'
+    user: alice
+    message: check HEARTBEAT.md
+  - name: cleanup
+    cron: '0 3 * * *'
+    message: run cleanup
+";
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.cron.len(), 2);
+        assert_eq!(config.cron[0].name, "heartbeat");
+        assert_eq!(config.cron[0].cron, "*/30 * * * *");
+        assert_eq!(config.cron[0].user.as_deref(), Some("alice"));
+        assert_eq!(config.cron[0].message, "check HEARTBEAT.md");
+        assert!(config.cron[0].deliver.is_none());
+        assert_eq!(config.cron[1].name, "cleanup");
+        assert!(config.cron[1].user.is_none());
+        assert!(config.cron[1].deliver.is_none());
+    }
+
+    #[test]
+    fn parse_config_with_cron_delivery() {
+        let yaml = "
+agent:
+  id: coop
+  model: test
+cron:
+  - name: morning-briefing
+    cron: '0 8 * * *'
+    user: alice
+    deliver:
+      channel: signal
+      target: alice-uuid
+    message: Morning briefing
+";
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.cron.len(), 1);
+        let delivery = config.cron[0].deliver.as_ref().unwrap();
+        assert_eq!(delivery.channel, "signal");
+        assert_eq!(delivery.target, "alice-uuid");
+    }
+
+    #[test]
+    fn parse_config_with_cron_delivery_group_target() {
+        let yaml = "
+agent:
+  id: coop
+  model: test
+cron:
+  - name: weekly-review
+    cron: '0 18 * * 5'
+    user: alice
+    deliver:
+      channel: signal
+      target: 'group:deadbeef00112233445566778899aabbccddeeff00112233445566778899aabb'
+    message: Weekly review
+";
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let delivery = config.cron[0].deliver.as_ref().unwrap();
+        assert_eq!(delivery.channel, "signal");
+        assert!(delivery.target.starts_with("group:"));
     }
 
     #[test]

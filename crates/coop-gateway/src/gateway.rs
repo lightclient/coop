@@ -91,7 +91,7 @@ fn signal_target_from_session(session_key: &SessionKey) -> Option<(&'static str,
             };
             Some(("group", target))
         }
-        SessionKind::Main | SessionKind::Isolated(_) => None,
+        SessionKind::Main | SessionKind::Isolated(_) | SessionKind::Cron(_) => None,
     }
 }
 
@@ -503,6 +503,15 @@ fn parse_session_key(session: &str, agent_id: &str) -> Option<SessionKey> {
         });
     }
 
+    if let Some(cron_name) = rest.strip_prefix("cron:")
+        && !cron_name.is_empty()
+    {
+        return Some(SessionKey {
+            agent_id: agent_id.to_owned(),
+            kind: SessionKind::Cron(cron_name.to_owned()),
+        });
+    }
+
     None
 }
 
@@ -599,6 +608,18 @@ agent:
             SessionKey {
                 agent_id: "coop".to_owned(),
                 kind: SessionKind::Group("signal:group:deadbeef".to_owned()),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_cron_session() {
+        let key = parse_session_key("coop:cron:heartbeat", "coop").unwrap();
+        assert_eq!(
+            key,
+            SessionKey {
+                agent_id: "coop".to_owned(),
+                kind: SessionKind::Cron("heartbeat".to_owned()),
             }
         );
     }

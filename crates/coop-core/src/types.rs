@@ -437,6 +437,7 @@ impl fmt::Display for SessionKey {
             SessionKind::Dm(who) => write!(f, "{}:dm:{who}", self.agent_id),
             SessionKind::Group(id) => write!(f, "{}:group:{id}", self.agent_id),
             SessionKind::Isolated(uuid) => write!(f, "{}:isolated:{uuid}", self.agent_id),
+            SessionKind::Cron(name) => write!(f, "{}:cron:{name}", self.agent_id),
         }
     }
 }
@@ -448,6 +449,7 @@ pub enum SessionKind {
     Dm(String),
     Group(String),
     Isolated(Uuid),
+    Cron(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -709,5 +711,14 @@ mod tests {
             kind: SessionKind::Main,
         };
         assert_eq!(key.to_string(), "reid:main");
+    }
+
+    #[test]
+    fn session_key_display_cron() {
+        let key = SessionKey {
+            agent_id: "coop".into(),
+            kind: SessionKind::Cron("heartbeat".into()),
+        };
+        assert_eq!(key.to_string(), "coop:cron:heartbeat");
     }
 }

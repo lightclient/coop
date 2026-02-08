@@ -107,6 +107,34 @@ impl MessageRouter {
 
 pub(crate) fn route_message(msg: &InboundMessage, config: &Config) -> RouteDecision {
     let agent_id = config.agent.id.clone();
+
+    if msg.channel == "cron" {
+        let rest = msg.sender.strip_prefix("cron:").unwrap_or(&msg.sender);
+        let (cron_name, cron_user) = match rest.find(':') {
+            Some(idx) => (&rest[..idx], Some(rest[idx + 1..].to_owned())),
+            None => (rest, None),
+        };
+
+        let (user_trust, user_name) = if let Some(ref user) = cron_user {
+            let matched = config.users.iter().find(|u| u.name == *user);
+            let trust = matched.map_or(TrustLevel::Full, |u| u.trust);
+            (trust, Some(user.clone()))
+        } else {
+            (TrustLevel::Full, None)
+        };
+
+        let trust = resolve_trust(user_trust, TrustLevel::Full);
+
+        return RouteDecision {
+            session_key: SessionKey {
+                agent_id,
+                kind: SessionKind::Cron(cron_name.to_owned()),
+            },
+            trust,
+            user_name,
+        };
+    }
+
     let identity = format!("{}:{}", msg.channel, msg.sender);
 
     let explicit_kind = if msg.channel == "terminal:default" {
@@ -331,6 +359,58 @@ users:
 
         assert_eq!(decision.session_key.kind, SessionKind::Main);
         assert_eq!(decision.trust, TrustLevel::Full);
+    }
+
+    #[test]
+    fn cron_with_user_routes_to_cron_session() {
+        let msg = inbound("cron", "cron:heartbeat:alice", None, false, None);
+        let decision = route_message(&msg, &test_config());
+
+        assert_eq!(
+            decision.session_key.kind,
+            SessionKind::Cron("heartbeat".to_owned())
+        );
+        assert_eq!(decision.trust, TrustLevel::Full);
+        assert_eq!(decision.user_name.as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn cron_without_user_routes_to_cron_session() {
+        let msg = inbound("cron", "cron:heartbeat", None, false, None);
+        let decision = route_message(&msg, &test_config());
+
+        assert_eq!(
+            decision.session_key.kind,
+            SessionKind::Cron("heartbeat".to_owned())
+        );
+        assert_eq!(decision.trust, TrustLevel::Full);
+        assert_eq!(decision.user_name, None);
+    }
+
+    #[test]
+    fn cron_with_inner_trust_user() {
+        let msg = inbound("cron", "cron:heartbeat:bob", None, false, None);
+        let decision = route_message(&msg, &test_config());
+
+        assert_eq!(
+            decision.session_key.kind,
+            SessionKind::Cron("heartbeat".to_owned())
+        );
+        assert_eq!(decision.trust, TrustLevel::Inner);
+        assert_eq!(decision.user_name.as_deref(), Some("bob"));
+    }
+
+    #[test]
+    fn cron_with_unknown_user_defaults_to_full() {
+        let msg = inbound("cron", "cron:heartbeat:unknown", None, false, None);
+        let decision = route_message(&msg, &test_config());
+
+        assert_eq!(
+            decision.session_key.kind,
+            SessionKind::Cron("heartbeat".to_owned())
+        );
+        assert_eq!(decision.trust, TrustLevel::Full);
+        assert_eq!(decision.user_name.as_deref(), Some("unknown"));
     }
 
     fn test_workspace() -> tempfile::TempDir {

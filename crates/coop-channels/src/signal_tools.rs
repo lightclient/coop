@@ -425,4 +425,14 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("signal action channel closed"));
     }
+
+    #[tokio::test]
+    async fn executor_has_react_and_reply_only() {
+        let (tx, _rx) = mpsc::channel(1);
+        let executor = SignalToolExecutor::new(tx);
+        let names: Vec<_> = executor.tools().iter().map(|t| t.name.clone()).collect();
+        assert_eq!(names.len(), 2);
+        assert!(names.contains(&"signal_react".to_owned()));
+        assert!(names.contains(&"signal_reply".to_owned()));
+    }
 }

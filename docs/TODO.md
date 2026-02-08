@@ -7,6 +7,7 @@
   wait until you see it then text me the name to confirm adding it to allowed
   list
 - convert config to toml
+- per channel prompt on how to use the channel
 
 ## Agent
 

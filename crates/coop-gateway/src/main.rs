@@ -4,6 +4,7 @@ mod cli;
 mod config;
 mod gateway;
 mod router;
+mod scheduler;
 #[cfg(feature = "signal")]
 mod signal_loop;
 mod tracing_setup;
@@ -32,6 +33,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use crate::cli::{Cli, Commands, SignalCommands};
@@ -214,6 +216,8 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
     let socket = socket_path(&config.agent.id);
     let server = IpcServer::bind(&socket)?;
 
+    let shutdown_token = CancellationToken::new();
+
     #[cfg(feature = "signal")]
     if let Some(signal_channel) = signal_channel {
         let router = Arc::clone(&router);
@@ -222,6 +226,25 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
                 tracing::warn!(error = %error, "signal loop stopped");
             }
         });
+    }
+
+    if !config.cron.is_empty() {
+        #[cfg(feature = "signal")]
+        let deliver_tx = signal_action_tx
+            .as_ref()
+            .map(|tx| scheduler::spawn_signal_delivery_bridge(tx.clone()));
+
+        #[cfg(not(feature = "signal"))]
+        let deliver_tx: Option<scheduler::DeliverySender> = None;
+
+        let cron = config.cron.clone();
+        let users = config.users.clone();
+        let sched_router = Arc::clone(&router);
+        let sched_token = shutdown_token.clone();
+        tokio::spawn(async move {
+            scheduler::run_scheduler(cron, sched_router, &users, deliver_tx, sched_token).await;
+        });
+        info!(count = config.cron.len(), "scheduler started");
     }
 
     info!(
@@ -258,6 +281,8 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
             }
         }
     }
+
+    shutdown_token.cancel();
 
     #[cfg(feature = "signal")]
     if let Some(action_tx) = signal_action_tx {
