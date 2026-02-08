@@ -219,7 +219,7 @@ impl AnthropicProvider {
     fn format_messages(messages: &[Message], prefix_tools: bool) -> Vec<Value> {
         messages
             .iter()
-            .map(|m| {
+            .filter_map(|m| {
                 let role = match m.role {
                     Role::User => "user",
                     Role::Assistant => "assistant",
@@ -264,10 +264,16 @@ impl AnthropicProvider {
                     })
                     .collect();
 
-                json!({
+                // Drop messages with empty content after filtering — Anthropic
+                // rejects non-final messages with `"content": []` (BUG-001).
+                if content.is_empty() {
+                    return None;
+                }
+
+                Some(json!({
                     "role": role,
                     "content": content
-                })
+                }))
             })
             .collect()
     }
@@ -766,4 +772,56 @@ struct SseError {
     #[serde(rename = "type")]
     error_type: String,
     message: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// BUG-001: thinking-only assistant messages produced empty content arrays
+    /// that Anthropic rejected with 400. format_messages must drop them.
+    #[test]
+    fn format_messages_drops_thinking_only_assistant_message() {
+        let messages = vec![
+            Message::user().with_text("hello"),
+            Message::assistant().with_text("hi").with_tool_request(
+                "t1",
+                "signal_reply",
+                json!({"text": "hi"}),
+            ),
+            Message::user().with_content(Content::tool_result("t1", "ok", false)),
+            // Thinking-only assistant response — no visible content after filtering
+            Message::assistant().with_content(Content::Thinking {
+                thinking: "internal reasoning".into(),
+                signature: None,
+            }),
+            Message::user().with_text("who are you"),
+        ];
+
+        let formatted = AnthropicProvider::format_messages(&messages, false);
+
+        // The thinking-only message must be absent
+        assert_eq!(formatted.len(), 4);
+        for msg in &formatted {
+            let content = msg["content"]
+                .as_array()
+                .expect("content should be an array");
+            assert!(!content.is_empty(), "no message should have empty content");
+        }
+    }
+
+    #[test]
+    fn format_messages_keeps_non_empty_assistant_messages() {
+        let messages = vec![
+            Message::user().with_text("hello"),
+            Message::assistant().with_text("world"),
+        ];
+
+        let formatted = AnthropicProvider::format_messages(&messages, false);
+
+        assert_eq!(formatted.len(), 2);
+        assert_eq!(formatted[1]["role"], "assistant");
+        assert_eq!(formatted[1]["content"][0]["text"], "world");
+    }
 }
