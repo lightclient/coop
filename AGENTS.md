@@ -107,6 +107,7 @@ Fast incremental builds are critical. Coop is developed through agentic loops wh
 ## Rules
 
 Error: Use `anyhow::Result` for error handling
+Config: Any change that can create a config error must also update `config_check::validate_config` — add or adjust the relevant check so `coop check` catches it before the server fails to start
 Test: Prefer `tests/` folders within each crate
 Test: Use fake/placeholder data only — never real PII
 Test: Use fakes from coop-core/src/fakes.rs for trait boundaries

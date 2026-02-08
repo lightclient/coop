@@ -60,7 +60,7 @@ pub(crate) fn spawn_signal_delivery_bridge(
     DeliverySender::new(outbound_tx)
 }
 
-fn parse_cron(expr: &str) -> Result<Schedule> {
+pub(crate) fn parse_cron(expr: &str) -> Result<Schedule> {
     let fields: Vec<&str> = expr.split_whitespace().collect();
     let full_expr = match fields.len() {
         5 => format!("0 {expr} *"),

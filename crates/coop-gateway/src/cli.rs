@@ -13,6 +13,11 @@ pub(crate) struct Cli {
 #[derive(Subcommand)]
 pub(crate) enum Commands {
     Start,
+    Check {
+        /// Output format: human (default) or json
+        #[arg(long, default_value = "human")]
+        format: String,
+    },
     Chat {
         /// User to load as (defaults to first user in config).
         #[arg(short, long)]

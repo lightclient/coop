@@ -2,6 +2,9 @@
 
 mod cli;
 mod config;
+mod config_check;
+mod config_tool;
+mod config_write;
 mod gateway;
 mod router;
 mod scheduler;
@@ -16,9 +19,7 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::Parser;
 use coop_agent::AnthropicProvider;
-#[cfg(feature = "signal")]
-use coop_core::tools::CompositeExecutor;
-use coop_core::tools::DefaultExecutor;
+use coop_core::tools::{CompositeExecutor, DefaultExecutor};
 use coop_core::{InboundKind, InboundMessage, Provider, TurnEvent};
 use coop_ipc::{
     ClientMessage, IpcClient, IpcConnection, IpcServer, PROTOCOL_VERSION, ServerMessage,
@@ -75,6 +76,7 @@ async fn main() -> Result<()> {
     );
 
     match cli.command {
+        Commands::Check { format } => cmd_check(cli.config.as_deref(), &format),
         Commands::Start => cmd_start(cli.config.as_deref()).await,
         Commands::Chat { user } => cmd_chat(cli.config.as_deref(), user.as_deref()).await,
         Commands::Attach { session } => cmd_attach(cli.config.as_deref(), &session).await,
@@ -108,6 +110,31 @@ fn resolve_tui_user(config: &Config, user_flag: Option<&str>) -> String {
     } else {
         "root".to_owned()
     }
+}
+
+// ---------------------------------------------------------------------------
+// cmd_check — validate config without starting
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::unnecessary_wraps)] // must return Result to match main's match arms
+fn cmd_check(config_path: Option<&str>, format: &str) -> Result<()> {
+    let config_file = Config::find_config_path(config_path);
+    let config_dir = config_file
+        .parent()
+        .unwrap_or(&PathBuf::from("."))
+        .to_path_buf();
+
+    let report = config_check::validate_config(&config_file, &config_dir);
+
+    match format {
+        "json" => report.print_json(),
+        _ => report.print_human(),
+    }
+
+    if report.has_errors() {
+        std::process::exit(1);
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -176,21 +203,18 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
     }
 
     let default_executor = DefaultExecutor::new();
+    let config_executor = config_tool::ConfigToolExecutor::new(config_file.clone());
+
+    #[allow(unused_mut)]
+    let mut executors: Vec<Box<dyn coop_core::ToolExecutor>> =
+        vec![Box::new(default_executor), Box::new(config_executor)];
 
     #[cfg(feature = "signal")]
-    let executor: Arc<dyn coop_core::ToolExecutor> = if let (Some(action_tx), Some(query_tx)) =
-        (signal_action_tx.clone(), signal_query_tx.clone())
-    {
-        Arc::new(CompositeExecutor::new(vec![
-            Box::new(default_executor),
-            Box::new(SignalToolExecutor::new(action_tx, query_tx)),
-        ]))
-    } else {
-        Arc::new(default_executor)
-    };
+    if let (Some(action_tx), Some(query_tx)) = (signal_action_tx.clone(), signal_query_tx.clone()) {
+        executors.push(Box::new(SignalToolExecutor::new(action_tx, query_tx)));
+    }
 
-    #[cfg(not(feature = "signal"))]
-    let executor: Arc<dyn coop_core::ToolExecutor> = Arc::new(default_executor);
+    let executor: Arc<dyn coop_core::ToolExecutor> = Arc::new(CompositeExecutor::new(executors));
 
     #[cfg(feature = "signal")]
     let typing_notifier: Option<Arc<dyn coop_core::TypingNotifier>> =
@@ -431,7 +455,12 @@ async fn cmd_chat(config_path: Option<&str>, user_flag: Option<&str>) -> Result<
         AnthropicProvider::from_env(&config.agent.model)
             .context("failed to initialize Anthropic provider")?,
     );
-    let executor = Arc::new(DefaultExecutor::new());
+    let default_executor = DefaultExecutor::new();
+    let config_executor = config_tool::ConfigToolExecutor::new(config_file.clone());
+    let executor: Arc<dyn coop_core::ToolExecutor> = Arc::new(CompositeExecutor::new(vec![
+        Box::new(default_executor),
+        Box::new(config_executor),
+    ]));
     let gateway = Arc::new(Gateway::new(
         config.clone(),
         workspace,

@@ -208,7 +208,6 @@ pub(crate) fn resolve_working_dir() -> String {
     }
 }
 
-#[cfg(feature = "signal")]
 pub(crate) fn resolve_config_path(
     base_dir: &std::path::Path,
     configured_path: &str,

@@ -1,0 +1,604 @@
+use std::collections::HashSet;
+use std::path::Path;
+
+use coop_core::TrustLevel;
+use coop_core::prompt::{PromptBuilder, WorkspaceIndex, default_file_configs};
+
+use crate::config::Config;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Severity {
+    Error,
+    Warning,
+    Info,
+}
+
+impl Severity {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Error => "error",
+            Self::Warning => "warning",
+            Self::Info => "info",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CheckResult {
+    pub name: &'static str,
+    pub severity: Severity,
+    pub passed: bool,
+    pub message: String,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct CheckReport {
+    pub results: Vec<CheckResult>,
+}
+
+impl CheckReport {
+    pub(crate) fn push(&mut self, result: CheckResult) {
+        self.results.push(result);
+    }
+
+    pub(crate) fn has_errors(&self) -> bool {
+        self.results
+            .iter()
+            .any(|r| r.severity == Severity::Error && !r.passed)
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn has_warnings(&self) -> bool {
+        self.results
+            .iter()
+            .any(|r| r.severity == Severity::Warning && !r.passed)
+    }
+
+    fn error_count(&self) -> usize {
+        self.results
+            .iter()
+            .filter(|r| r.severity == Severity::Error && !r.passed)
+            .count()
+    }
+
+    fn warning_count(&self) -> usize {
+        self.results
+            .iter()
+            .filter(|r| r.severity == Severity::Warning && !r.passed)
+            .count()
+    }
+
+    fn format_result(r: &CheckResult) -> String {
+        let icon = if r.severity == Severity::Info {
+            "·"
+        } else if r.passed {
+            "✓"
+        } else {
+            match r.severity {
+                Severity::Warning => "⚠",
+                _ => "✗",
+            }
+        };
+        format!("{icon} {}", r.message)
+    }
+
+    pub(crate) fn to_summary_string(&self) -> String {
+        let mut lines: Vec<String> = self.results.iter().map(Self::format_result).collect();
+        let errors = self.error_count();
+        let warnings = self.warning_count();
+        if errors == 0 && warnings == 0 {
+            lines.push("\nall checks passed".to_owned());
+        } else {
+            lines.push(format!("\n{errors} error(s), {warnings} warning(s)"));
+        }
+        lines.join("\n")
+    }
+
+    pub(crate) fn print_human(&self) {
+        println!("{}", self.to_summary_string());
+    }
+
+    pub(crate) fn print_json(&self) {
+        let value = self.to_json_value();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&value).unwrap_or_default()
+        );
+    }
+
+    pub(crate) fn to_json_value(&self) -> serde_json::Value {
+        let checks: Vec<serde_json::Value> = self
+            .results
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "name": r.name,
+                    "severity": r.severity.as_str(),
+                    "passed": r.passed,
+                    "message": r.message,
+                })
+            })
+            .collect();
+
+        serde_json::json!({
+            "passed": !self.has_errors(),
+            "errors": self.error_count(),
+            "warnings": self.warning_count(),
+            "checks": checks,
+        })
+    }
+}
+
+pub(crate) fn validate_config(config_path: &Path, config_dir: &Path) -> CheckReport {
+    let mut report = CheckReport::default();
+
+    // 1. yaml_parse
+    let config = match Config::load(config_path) {
+        Ok(c) => {
+            report.push(CheckResult {
+                name: "yaml_parse",
+                severity: Severity::Error,
+                passed: true,
+                message: "config syntax valid".to_owned(),
+            });
+            c
+        }
+        Err(e) => {
+            report.push(CheckResult {
+                name: "yaml_parse",
+                severity: Severity::Error,
+                passed: false,
+                message: format!("{e:#}"),
+            });
+            return report;
+        }
+    };
+
+    // 2. required_fields
+    let fields_ok = !config.agent.id.is_empty() && !config.agent.model.is_empty();
+    report.push(CheckResult {
+        name: "required_fields",
+        severity: Severity::Error,
+        passed: fields_ok,
+        message: if fields_ok {
+            format!(
+                "agent.id='{}', agent.model='{}'",
+                config.agent.id, config.agent.model
+            )
+        } else {
+            "agent.id and agent.model must be non-empty".to_owned()
+        },
+    });
+
+    // 3. workspace_exists
+    let workspace = match config.resolve_workspace(config_dir) {
+        Ok(ws) => {
+            report.push(CheckResult {
+                name: "workspace_exists",
+                severity: Severity::Error,
+                passed: true,
+                message: format!("workspace: {}", ws.display()),
+            });
+            Some(ws)
+        }
+        Err(e) => {
+            report.push(CheckResult {
+                name: "workspace_exists",
+                severity: Severity::Error,
+                passed: false,
+                message: format!("{e}"),
+            });
+            None
+        }
+    };
+
+    // 4. provider_known
+    let provider_ok = config.provider.name == "anthropic";
+    report.push(CheckResult {
+        name: "provider_known",
+        severity: Severity::Error,
+        passed: provider_ok,
+        message: if provider_ok {
+            format!("provider: {}", config.provider.name)
+        } else {
+            format!(
+                "unknown provider '{}' (only 'anthropic' supported)",
+                config.provider.name
+            )
+        },
+    });
+
+    // 5. api_key_present
+    let api_key_ok = std::env::var("ANTHROPIC_API_KEY").is_ok();
+    report.push(CheckResult {
+        name: "api_key_present",
+        severity: Severity::Error,
+        passed: api_key_ok,
+        message: if api_key_ok {
+            "API key: present".to_owned()
+        } else {
+            "ANTHROPIC_API_KEY environment variable not set".to_owned()
+        },
+    });
+
+    // 6-7 depend on workspace
+    if let Some(ref ws) = workspace {
+        check_workspace_files(&mut report, ws, &config);
+    }
+
+    // 8. users
+    check_users(&mut report, &config);
+
+    // 9. signal_channel
+    if let Some(ref signal) = config.channels.signal {
+        let db_path = crate::tui_helpers::resolve_config_path(config_dir, &signal.db_path);
+        let exists = db_path.exists();
+        report.push(CheckResult {
+            name: "signal_channel",
+            severity: Severity::Warning,
+            passed: exists,
+            message: if exists {
+                format!("signal db: {}", db_path.display())
+            } else {
+                format!("signal db not found: {}", db_path.display())
+            },
+        });
+    }
+
+    // 10-12. cron checks
+    check_cron(&mut report, &config);
+
+    report
+}
+
+fn check_workspace_files(report: &mut CheckReport, ws: &Path, config: &Config) {
+    let file_configs = default_file_configs();
+    match WorkspaceIndex::scan(ws, &file_configs) {
+        Ok(index) => {
+            // 6. workspace_files (Info)
+            let entries = index.entries_for_trust(TrustLevel::Full);
+            let file_list = if entries.is_empty() {
+                "no workspace files found".to_owned()
+            } else {
+                entries
+                    .iter()
+                    .map(|e| format!("{} ({} tok)", e.path, e.tokens))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            report.push(CheckResult {
+                name: "workspace_files",
+                severity: Severity::Info,
+                passed: true,
+                message: format!("workspace files: {file_list}"),
+            });
+
+            // 7. prompt_builds
+            match PromptBuilder::new(ws.to_path_buf(), config.agent.id.clone())
+                .trust(TrustLevel::Full)
+                .build(&index)
+            {
+                Ok(built) => {
+                    report.push(CheckResult {
+                        name: "prompt_builds",
+                        severity: Severity::Warning,
+                        passed: true,
+                        message: format!("prompt: {} / 30000 tokens", built.total_tokens),
+                    });
+                }
+                Err(e) => {
+                    report.push(CheckResult {
+                        name: "prompt_builds",
+                        severity: Severity::Warning,
+                        passed: false,
+                        message: format!("prompt build failed: {e}"),
+                    });
+                }
+            }
+        }
+        Err(e) => {
+            report.push(CheckResult {
+                name: "workspace_files",
+                severity: Severity::Info,
+                passed: true,
+                message: format!("workspace scan failed: {e}"),
+            });
+        }
+    }
+}
+
+fn check_users(report: &mut CheckReport, config: &Config) {
+    if config.users.is_empty() {
+        report.push(CheckResult {
+            name: "users",
+            severity: Severity::Info,
+            passed: true,
+            message: "no users configured".to_owned(),
+        });
+        return;
+    }
+
+    let names: Vec<&str> = config.users.iter().map(|u| u.name.as_str()).collect();
+    report.push(CheckResult {
+        name: "users",
+        severity: Severity::Info,
+        passed: true,
+        message: format!("{} user(s): {}", names.len(), names.join(", ")),
+    });
+
+    let mut seen = HashSet::new();
+    let dupes: Vec<&str> = names
+        .iter()
+        .filter(|n| !seen.insert(**n))
+        .copied()
+        .collect();
+    if !dupes.is_empty() {
+        report.push(CheckResult {
+            name: "users_duplicates",
+            severity: Severity::Warning,
+            passed: false,
+            message: format!("duplicate user names: {}", dupes.join(", ")),
+        });
+    }
+}
+
+fn check_cron(report: &mut CheckReport, config: &Config) {
+    // 10. cron_expressions
+    for entry in &config.cron {
+        match crate::scheduler::parse_cron(&entry.cron) {
+            Ok(_) => report.push(CheckResult {
+                name: "cron_expressions",
+                severity: Severity::Warning,
+                passed: true,
+                message: format!("cron '{}': valid", entry.name),
+            }),
+            Err(e) => report.push(CheckResult {
+                name: "cron_expressions",
+                severity: Severity::Warning,
+                passed: false,
+                message: format!("cron '{}': {e}", entry.name),
+            }),
+        }
+    }
+
+    // 11. cron_users
+    for entry in &config.cron {
+        if let Some(ref user) = entry.user {
+            let exists = config.users.iter().any(|u| u.name == *user);
+            if !exists {
+                report.push(CheckResult {
+                    name: "cron_users",
+                    severity: Severity::Warning,
+                    passed: false,
+                    message: format!("cron '{}' references unknown user '{user}'", entry.name),
+                });
+            }
+        }
+    }
+
+    // 12. cron_delivery
+    for entry in &config.cron {
+        if let Some(ref deliver) = entry.deliver
+            && deliver.channel != "signal"
+        {
+            report.push(CheckResult {
+                name: "cron_delivery",
+                severity: Severity::Warning,
+                passed: false,
+                message: format!(
+                    "cron '{}' delivery channel '{}' not supported (only 'signal')",
+                    entry.name, deliver.channel
+                ),
+            });
+        }
+    }
+}
+
+#[allow(clippy::unwrap_used)]
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_minimal_config(dir: &Path) -> std::path::PathBuf {
+        let workspace = dir.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(workspace.join("SOUL.md"), "test soul").unwrap();
+
+        let config_path = dir.join("coop.yaml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "agent:\n  id: test\n  model: test-model\n  workspace: {}\nprovider:\n  name: anthropic\n",
+                workspace.display()
+            ),
+        )
+        .unwrap();
+        config_path
+    }
+
+    /// Filter out api_key_present errors (env-dependent, can't safely set in tests).
+    fn non_env_errors(report: &CheckReport) -> Vec<&CheckResult> {
+        report
+            .results
+            .iter()
+            .filter(|r| r.severity == Severity::Error && !r.passed && r.name != "api_key_present")
+            .collect()
+    }
+
+    #[test]
+    fn test_valid_minimal_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = write_minimal_config(dir.path());
+
+        let report = validate_config(&config_path, dir.path());
+        let errors = non_env_errors(&report);
+        assert!(errors.is_empty(), "expected no config errors: {errors:?}");
+    }
+
+    #[test]
+    fn test_invalid_yaml() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("coop.yaml");
+        std::fs::write(&config_path, "{{not valid yaml").unwrap();
+
+        let report = validate_config(&config_path, dir.path());
+        let yaml_check = report
+            .results
+            .iter()
+            .find(|r| r.name == "yaml_parse")
+            .unwrap();
+        assert!(!yaml_check.passed);
+        assert!(report.has_errors());
+        assert_eq!(
+            report.results.len(),
+            1,
+            "should return early after parse failure"
+        );
+    }
+
+    #[test]
+    fn test_missing_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("coop.yaml");
+        std::fs::write(
+            &config_path,
+            "agent:\n  id: test\n  model: test-model\n  workspace: ./nonexistent\n",
+        )
+        .unwrap();
+
+        let report = validate_config(&config_path, dir.path());
+        let ws_check = report
+            .results
+            .iter()
+            .find(|r| r.name == "workspace_exists")
+            .unwrap();
+        assert!(!ws_check.passed);
+    }
+
+    #[test]
+    fn test_unknown_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        let config_path = dir.path().join("coop.yaml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "agent:\n  id: test\n  model: test-model\n  workspace: {}\nprovider:\n  name: openai\n",
+                workspace.display()
+            ),
+        )
+        .unwrap();
+
+        let report = validate_config(&config_path, dir.path());
+        let provider_check = report
+            .results
+            .iter()
+            .find(|r| r.name == "provider_known")
+            .unwrap();
+        assert!(!provider_check.passed);
+        assert!(provider_check.message.contains("openai"));
+    }
+
+    #[test]
+    fn test_invalid_cron() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        let config_path = dir.path().join("coop.yaml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "agent:\n  id: test\n  model: test-model\n  workspace: {}\ncron:\n  - name: bad\n    cron: 'not a cron'\n    message: test\n",
+                workspace.display()
+            ),
+        )
+        .unwrap();
+
+        let report = validate_config(&config_path, dir.path());
+        let cron_check = report
+            .results
+            .iter()
+            .find(|r| r.name == "cron_expressions" && !r.passed)
+            .unwrap();
+        assert!(!cron_check.passed);
+        assert!(report.has_warnings());
+    }
+
+    #[test]
+    fn test_cron_user_not_in_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        let config_path = dir.path().join("coop.yaml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "agent:\n  id: test\n  model: test-model\n  workspace: {}\ncron:\n  - name: test\n    cron: '*/30 * * * *'\n    user: mallory\n    message: test\n",
+                workspace.display()
+            ),
+        )
+        .unwrap();
+
+        let report = validate_config(&config_path, dir.path());
+        let cron_users_check = report
+            .results
+            .iter()
+            .find(|r| r.name == "cron_users")
+            .unwrap();
+        assert!(!cron_users_check.passed);
+        assert!(cron_users_check.message.contains("mallory"));
+    }
+
+    #[test]
+    fn test_report_has_errors() {
+        let mut report = CheckReport::default();
+        assert!(!report.has_errors());
+        assert!(!report.has_warnings());
+
+        report.push(CheckResult {
+            name: "test",
+            severity: Severity::Warning,
+            passed: false,
+            message: "warning".to_owned(),
+        });
+        assert!(!report.has_errors());
+        assert!(report.has_warnings());
+
+        report.push(CheckResult {
+            name: "test2",
+            severity: Severity::Error,
+            passed: false,
+            message: "error".to_owned(),
+        });
+        assert!(report.has_errors());
+    }
+
+    #[test]
+    fn test_report_json_output() {
+        let mut report = CheckReport::default();
+        report.push(CheckResult {
+            name: "test_pass",
+            severity: Severity::Error,
+            passed: true,
+            message: "ok".to_owned(),
+        });
+        report.push(CheckResult {
+            name: "test_fail",
+            severity: Severity::Warning,
+            passed: false,
+            message: "bad".to_owned(),
+        });
+
+        let json = report.to_json_value();
+        assert_eq!(json["passed"], true);
+        assert_eq!(json["errors"], 0);
+        assert_eq!(json["warnings"], 1);
+        assert_eq!(json["checks"].as_array().unwrap().len(), 2);
+        assert_eq!(json["checks"][0]["name"], "test_pass");
+        assert_eq!(json["checks"][1]["severity"], "warning");
+    }
+}
