@@ -47,6 +47,10 @@ machete:
 build:
     cargo build {{_feat}} --release
 
+# Install the release binary to ~/.cargo/bin
+install:
+    cargo install {{_feat}} --path crates/coop-gateway
+
 # Run the TUI
 run:
     cargo run {{_feat}} --bin coop -- {{_conf}} chat
