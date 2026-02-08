@@ -52,6 +52,7 @@ pub enum SignalAction {
         target: SignalTarget,
         started: bool,
     },
+    Shutdown,
 }
 
 #[allow(missing_debug_implementations)]
@@ -359,6 +360,11 @@ async fn send_task(
     health: HealthState,
 ) {
     while let Some(action) = action_rx.recv().await {
+        if matches!(action, SignalAction::Shutdown) {
+            info!("signal send task shutting down gracefully");
+            break;
+        }
+
         debug!(action = ?action, "sending signal action");
 
         match send_signal_action(&mut manager, action).await {
@@ -498,6 +504,7 @@ async fn send_signal_action(manager: &mut SignalManager, action: SignalAction) -
             };
             send_action_with_trace(manager, span, target, typing, timestamp).await
         }
+        SignalAction::Shutdown => Ok(()),
     }
 }
 

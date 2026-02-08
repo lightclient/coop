@@ -361,12 +361,14 @@ impl ToolOutput {
 // ---------------------------------------------------------------------------
 
 /// Token usage from a provider call.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Usage {
     pub input_tokens: Option<u32>,
     pub output_tokens: Option<u32>,
     pub cache_read_tokens: Option<u32>,
     pub cache_write_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<String>,
 }
 
 impl Usage {
@@ -383,13 +385,20 @@ impl std::ops::Add for Usage {
             output_tokens: sum_opt(self.output_tokens, rhs.output_tokens),
             cache_read_tokens: sum_opt(self.cache_read_tokens, rhs.cache_read_tokens),
             cache_write_tokens: sum_opt(self.cache_write_tokens, rhs.cache_write_tokens),
+            stop_reason: rhs.stop_reason.or(self.stop_reason),
         }
     }
 }
 
 impl std::ops::AddAssign for Usage {
     fn add_assign(&mut self, rhs: Self) {
-        *self = *self + rhs;
+        self.input_tokens = sum_opt(self.input_tokens, rhs.input_tokens);
+        self.output_tokens = sum_opt(self.output_tokens, rhs.output_tokens);
+        self.cache_read_tokens = sum_opt(self.cache_read_tokens, rhs.cache_read_tokens);
+        self.cache_write_tokens = sum_opt(self.cache_write_tokens, rhs.cache_write_tokens);
+        if rhs.stop_reason.is_some() {
+            self.stop_reason = rhs.stop_reason;
+        }
     }
 }
 

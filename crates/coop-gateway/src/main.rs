@@ -233,6 +233,13 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
         }
     }
 
+    #[cfg(feature = "signal")]
+    if let Some(action_tx) = signal_action_tx {
+        let _ = action_tx.send(coop_channels::SignalAction::Shutdown).await;
+        // Brief grace period for the signal runtime to close the websocket cleanly.
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+
     Ok(())
 }
 

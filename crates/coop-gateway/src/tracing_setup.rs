@@ -21,7 +21,9 @@ pub(crate) fn init(console: bool) -> TracingGuard {
     let mut guards = Vec::new();
 
     let console_layer = if console {
-        let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+        let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+            EnvFilter::new("info,libsignal_service=warn,libsignal_protocol=warn")
+        });
         Some(fmt::layer().with_target(false).with_filter(filter))
     } else {
         None
@@ -42,8 +44,9 @@ pub(crate) fn init(console: bool) -> TracingGuard {
         let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
         guards.push(guard);
 
-        let jsonl_filter =
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug"));
+        let jsonl_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+            EnvFilter::new("debug,libsignal_service=warn,libsignal_protocol=warn,presage=info")
+        });
 
         Some(
             fmt::layer()

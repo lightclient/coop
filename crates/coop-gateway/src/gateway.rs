@@ -379,6 +379,7 @@ impl Gateway {
         info!(
             input_tokens = usage.input_tokens,
             output_tokens = usage.output_tokens,
+            stop_reason = %usage.stop_reason.as_deref().unwrap_or("unknown"),
             "provider response complete"
         );
 
@@ -404,6 +405,7 @@ impl Gateway {
         info!(
             input_tokens = usage.input_tokens,
             output_tokens = usage.output_tokens,
+            stop_reason = %usage.stop_reason.as_deref().unwrap_or("unknown"),
             "provider response complete"
         );
 

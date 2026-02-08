@@ -12,7 +12,7 @@
 
 ## Signal
 
-- add typing while preparing response
+- add support for chat history
 
 ## TUI
 

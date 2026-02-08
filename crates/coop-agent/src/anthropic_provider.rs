@@ -322,6 +322,7 @@ impl AnthropicProvider {
         Usage {
             input_tokens: Some(response.usage.input_tokens),
             output_tokens: Some(response.usage.output_tokens),
+            stop_reason: response.stop_reason.clone(),
             ..Default::default()
         }
     }
@@ -592,9 +593,12 @@ where
                 SseDelta::Thinking { .. } | SseDelta::Signature { .. } => SseAction::Continue,
             },
             SseEvent::ContentBlockStop { .. } | SseEvent::Ping => SseAction::Continue,
-            SseEvent::MessageDelta { usage, .. } => {
+            SseEvent::MessageDelta { delta, usage } => {
                 if let Some(out) = usage.output_tokens {
                     self.usage.output_tokens = Some(out);
+                }
+                if delta.stop_reason.is_some() {
+                    self.usage.stop_reason = delta.stop_reason;
                 }
                 SseAction::Continue
             }
@@ -621,7 +625,7 @@ where
                         BlockAccumulator::Thinking => {}
                     }
                 }
-                SseAction::YieldFinal(msg, self.usage)
+                SseAction::YieldFinal(msg, self.usage.clone())
             }
             SseEvent::Error { error } => SseAction::Error(anyhow::anyhow!(
                 "Anthropic SSE error: {} - {}",
@@ -692,8 +696,7 @@ enum SseEvent {
     },
     #[serde(rename = "message_delta")]
     MessageDelta {
-        #[allow(dead_code)]
-        delta: Value,
+        delta: SseMessageDeltaDelta,
         usage: SseMessageDeltaUsage,
     },
     #[serde(rename = "message_stop")]
@@ -713,6 +716,11 @@ struct SseMessageStart {
 struct SseMessageStartUsage {
     input_tokens: u32,
     output_tokens: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SseMessageDeltaDelta {
+    stop_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
