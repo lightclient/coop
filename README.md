@@ -49,7 +49,7 @@ Five workspace crates:
 | `coop-gateway` | CLI entry point, daemon lifecycle, gateway routing, config |
 | `coop-ipc` | Unix socket IPC protocol and client/server transport |
 | `coop-channels` | Channel adapters (terminal; Signal scaffolded) |
-| `coop-tui` | Terminal UI (ratatui/crossterm) |
+| `coop-tui` | Terminal UI (crossterm) |
 
 ## Development
 

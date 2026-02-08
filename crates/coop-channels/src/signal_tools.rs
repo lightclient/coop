@@ -115,7 +115,7 @@ impl Tool for SignalReactTool {
             self.action_tx
                 .send(action)
                 .await
-                .map_err(|_| anyhow::anyhow!("signal action channel closed"))?;
+                .map_err(|_send_err| anyhow::anyhow!("signal action channel closed"))?;
 
             Ok(ToolOutput::success("reaction sent"))
         }
@@ -186,7 +186,7 @@ impl Tool for SignalReplyTool {
             self.action_tx
                 .send(action)
                 .await
-                .map_err(|_| anyhow::anyhow!("signal action channel closed"))?;
+                .map_err(|_send_err| anyhow::anyhow!("signal action channel closed"))?;
 
             Ok(ToolOutput::success("reply sent"))
         }
@@ -232,6 +232,7 @@ impl ToolExecutor for SignalToolExecutor {
     }
 }
 
+#[allow(clippy::unwrap_used)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -242,7 +243,7 @@ mod tests {
 
     fn context() -> ToolContext {
         ToolContext {
-            session_id: "session".to_string(),
+            session_id: "session".to_owned(),
             trust: TrustLevel::Full,
             workspace: PathBuf::from("."),
         }
@@ -286,7 +287,7 @@ mod tests {
                 target_sent_timestamp,
                 remove,
             } => {
-                assert_eq!(target, SignalTarget::Direct("alice-uuid".to_string()));
+                assert_eq!(target, SignalTarget::Direct("alice-uuid".to_owned()));
                 assert_eq!(emoji, "👍");
                 assert_eq!(target_author_aci, "alice-uuid");
                 assert_eq!(target_sent_timestamp, 42);
@@ -340,7 +341,7 @@ mod tests {
                 quote_timestamp,
                 quote_author_aci,
             } => {
-                assert_eq!(target, SignalTarget::Direct("alice-uuid".to_string()));
+                assert_eq!(target, SignalTarget::Direct("alice-uuid".to_owned()));
                 assert_eq!(text, "hello");
                 assert_eq!(quote_timestamp, 77);
                 assert_eq!(quote_author_aci, "alice-uuid");

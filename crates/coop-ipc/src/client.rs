@@ -99,6 +99,7 @@ async fn recv_message(reader: &mut Lines<BufReader<OwnedReadHalf>>) -> Result<Se
     }
 }
 
+#[allow(clippy::unwrap_used)]
 #[cfg(test)]
 mod tests {
     use super::*;

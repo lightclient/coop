@@ -33,7 +33,7 @@ impl CountingProvider {
             response: response.into(),
             calls: AtomicUsize::new(0),
             model: ModelInfo {
-                name: "counting-model".to_string(),
+                name: "counting-model".to_owned(),
                 context_limit: 128_000,
             },
         }
@@ -91,7 +91,7 @@ impl ScriptedProvider {
     fn new(responses: Vec<Message>) -> Self {
         Self {
             model: ModelInfo {
-                name: "scripted-model".to_string(),
+                name: "scripted-model".to_owned(),
                 context_limit: 128_000,
             },
             responses: Mutex::new(VecDeque::from(responses)),
@@ -115,8 +115,10 @@ impl Provider for ScriptedProvider {
         _messages: &[Message],
         _tools: &[ToolDef],
     ) -> Result<(Message, Usage)> {
-        let mut responses = self.responses.lock().unwrap();
-        let response = responses
+        let response = self
+            .responses
+            .lock()
+            .unwrap()
             .pop_front()
             .ok_or_else(|| anyhow::anyhow!("script exhausted"))?;
 
@@ -142,7 +144,7 @@ impl Provider for ScriptedProvider {
 
 fn test_config() -> Config {
     serde_yaml::from_str(
-        r"
+        "
 agent:
   id: coop
   model: test-model
@@ -185,9 +187,9 @@ fn inbound_message(
     reply_to: Option<&str>,
 ) -> InboundMessage {
     InboundMessage {
-        channel: "signal".to_string(),
-        sender: sender.to_string(),
-        content: "hello".to_string(),
+        channel: "signal".to_owned(),
+        sender: sender.to_owned(),
+        content: "hello".to_owned(),
         chat_id: chat_id.map(ToOwned::to_owned),
         is_group,
         timestamp: Utc::now(),
@@ -290,7 +292,7 @@ fn signal_reply_target_prefers_reply_to() {
 
     assert_eq!(
         signal_reply_target(&inbound),
-        Some("group:override".to_string())
+        Some("group:override".to_owned())
     );
 }
 
@@ -305,7 +307,7 @@ fn signal_reply_target_group_fallback_adds_prefix() {
     );
     assert_eq!(
         signal_reply_target(&inbound),
-        Some("group:deadbeef".to_string())
+        Some("group:deadbeef".to_owned())
     );
 
     let already_prefixed = inbound_message(
@@ -317,24 +319,21 @@ fn signal_reply_target_group_fallback_adds_prefix() {
     );
     assert_eq!(
         signal_reply_target(&already_prefixed),
-        Some("group:deadbeef".to_string())
+        Some("group:deadbeef".to_owned())
     );
 }
 
 #[test]
 fn signal_reply_target_dm_fallback_uses_sender() {
     let inbound = inbound_message(InboundKind::Text, "alice-uuid", None, false, None);
-    assert_eq!(
-        signal_reply_target(&inbound),
-        Some("alice-uuid".to_string())
-    );
+    assert_eq!(signal_reply_target(&inbound), Some("alice-uuid".to_owned()));
 }
 
 #[tokio::test]
 async fn handle_signal_inbound_once_filters_typing_and_receipt() {
     let provider = Arc::new(CountingProvider::new("ignored"));
     let router = build_router(
-        provider.clone() as Arc<dyn Provider>,
+        Arc::clone(&provider) as Arc<dyn Provider>,
         Arc::new(DefaultExecutor::new()),
         None,
     );
@@ -376,7 +375,7 @@ async fn handle_signal_inbound_once_filters_typing_and_receipt() {
 async fn handle_signal_inbound_once_dispatches_text_reaction_edit_and_attachment() {
     let provider = Arc::new(CountingProvider::new("ack"));
     let router = build_router(
-        provider.clone() as Arc<dyn Provider>,
+        Arc::clone(&provider) as Arc<dyn Provider>,
         Arc::new(DefaultExecutor::new()),
         None,
     );
@@ -536,13 +535,13 @@ async fn router_dispatch_emits_tool_events_and_queues_signal_action() {
             TurnEvent::ToolStart {
                 id,
                 name,
-                arguments: _,
+                ..
             } if id == "tool-1" && name == "signal_reply"
         )
     });
     let saw_tool_result = events
         .iter()
-        .any(|event| matches!(event, TurnEvent::ToolResult { id, message: _ } if id == "tool-1"));
+        .any(|event| matches!(event, TurnEvent::ToolResult { id, .. } if id == "tool-1"));
 
     assert!(saw_tool_start);
     assert!(saw_tool_result);

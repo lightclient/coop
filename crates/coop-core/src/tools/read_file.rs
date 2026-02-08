@@ -176,6 +176,7 @@ pub(crate) fn resolve_workspace_path(
     Ok(resolved)
 }
 
+#[allow(clippy::unwrap_used)]
 #[cfg(test)]
 mod tests {
     use super::*;

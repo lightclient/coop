@@ -36,6 +36,7 @@ fn socket_path_with_runtime_dir(agent_id: &str, runtime_dir: Option<&str>) -> Pa
     PathBuf::from(format!("/tmp/coop-{safe_agent_id}.sock"))
 }
 
+#[allow(clippy::unwrap_used)]
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used)]
 use std::io::BufRead;
 
 use coop_core::tools::DefaultExecutor;
@@ -33,7 +34,7 @@ async fn tool_execution_produces_expected_spans() {
     std::fs::write(workspace.join("test.txt"), "hello world").unwrap();
 
     let ctx = ToolContext {
-        session_id: "test-session".to_string(),
+        session_id: "test-session".to_owned(),
         trust: TrustLevel::Full,
         workspace,
     };

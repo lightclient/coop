@@ -163,7 +163,7 @@ pub(crate) fn detect_git_branch() -> Option<String> {
         .output()
         .ok()
         .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
 }
 
 /// Build the initial TUI layout and return the `Tui` + `App`.
@@ -178,8 +178,8 @@ pub(crate) fn build_tui(
 
     let mut tui = Tui::new();
     let mut app = App::new(agent_id, model, session, context_window);
-    app.version = env!("CARGO_PKG_VERSION").to_string();
-    app.working_dir = working_dir.to_string();
+    env!("CARGO_PKG_VERSION").clone_into(&mut app.version);
+    working_dir.clone_into(&mut app.working_dir);
 
     let welcome = format_tui_welcome(env!("CARGO_PKG_VERSION"), model, working_dir);
 

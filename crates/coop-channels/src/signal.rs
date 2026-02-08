@@ -1,4 +1,5 @@
 mod inbound;
+#[allow(clippy::unwrap_used)]
 #[cfg(test)]
 mod target_tests;
 pub mod testkit;
@@ -87,7 +88,7 @@ impl SignalTarget {
         }
 
         anyhow::ensure!(!value.is_empty(), "direct target cannot be empty");
-        Ok(Self::Direct(value.to_string()))
+        Ok(Self::Direct(value.to_owned()))
     }
 }
 
@@ -138,10 +139,10 @@ impl SignalChannel {
         let (action_tx, action_rx) = mpsc::channel(64);
         let health = Arc::new(Mutex::new(ChannelHealth::Healthy));
 
-        start_signal_runtime(manager, inbound_tx, action_rx, health.clone());
+        start_signal_runtime(manager, inbound_tx, action_rx, Arc::clone(&health));
 
         Ok(Self {
-            id: "signal".to_string(),
+            id: "signal".to_owned(),
             inbound_rx,
             action_tx,
             health,
@@ -217,7 +218,7 @@ fn start_signal_runtime(
     health: HealthState,
 ) {
     std::thread::Builder::new()
-        .name("signal-runtime".to_string())
+        .name("signal-runtime".to_owned())
         .stack_size(8 * 1024 * 1024)
         .spawn(move || {
             let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -239,8 +240,8 @@ fn start_signal_runtime(
             let local = tokio::task::LocalSet::new();
             local.block_on(&runtime, async move {
                 let receive_manager = manager.clone();
-                let receive_health = health.clone();
-                let send_health = health.clone();
+                let receive_health = Arc::clone(&health);
+                let send_health = Arc::clone(&health);
 
                 let receive_task = tokio::task::spawn_local(Box::pin(receive_task(
                     receive_manager,
@@ -273,11 +274,11 @@ impl Channel for SignalChannel {
         self.action_tx
             .send(SignalAction::SendText(msg))
             .await
-            .map_err(|_| anyhow::anyhow!("signal action channel closed"))
+            .map_err(|_send_err| anyhow::anyhow!("signal action channel closed"))
     }
 
     async fn probe(&self) -> ChannelHealth {
-        self.health.lock().unwrap().clone()
+        self.health.lock().expect("health mutex poisoned").clone()
     }
 }
 
@@ -335,7 +336,7 @@ async fn receive_task(
 
                 set_health(
                     &health,
-                    ChannelHealth::Degraded("signal receive stream ended".to_string()),
+                    ChannelHealth::Degraded("signal receive stream ended".to_owned()),
                 );
             }
             Err(error) => {
@@ -381,7 +382,7 @@ async fn send_task(
 
     set_health(
         &health,
-        ChannelHealth::Unhealthy("signal sender task stopped".to_string()),
+        ChannelHealth::Unhealthy("signal sender task stopped".to_owned()),
     );
 }
 
@@ -612,5 +613,5 @@ async fn open_store(db_path: &Path) -> Result<SqliteStore> {
 }
 
 fn set_health(health: &HealthState, state: ChannelHealth) {
-    *health.lock().unwrap() = state;
+    *health.lock().expect("health mutex poisoned") = state;
 }

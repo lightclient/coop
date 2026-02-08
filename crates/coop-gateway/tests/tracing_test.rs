@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used)]
 use std::io::BufRead;
 
 /// Test that the JSONL tracing layer produces valid JSON with expected fields.

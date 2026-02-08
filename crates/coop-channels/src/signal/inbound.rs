@@ -44,7 +44,7 @@ pub(super) fn inbound_from_content(content: &Content) -> Option<InboundMessage> 
             let (chat_id, is_group, reply_to) =
                 chat_context_from_typing_message(typing_message, &sender);
             ParseOutcome::Parsed(InboundMessage {
-                channel: "signal".to_string(),
+                channel: "signal".to_owned(),
                 sender,
                 content: String::new(),
                 chat_id,
@@ -63,7 +63,7 @@ pub(super) fn inbound_from_content(content: &Content) -> Option<InboundMessage> 
                 timestamp,
             );
             ParseOutcome::Parsed(InboundMessage {
-                channel: "signal".to_string(),
+                channel: "signal".to_owned(),
                 sender: sender.clone(),
                 content: content_text,
                 chat_id: None,
@@ -167,8 +167,8 @@ fn inbound_from_data_message(
     let (chat_id, is_group, reply_to) = chat_context_from_data_message(data_message, sender);
 
     Some(InboundMessage {
-        channel: "signal".to_string(),
-        sender: sender.to_string(),
+        channel: "signal".to_owned(),
+        sender: sender.to_owned(),
         content: prepend_sender_context(&body, sender, chat_id.as_deref(), timestamp),
         chat_id,
         is_group,
@@ -189,13 +189,13 @@ fn inbound_from_edit_message(
 
     let target_timestamp = edit_message
         .target_sent_timestamp
-        .map_or_else(|| "unknown".to_string(), |value| value.to_string());
+        .map_or_else(|| "unknown".to_owned(), |value| value.to_string());
     let edited_body = format!("[edited message at {target_timestamp}]\n{body}");
     let (chat_id, is_group, reply_to) = chat_context_from_data_message(data_message, sender);
 
     Some(InboundMessage {
-        channel: "signal".to_string(),
-        sender: sender.to_string(),
+        channel: "signal".to_owned(),
+        sender: sender.to_owned(),
         content: prepend_sender_context(&edited_body, sender, chat_id.as_deref(), timestamp),
         chat_id,
         is_group,
@@ -211,7 +211,7 @@ fn format_data_message(data_message: &DataMessage) -> Option<(InboundKind, Strin
         let emoji = reaction.emoji.as_deref().unwrap_or("❓");
         let target_timestamp = reaction
             .target_sent_timestamp
-            .map_or_else(|| "unknown".to_string(), |value| value.to_string());
+            .map_or_else(|| "unknown".to_owned(), |value| value.to_string());
 
         let reaction_text = if reaction.remove.unwrap_or(false) {
             format!("[removed reaction {emoji} from message at {target_timestamp}]")
@@ -263,12 +263,12 @@ fn format_data_message(data_message: &DataMessage) -> Option<(InboundKind, Strin
 
 fn format_reply_context(quote: &Quote) -> String {
     let quoted_text = quote.text.as_deref().map_or_else(
-        || "<quoted message>".to_string(),
+        || "<quoted message>".to_owned(),
         |text| text.replace('"', "\\\""),
     );
     let quote_timestamp = quote
         .id
-        .map_or_else(|| "unknown".to_string(), |value| value.to_string());
+        .map_or_else(|| "unknown".to_owned(), |value| value.to_string());
 
     format!("[reply to \"{quoted_text}\" (at {quote_timestamp})]")
 }
@@ -281,7 +281,7 @@ fn format_attachment_metadata(attachment: &AttachmentPointer) -> String {
         .unwrap_or("application/octet-stream");
     let size = attachment
         .size
-        .map_or_else(|| "unknown".to_string(), |value| value.to_string());
+        .map_or_else(|| "unknown".to_owned(), |value| value.to_string());
 
     format!("[attachment: {file_name} ({content_type}, {size} bytes)]")
 }
@@ -329,7 +329,7 @@ fn chat_context_from_data_message(
         let reply_to = Some(chat_id.clone());
         (Some(chat_id), true, reply_to)
     } else {
-        (None, false, Some(sender.to_string()))
+        (None, false, Some(sender.to_owned()))
     }
 }
 
@@ -342,7 +342,7 @@ fn chat_context_from_typing_message(
         let reply_to = Some(chat_id.clone());
         (Some(chat_id), true, reply_to)
     } else {
-        (None, false, Some(sender.to_string()))
+        (None, false, Some(sender.to_owned()))
     }
 }
 
@@ -371,6 +371,7 @@ fn from_epoch_millis(timestamp: u64) -> DateTime<Utc> {
         .unwrap_or_else(Utc::now)
 }
 
+#[allow(clippy::unwrap_used)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -384,7 +385,7 @@ mod tests {
     };
 
     fn test_sender() -> String {
-        "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".to_string()
+        "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".to_owned()
     }
 
     fn test_content(body: ContentBody, timestamp: u64) -> Content {
@@ -411,7 +412,7 @@ mod tests {
         let content = test_content(
             ContentBody::DataMessage(DataMessage {
                 reaction: Some(Reaction {
-                    emoji: Some("😀".to_string()),
+                    emoji: Some("😀".to_owned()),
                     target_sent_timestamp: Some(55),
                     ..Default::default()
                 }),
@@ -436,15 +437,15 @@ mod tests {
     fn inbound_formats_quotes_and_previews() {
         let content = test_content(
             ContentBody::DataMessage(DataMessage {
-                body: Some("reply text".to_string()),
+                body: Some("reply text".to_owned()),
                 quote: Some(Quote {
                     id: Some(33),
-                    text: Some("original".to_string()),
+                    text: Some("original".to_owned()),
                     ..Default::default()
                 }),
                 preview: vec![Preview {
-                    url: Some("https://example.com".to_string()),
-                    title: Some("Example".to_string()),
+                    url: Some("https://example.com".to_owned()),
+                    title: Some("Example".to_owned()),
                     ..Default::default()
                 }],
                 ..Default::default()
@@ -469,8 +470,8 @@ mod tests {
         let content = test_content(
             ContentBody::DataMessage(DataMessage {
                 attachments: vec![AttachmentPointer {
-                    file_name: Some("image.jpg".to_string()),
-                    content_type: Some("image/jpeg".to_string()),
+                    file_name: Some("image.jpg".to_owned()),
+                    content_type: Some("image/jpeg".to_owned()),
                     size: Some(321),
                     ..Default::default()
                 }],
@@ -501,7 +502,7 @@ mod tests {
             ContentBody::EditMessage(EditMessage {
                 target_sent_timestamp: Some(77),
                 data_message: Some(DataMessage {
-                    body: Some("updated".to_string()),
+                    body: Some("updated".to_owned()),
                     ..Default::default()
                 }),
             }),
@@ -556,7 +557,7 @@ mod tests {
         let sync = SyncMessage {
             sent: Some(sync_message::Sent {
                 message: Some(DataMessage {
-                    body: Some("sync body".to_string()),
+                    body: Some("sync body".to_owned()),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -578,7 +579,7 @@ mod tests {
                 edit_message: Some(EditMessage {
                     target_sent_timestamp: Some(88),
                     data_message: Some(DataMessage {
-                        body: Some("sync updated".to_string()),
+                        body: Some("sync updated".to_owned()),
                         ..Default::default()
                     }),
                 }),

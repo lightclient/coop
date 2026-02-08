@@ -24,7 +24,7 @@ pub(crate) struct AgentConfig {
 }
 
 fn default_workspace() -> String {
-    "./workspaces/default".to_string()
+    "./workspaces/default".to_owned()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,7 +53,7 @@ pub(crate) struct ProviderConfig {
 }
 
 fn default_provider() -> String {
-    "anthropic".to_string()
+    "anthropic".to_owned()
 }
 
 impl Config {
@@ -118,13 +118,14 @@ impl Config {
     }
 }
 
+#[allow(clippy::unwrap_used)]
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn parse_minimal_config() {
-        let yaml = r"
+        let yaml = "
 agent:
   id: test
   model: anthropic/claude-sonnet-4-20250514
@@ -138,7 +139,7 @@ agent:
 
     #[test]
     fn parse_full_config() {
-        let yaml = r"
+        let yaml = "
 agent:
   id: reid
   model: anthropic/claude-sonnet-4-20250514
@@ -166,7 +167,7 @@ provider:
         assert_eq!(config.users[1].trust, TrustLevel::Inner);
         assert_eq!(
             config.channels.signal.unwrap().db_path,
-            "./data/signal.db".to_string()
+            "./data/signal.db".to_owned()
         );
         assert_eq!(config.provider.name, "anthropic");
     }
@@ -174,7 +175,7 @@ provider:
     #[test]
     fn resolve_workspace_fails_for_missing_dir() {
         let config: Config = serde_yaml::from_str(
-            r"
+            "
 agent:
   id: test
   model: test

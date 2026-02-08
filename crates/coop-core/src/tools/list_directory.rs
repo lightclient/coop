@@ -96,11 +96,11 @@ impl Tool for ListDirectoryTool {
 
         let mut output = Vec::new();
         if !dirs.is_empty() {
-            output.push("Directories:".to_string());
+            output.push("Directories:".to_owned());
             output.extend(dirs);
         }
         if !files.is_empty() {
-            output.push("Files:".to_string());
+            output.push("Files:".to_owned());
             output.extend(files);
         }
 
@@ -112,6 +112,7 @@ impl Tool for ListDirectoryTool {
     }
 }
 
+#[allow(clippy::unwrap_used)]
 #[cfg(test)]
 mod tests {
     use super::*;

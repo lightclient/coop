@@ -24,9 +24,9 @@ pub struct Footer {
 impl Footer {
     pub fn new(working_dir: &str, model_name: &str, context_window: u32) -> Self {
         Self {
-            working_dir: working_dir.to_string(),
+            working_dir: working_dir.to_owned(),
             git_branch: None,
-            model_name: model_name.to_string(),
+            model_name: model_name.to_owned(),
             total_input: 0,
             total_output: 0,
             cache_read: 0,
@@ -72,7 +72,7 @@ impl Footer {
     }
 
     pub fn set_working_dir(&mut self, dir: &str) {
-        self.working_dir = dir.to_string();
+        dir.clone_into(&mut self.working_dir);
     }
 }
 
@@ -192,6 +192,7 @@ impl Component for Footer {
     }
 }
 
+#[allow(clippy::unwrap_used)]
 #[cfg(test)]
 mod tests {
     use super::*;

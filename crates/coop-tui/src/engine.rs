@@ -414,7 +414,7 @@ impl Tui {
         target_screen_row - current_screen_row
     }
 
-    #[allow(clippy::cast_possible_wrap)]
+    #[allow(clippy::cast_possible_wrap, clippy::too_many_arguments)]
     fn handle_deleted_lines(
         &mut self,
         new_lines: &[String],
@@ -487,6 +487,7 @@ impl fmt::Debug for Tui {
     }
 }
 
+#[allow(clippy::unwrap_used)]
 #[cfg(test)]
 mod tests {
     use super::*;

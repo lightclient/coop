@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used)]
 use coop_tui::engine::Component;
 /// Tests that verify coop-tui components produce output matching pi TUI captures.
 ///
@@ -74,7 +75,7 @@ fn footer_renders_two_lines() {
 #[test]
 fn footer_line1_has_dim_color() {
     let mut f = Footer::new("~/coop/coop", "claude-opus-4-6", 200_000);
-    f.set_git_branch(Some("main".to_string()));
+    f.set_git_branch(Some("main".to_owned()));
     let lines = f.render(120);
 
     // Pi uses dim color #666666 = rgb(102,102,102)
@@ -89,7 +90,7 @@ fn footer_line1_has_dim_color() {
 #[test]
 fn footer_line1_contains_working_dir_and_branch() {
     let mut f = Footer::new("~/coop/coop", "claude-opus-4-6", 200_000);
-    f.set_git_branch(Some("main".to_string()));
+    f.set_git_branch(Some("main".to_owned()));
     let lines = f.render(120);
 
     // Should contain "~/coop/coop (main)" in the dim-wrapped text
@@ -159,7 +160,7 @@ fn text_with_padding() {
 #[test]
 fn tool_box_success_bg_color() {
     let mut tb = ToolBox::new(1, 1).with_bg(0x28, 0x32, 0x28);
-    tb.set_lines(vec!["test output".to_string()]);
+    tb.set_lines(vec!["test output".to_owned()]);
     let lines = tb.render(80);
 
     // Pi uses tool success bg #283228 = rgb(40,50,40)

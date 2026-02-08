@@ -27,7 +27,7 @@ pub fn terminal_pair(buffer: usize) -> (TerminalChannel, TerminalHandle) {
     let (gw_to_tui_tx, gw_to_tui_rx) = mpsc::channel(buffer);
 
     let channel = TerminalChannel {
-        id: "terminal:default".to_string(),
+        id: "terminal:default".to_owned(),
         rx: tui_to_gw_rx,
         tx: gw_to_tui_tx,
     };
@@ -55,7 +55,7 @@ impl Channel for TerminalChannel {
 
         Ok(InboundMessage {
             channel: self.id.clone(),
-            sender: "alice".to_string(),
+            sender: "alice".to_owned(),
             content,
             chat_id: None,
             is_group: false,
@@ -70,13 +70,13 @@ impl Channel for TerminalChannel {
         self.tx
             .send(msg.content)
             .await
-            .map_err(|_| anyhow::anyhow!("terminal channel receiver dropped"))?;
+            .map_err(|_send_err| anyhow::anyhow!("terminal channel receiver dropped"))?;
         Ok(())
     }
 
     async fn probe(&self) -> ChannelHealth {
         if self.tx.is_closed() {
-            ChannelHealth::Unhealthy("channel closed".to_string())
+            ChannelHealth::Unhealthy("channel closed".to_owned())
         } else {
             ChannelHealth::Healthy
         }

@@ -10,12 +10,12 @@ workspace = true
 [features]
 default = []
 signal = [
-  "dep:futures",
-  "dep:hex",
-  "dep:presage",
-  "dep:presage-store-sqlite",
-  "dep:serde",
-  "dep:serde_json",
+    "dep:futures",
+    "dep:hex",
+    "dep:presage",
+    "dep:presage-store-sqlite",
+    "dep:serde",
+    "dep:serde_json",
 ]
 
 [dependencies]

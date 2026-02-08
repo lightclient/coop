@@ -97,6 +97,7 @@ impl ToolExecutor for CompositeExecutor {
     }
 }
 
+#[allow(clippy::unwrap_used)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -106,7 +107,7 @@ mod tests {
 
     fn tool_context() -> ToolContext {
         ToolContext {
-            session_id: "session".to_string(),
+            session_id: "session".to_owned(),
             trust: TrustLevel::Full,
             workspace: PathBuf::from("."),
         }

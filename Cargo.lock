@@ -545,9 +545,7 @@ dependencies = [
 name = "coop-tui"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "chrono",
- "coop-core",
  "crossterm",
  "pulldown-cmark",
  "serde_json",

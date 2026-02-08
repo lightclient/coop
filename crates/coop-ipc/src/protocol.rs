@@ -4,7 +4,7 @@ use serde_json::Value;
 
 pub const PROTOCOL_VERSION: u32 = 1;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMessage {
     Hello { version: u32 },
@@ -14,7 +14,7 @@ pub enum ClientMessage {
     Subscribe { session: String },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMessage {
     Hello {
@@ -107,6 +107,7 @@ fn tool_result_payload(message: &Message) -> (String, bool) {
         .unwrap_or_else(|| (message.text(), false))
 }
 
+#[allow(clippy::unwrap_used)]
 #[cfg(test)]
 mod tests {
     use super::*;

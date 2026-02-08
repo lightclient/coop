@@ -3,13 +3,13 @@ use super::SignalTarget;
 #[test]
 fn parse_direct_target() {
     let target = SignalTarget::parse("alice-uuid").unwrap();
-    assert_eq!(target, SignalTarget::Direct("alice-uuid".to_string()));
+    assert_eq!(target, SignalTarget::Direct("alice-uuid".to_owned()));
 }
 
 #[test]
 fn parse_prefixed_direct_target() {
     let target = SignalTarget::parse("signal:alice-uuid").unwrap();
-    assert_eq!(target, SignalTarget::Direct("alice-uuid".to_string()));
+    assert_eq!(target, SignalTarget::Direct("alice-uuid".to_owned()));
 }
 
 #[test]

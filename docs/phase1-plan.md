@@ -8,7 +8,7 @@ A running Coop gateway daemon that accepts messages from a terminal TUI, routes 
 ```
 ┌──────────────┐         ┌──────────────────────────┐
 │  Terminal TUI │ ←stdin→ │     Coop Gateway          │
-│  (ratatui)    │         │                            │
+│  (crossterm)  │         │                            │
 │               │         │  Config → Agent Pool       │
 │  input bar    │         │           ↓                │
 │  message list │         │     Agent Runtime           │
@@ -42,7 +42,7 @@ A running Coop gateway daemon that accepts messages from a terminal TUI, routes 
 - [ ] Handle streaming responses (token-by-token callback)
 
 ### M4: Terminal TUI
-- [ ] `ratatui` based terminal UI
+- [x] crossterm-based terminal UI
 - [ ] Layout: message history (scrollable), input bar, status line
 - [ ] Input: type message, press Enter to send
 - [ ] Streaming: tokens appear as they arrive from the agent
@@ -127,7 +127,7 @@ coop/
 │       └── src/
 │           ├── lib.rs
 │           ├── app.rs      # app state
-│           ├── ui.rs       # ratatui layout/rendering
+│           ├── engine.rs   # crossterm rendering engine
 │           └── input.rs    # key handling
 │
 ├── docs/
@@ -163,7 +163,7 @@ Key rule: **coop-core has no external dependencies** beyond serde. It defines th
 **Decided:** Build our own direct Anthropic API client with OAuth support. No external agent runtime dependency. Coop owns the full tool-calling loop, session management, and streaming.
 
 ### 2. TUI Framework
-`ratatui` is the standard. Alternatives: `cursive`, `tui-rs` (deprecated, ratatui is the successor). Go with `ratatui`.
+**Decided:** Custom line-based engine on top of `crossterm`. Components return `Vec<String>` of ANSI-styled lines, a differential renderer writes them to the terminal. This avoids ratatui's 2D cell buffer paradigm which was a poor fit for the scrollback-based chat UI.
 
 ### 3. Config Format
 YAML with `serde_yaml`. Considered TOML but YAML handles nested structures (like the trust levels and user lists) more naturally.
@@ -178,7 +178,6 @@ serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-ratatui = "0.29"
 crossterm = "0.28"
 anyhow = "1"
 ```

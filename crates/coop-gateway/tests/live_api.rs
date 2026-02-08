@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::print_stderr)]
 //! Live API integration test — only runs when ANTHROPIC_API_KEY is set.
 
 use std::sync::Arc;

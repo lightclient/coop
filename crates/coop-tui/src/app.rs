@@ -3,7 +3,7 @@ use serde_json::Value;
 use std::time::Instant;
 
 /// Role for display messages in the TUI.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DisplayRole {
     User,
     Assistant,
@@ -53,7 +53,7 @@ impl DisplayMessage {
         let content = format_tool_args(name, arguments);
         Self {
             role: DisplayRole::ToolCall {
-                name: name.to_string(),
+                name: name.to_owned(),
                 arguments: arguments.clone(),
             },
             content,
@@ -65,7 +65,7 @@ impl DisplayMessage {
     pub fn tool_output(name: &str, output: impl Into<String>, is_error: bool) -> Self {
         Self {
             role: DisplayRole::ToolOutput {
-                name: name.to_string(),
+                name: name.to_owned(),
                 is_error,
             },
             content: output.into(),
@@ -94,7 +94,7 @@ fn format_tool_args(name: &str, args: &Value) -> String {
             } else if cmd.lines().count() > 1 {
                 format!("{first_line} …")
             } else {
-                first_line.to_string()
+                first_line.to_owned()
             }
         }
         "read_file" => {
@@ -104,7 +104,7 @@ fn format_tool_args(name: &str, args: &Value) -> String {
             match (offset, limit) {
                 (Some(o), Some(l)) => format!("{path} (lines {o}–{})", o + l),
                 (Some(o), None) => format!("{path} (from line {o})"),
-                _ => path.to_string(),
+                _ => path.to_owned(),
             }
         }
         "write_file" => {
@@ -117,7 +117,7 @@ fn format_tool_args(name: &str, args: &Value) -> String {
         }
         "list_directory" => {
             let path = args.get("path").and_then(Value::as_str).unwrap_or(".");
-            path.to_string()
+            path.to_owned()
         }
         _ => {
             // Generic: show compact JSON of arguments
@@ -414,7 +414,7 @@ impl App {
         let mut lines = Vec::new();
         while let Some(pos) = self.stream_line_buf.find('\n') {
             let line: String = self.stream_line_buf.drain(..=pos).collect();
-            lines.push(line.trim_end_matches('\n').to_string());
+            lines.push(line.trim_end_matches('\n').to_owned());
         }
         if !lines.is_empty() {
             self.assistant_streamed = true;
@@ -511,6 +511,7 @@ impl App {
     }
 }
 
+#[allow(clippy::unwrap_used)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -547,7 +548,7 @@ mod tests {
     #[test]
     fn cursor_up_down_navigation() {
         let mut app = test_app();
-        app.input = "abc\ndef\nghi".to_string();
+        app.input = "abc\ndef\nghi".to_owned();
         app.cursor_pos = app.input.len(); // end of "ghi"
         assert_eq!(app.cursor_row_col(), (2, 3));
 
@@ -569,7 +570,7 @@ mod tests {
     #[test]
     fn cursor_up_clamps_to_shorter_line() {
         let mut app = test_app();
-        app.input = "ab\nc\ndefgh".to_string();
+        app.input = "ab\nc\ndefgh".to_owned();
         app.cursor_pos = app.input.len(); // end of "defgh", col=5
         assert_eq!(app.cursor_row_col(), (2, 5));
 
@@ -583,7 +584,7 @@ mod tests {
     #[test]
     fn cursor_home_end_multiline() {
         let mut app = test_app();
-        app.input = "abc\ndefgh".to_string();
+        app.input = "abc\ndefgh".to_owned();
         app.cursor_pos = 6; // middle of "defgh" → "de|fgh"
         assert_eq!(app.cursor_row_col(), (1, 2));
 
@@ -599,17 +600,17 @@ mod tests {
     #[test]
     fn input_line_count_trailing_newline() {
         let mut app = test_app();
-        app.input = "hello\n".to_string();
+        app.input = "hello\n".to_owned();
         assert_eq!(app.input_line_count(), 2);
 
-        app.input = "a\nb\n".to_string();
+        app.input = "a\nb\n".to_owned();
         assert_eq!(app.input_line_count(), 3);
     }
 
     #[test]
     fn take_input_preserves_newlines() {
         let mut app = test_app();
-        app.input = "line1\nline2\nline3".to_string();
+        app.input = "line1\nline2\nline3".to_owned();
         app.cursor_pos = app.input.len();
         let taken = app.take_input();
         assert_eq!(taken, "line1\nline2\nline3");

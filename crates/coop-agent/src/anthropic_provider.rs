@@ -54,7 +54,7 @@ impl AnthropicProvider {
         let api_model = model_name.strip_prefix("anthropic/").unwrap_or(model_name);
 
         let model = ModelInfo {
-            name: api_model.to_string(),
+            name: api_model.to_owned(),
             context_limit: 200_000,
         };
 
@@ -79,7 +79,7 @@ impl AnthropicProvider {
             // OAuth requires ?beta=true query parameter
             format!("{ANTHROPIC_API_URL}?beta=true")
         } else {
-            ANTHROPIC_API_URL.to_string()
+            ANTHROPIC_API_URL.to_owned()
         };
 
         let mut req = self
@@ -302,7 +302,7 @@ impl AnthropicProvider {
                 }
                 ContentBlock::ToolUse { id, name, input } => {
                     let coop_name = if strip_prefix {
-                        name.strip_prefix(TOOL_PREFIX).unwrap_or(name).to_string()
+                        name.strip_prefix(TOOL_PREFIX).unwrap_or(name).to_owned()
                     } else {
                         name.clone()
                     };
@@ -518,7 +518,7 @@ where
     async fn next_line(&mut self) -> Result<Option<String>> {
         loop {
             if let Some(pos) = self.line_buf.find('\n') {
-                let line = self.line_buf[..pos].trim_end_matches('\r').to_string();
+                let line = self.line_buf[..pos].trim_end_matches('\r').to_owned();
                 self.line_buf = self.line_buf[pos + 1..].to_string();
                 if line.is_empty() {
                     continue;
@@ -537,7 +537,7 @@ where
                         return Ok(None);
                     }
                     let remaining = std::mem::take(&mut self.line_buf);
-                    let trimmed = remaining.trim().to_string();
+                    let trimmed = remaining.trim().to_owned();
                     if trimmed.is_empty() {
                         return Ok(None);
                     }
@@ -615,11 +615,11 @@ where
                         }
                         BlockAccumulator::ToolUse { id, name, json_buf } => {
                             let coop_name = if is_oauth {
-                                name.strip_prefix(TOOL_PREFIX).unwrap_or(&name).to_string()
+                                name.strip_prefix(TOOL_PREFIX).unwrap_or(&name).to_owned()
                             } else {
                                 name
                             };
-                            let input: Value = serde_json::from_str(&json_buf).unwrap_or(json!({}));
+                            let input: Value = serde_json::from_str(&json_buf).unwrap_or_default();
                             msg = msg.with_tool_request(id, coop_name, input);
                         }
                         BlockAccumulator::Thinking => {}

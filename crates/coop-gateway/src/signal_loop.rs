@@ -38,7 +38,7 @@ pub(crate) async fn handle_signal_inbound_once<C: Channel>(
     Channel::send(
         signal_channel,
         OutboundMessage {
-            channel: "signal".to_string(),
+            channel: "signal".to_owned(),
             target,
             content: response,
         },
@@ -90,5 +90,6 @@ fn signal_reply_target(msg: &InboundMessage) -> Option<String> {
     Some(msg.sender.clone())
 }
 
+#[allow(clippy::unwrap_used)]
 #[cfg(test)]
 mod tests;

@@ -171,16 +171,17 @@ fn parse_explicit_session_kind(session: &str, agent_id: &str) -> Option<SessionK
     }
 
     if let Some(dm) = rest.strip_prefix("dm:") {
-        return Some(SessionKind::Dm(dm.to_string()));
+        return Some(SessionKind::Dm(dm.to_owned()));
     }
 
     if let Some(group) = rest.strip_prefix("group:") {
-        return Some(SessionKind::Group(group.to_string()));
+        return Some(SessionKind::Group(group.to_owned()));
     }
 
     None
 }
 
+#[allow(clippy::unwrap_used)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,7 +194,7 @@ mod tests {
 
     fn test_config() -> Config {
         serde_yaml::from_str(
-            r"
+            "
 agent:
   id: reid
   model: test
@@ -217,9 +218,9 @@ users:
         reply_to: Option<&str>,
     ) -> InboundMessage {
         InboundMessage {
-            channel: channel.to_string(),
-            sender: sender.to_string(),
-            content: "hello".to_string(),
+            channel: channel.to_owned(),
+            sender: sender.to_owned(),
+            content: "hello".to_owned(),
             chat_id: chat_id.map(ToOwned::to_owned),
             is_group,
             timestamp: Utc::now(),
@@ -246,7 +247,7 @@ users:
 
         assert_eq!(
             decision.session_key.kind,
-            SessionKind::Dm("signal:alice-uuid".to_string())
+            SessionKind::Dm("signal:alice-uuid".to_owned())
         );
         assert_eq!(decision.trust, TrustLevel::Full);
     }
@@ -258,7 +259,7 @@ users:
 
         assert_eq!(
             decision.session_key.kind,
-            SessionKind::Dm("signal:mallory-uuid".to_string())
+            SessionKind::Dm("signal:mallory-uuid".to_owned())
         );
         assert_eq!(decision.trust, TrustLevel::Public);
     }
@@ -270,7 +271,7 @@ users:
 
         assert_eq!(
             decision.session_key.kind,
-            SessionKind::Group("signal:group:deadbeef".to_string())
+            SessionKind::Group("signal:group:deadbeef".to_owned())
         );
         assert_eq!(decision.trust, TrustLevel::Familiar);
     }
@@ -288,7 +289,7 @@ users:
 
         assert_eq!(
             decision.session_key.kind,
-            SessionKind::Dm("signal:bob-uuid".to_string())
+            SessionKind::Dm("signal:bob-uuid".to_owned())
         );
         assert_eq!(decision.trust, TrustLevel::Full);
     }
@@ -306,7 +307,7 @@ users:
 
         assert_eq!(
             decision.session_key.kind,
-            SessionKind::Group("signal:group:deadbeef".to_string())
+            SessionKind::Group("signal:group:deadbeef".to_owned())
         );
         assert_eq!(decision.trust, TrustLevel::Familiar);
     }
@@ -348,7 +349,7 @@ users:
             )
             .unwrap(),
         );
-        let router = MessageRouter::new(config, gateway.clone());
+        let router = MessageRouter::new(config, Arc::clone(&gateway));
 
         let msg = inbound("signal", "bob-uuid", None, false, None);
         let (event_tx, mut event_rx) = mpsc::channel(32);
@@ -356,7 +357,7 @@ users:
         let decision = router.dispatch(&msg, event_tx).await.unwrap();
         assert_eq!(
             decision.session_key.kind,
-            SessionKind::Dm("signal:bob-uuid".to_string())
+            SessionKind::Dm("signal:bob-uuid".to_owned())
         );
 
         let mut saw_done = false;
@@ -399,7 +400,7 @@ users:
 
         assert_eq!(
             decision.session_key.kind,
-            SessionKind::Dm("signal:alice-uuid".to_string())
+            SessionKind::Dm("signal:alice-uuid".to_owned())
         );
         assert_eq!(response, "hi from fake");
     }

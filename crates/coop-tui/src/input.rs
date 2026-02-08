@@ -40,7 +40,7 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent) -> InputAction {
         // Submit
         (_, KeyCode::Enter) => {
             let input = app.take_input();
-            let trimmed = input.trim().to_string();
+            let trimmed = input.trim().to_owned();
 
             if trimmed.is_empty() {
                 return InputAction::None;

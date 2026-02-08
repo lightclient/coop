@@ -8,9 +8,15 @@ license = "MIT OR Apache-2.0"
 version = "0.1.0"
 
 [workspace.lints.rust]
+elided_lifetimes_in_paths = "warn"
 missing_debug_implementations = "warn"
+single_use_lifetimes = "warn"
+trivial_numeric_casts = "warn"
 unreachable_pub = "warn"
 unsafe_code = "deny"
+unused_import_braces = "warn"
+unused_lifetimes = "warn"
+unused_macro_rules = "warn"
 unused_qualifications = "warn"
 
 [workspace.lints.clippy]
@@ -23,8 +29,24 @@ missing_panics_doc = "allow"
 module_name_repetitions = "allow"
 must_use_candidate = "allow"
 # Nursery lints worth enabling
+derive_partial_eq_without_eq = "warn"
 needless_pass_by_value = "warn"
+or_fun_call = "warn"
 redundant_clone = "warn"
+significant_drop_tightening = "warn"
+# Restriction lints — cherry-picked for high signal
+clone_on_ref_ptr = "warn"
+dbg_macro = "warn"
+if_then_some_else_none = "warn"
+map_err_ignore = "warn"
+needless_raw_strings = "warn"
+print_stderr = "warn"
+print_stdout = "warn"
+rest_pat_in_fully_bound_structs = "warn"
+str_to_string = "warn"
+undocumented_unsafe_blocks = "warn"
+unneeded_field_pattern = "warn"
+unwrap_used = "warn"
 
 [workspace.dependencies]
 anyhow = "1"
@@ -33,7 +55,9 @@ chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 crossterm = { version = "0.28", features = ["event-stream"] }
 futures = "0.3"
+hex = "0.4"
 pulldown-cmark = "0.12"
+qr2term = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["stream", "json", "rustls-tls", "multipart"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -44,8 +68,6 @@ tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 unicode-width = "0.2"
 uuid = { version = "1", features = ["v4", "serde"] }
-hex = "0.4"
-qr2term = "0.3"
 
 # ---------------------------------------------------------------------------
 # Dev profile: optimize for compile speed, not runtime speed.
@@ -53,10 +75,10 @@ qr2term = "0.3"
 # ---------------------------------------------------------------------------
 
 [profile.dev]
-debug = "line-tables-only"    # faster builds, still get backtraces
+debug = "line-tables-only" # faster builds, still get backtraces
 
 [profile.dev.package."*"]
-opt-level = 1                 # slight optimization for deps reduces monomorphization bloat
+opt-level = 1 # slight optimization for deps reduces monomorphization bloat
 
 [patch.crates-io]
 curve25519-dalek = { git = "https://github.com/signalapp/curve25519-dalek", tag = "signal-curve25519-4.1.3" }

@@ -1,3 +1,5 @@
+#![allow(clippy::print_stdout, clippy::print_stderr)] // CLI binary — stdout/stderr is the UI
+
 mod cli;
 mod config;
 mod gateway;
@@ -176,7 +178,7 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
         executor,
         typing_notifier,
     )?);
-    let router = Arc::new(MessageRouter::new(config.clone(), gateway.clone()));
+    let router = Arc::new(MessageRouter::new(config.clone(), Arc::clone(&gateway)));
 
     let working_dir = resolve_working_dir();
 
@@ -190,7 +192,7 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
 
     #[cfg(feature = "signal")]
     if let Some(signal_channel) = signal_channel {
-        let router = router.clone();
+        let router = Arc::clone(&router);
         tokio::spawn(async move {
             if let Err(error) = run_signal_loop(signal_channel, router).await {
                 tracing::warn!(error = %error, "signal loop stopped");
@@ -212,8 +214,8 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
             accepted = server.accept() => {
                 match accepted {
                     Ok(connection) => {
-                        let router = router.clone();
-                        let gateway = gateway.clone();
+                        let router = Arc::clone(&router);
+                        let gateway = Arc::clone(&gateway);
                         let agent_id = config.agent.id.clone();
                         tokio::spawn(async move {
                             if let Err(error) = handle_client(connection, router, gateway, agent_id).await {
@@ -285,13 +287,13 @@ async fn handle_client(
                     connection
                         .send(ServerMessage::Error {
                             session,
-                            message: "unknown session".to_string(),
+                            message: "unknown session".to_owned(),
                         })
                         .await?;
                 }
             },
             ClientMessage::Send { session, content } => {
-                handle_send(&mut connection, router.clone(), session, content).await?;
+                handle_send(&mut connection, Arc::clone(&router), session, content).await?;
             }
         }
     }
@@ -304,8 +306,8 @@ async fn handle_send(
     content: String,
 ) -> Result<()> {
     let inbound = InboundMessage {
-        channel: "terminal:default".to_string(),
-        sender: "alice".to_string(),
+        channel: "terminal:default".to_owned(),
+        sender: "alice".to_owned(),
         content,
         chat_id: None,
         is_group: false,
@@ -433,7 +435,7 @@ async fn cmd_chat(config_path: Option<&str>) -> Result<()> {
                             set_status_loading(&mut tui, true);
                             update_chat_messages(&mut tui, &app, CHAT_IDX);
 
-                            let gw = gateway.clone();
+                            let gw = Arc::clone(&gateway);
                             let sk = session_key.clone();
                             let tx = event_tx.clone();
                             turn_task = Some(tokio::spawn(async move {
@@ -541,7 +543,7 @@ async fn cmd_attach(config_path: Option<&str>, session: &str) -> Result<()> {
     let (mut reader, mut writer) = client.into_split();
 
     let (ipc_tx, mut ipc_rx) = mpsc::channel::<ServerMessage>(128);
-    let session_filter = session.to_string();
+    let session_filter = session.to_owned();
     tokio::spawn(async move {
         while let Ok(msg) = reader.recv().await {
             if ipc_tx.send(msg).await.is_err() {
@@ -550,7 +552,7 @@ async fn cmd_attach(config_path: Option<&str>, session: &str) -> Result<()> {
         }
     });
 
-    let session_name = session.to_string();
+    let session_name = session.to_owned();
 
     loop {
         let mut needs_render = false;
@@ -725,7 +727,7 @@ fn handle_turn_event(
             let name = tool_names
                 .get(&id)
                 .cloned()
-                .unwrap_or_else(|| "unknown".to_string());
+                .unwrap_or_else(|| "unknown".to_owned());
             let (output, is_error) = extract_tool_result(&message);
             app.push_message(DisplayMessage::tool_output(&name, output, is_error));
             update_chat_messages(tui, app, CHAT_IDX);
@@ -782,7 +784,7 @@ fn handle_server_message(
             let name = tool_names
                 .get(&id)
                 .cloned()
-                .unwrap_or_else(|| "unknown".to_string());
+                .unwrap_or_else(|| "unknown".to_owned());
             app.push_message(DisplayMessage::tool_output(&name, output, is_error));
             update_chat_messages(tui, app, CHAT_IDX);
         }

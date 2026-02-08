@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)]
+
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use coop_core::{Channel, ChannelHealth, InboundMessage, OutboundMessage};
@@ -27,7 +29,7 @@ impl MockSignalChannel {
         let (action_tx, action_rx) = mpsc::channel(buffer);
 
         Self {
-            id: "signal".to_string(),
+            id: "signal".to_owned(),
             inbound_tx,
             inbound_rx,
             action_tx,
@@ -41,7 +43,7 @@ impl MockSignalChannel {
         self.inbound_tx
             .send(inbound)
             .await
-            .map_err(|_| anyhow!("signal inbound channel closed"))
+            .map_err(|_send_err| anyhow!("signal inbound channel closed"))
     }
 
     pub fn action_sender(&self) -> mpsc::Sender<SignalAction> {
@@ -96,6 +98,7 @@ impl Channel for MockSignalChannel {
     }
 }
 
+#[allow(clippy::unwrap_used)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -103,13 +106,13 @@ mod tests {
 
     fn inbound_message() -> InboundMessage {
         InboundMessage {
-            channel: "signal".to_string(),
-            sender: "alice-uuid".to_string(),
-            content: "hello".to_string(),
+            channel: "signal".to_owned(),
+            sender: "alice-uuid".to_owned(),
+            content: "hello".to_owned(),
             chat_id: None,
             is_group: false,
             timestamp: Utc::now(),
-            reply_to: Some("alice-uuid".to_string()),
+            reply_to: Some("alice-uuid".to_owned()),
             kind: coop_core::InboundKind::Text,
             message_timestamp: Some(1234),
         }
@@ -130,9 +133,9 @@ mod tests {
         let channel = MockSignalChannel::new();
         channel
             .send(OutboundMessage {
-                channel: "signal".to_string(),
-                target: "alice-uuid".to_string(),
-                content: "reply".to_string(),
+                channel: "signal".to_owned(),
+                target: "alice-uuid".to_owned(),
+                content: "reply".to_owned(),
             })
             .await
             .unwrap();
@@ -149,7 +152,7 @@ mod tests {
         channel
             .action_sender()
             .send(SignalAction::Typing {
-                target: super::super::SignalTarget::Direct("alice-uuid".to_string()),
+                target: super::super::SignalTarget::Direct("alice-uuid".to_owned()),
                 started: true,
             })
             .await

@@ -40,7 +40,7 @@ impl TypingGuard {
 
 impl Drop for TypingGuard {
     fn drop(&mut self) {
-        let notifier = self.notifier.clone();
+        let notifier = Arc::clone(&self.notifier);
         let session_key = self.session_key.clone();
         emit_typing_notifier_event(&session_key, false);
         tokio::spawn(async move {
@@ -77,12 +77,12 @@ fn signal_target_from_session(session_key: &SessionKey) -> Option<(&'static str,
     match &session_key.kind {
         SessionKind::Dm(identity) => {
             let target = identity.strip_prefix("signal:").unwrap_or(identity);
-            Some(("direct", target.to_string()))
+            Some(("direct", target.to_owned()))
         }
         SessionKind::Group(group_id) => {
             let target = group_id.strip_prefix("signal:").unwrap_or(group_id);
             let target = if target.starts_with("group:") {
-                target.to_string()
+                target.to_owned()
             } else {
                 format!("group:{target}")
             };
@@ -117,7 +117,10 @@ impl Gateway {
     /// Build a trust-gated system prompt for this turn.
     fn build_prompt(&self, trust: TrustLevel) -> Result<String> {
         let file_configs = default_file_configs();
-        let mut index = self.workspace_index.lock().unwrap();
+        let mut index = self
+            .workspace_index
+            .lock()
+            .expect("workspace index mutex poisoned");
         let refreshed = index
             .refresh(&self.workspace, &file_configs)
             .unwrap_or(false);
@@ -129,6 +132,7 @@ impl Gateway {
             .trust(trust)
             .model(&self.config.agent.model)
             .build(&index)?;
+        drop(index);
 
         Ok(prompt.to_flat_string())
     }
@@ -141,8 +145,13 @@ impl Gateway {
     }
 
     pub(crate) fn list_sessions(&self) -> Vec<SessionKey> {
-        let sessions = self.sessions.lock().unwrap();
-        let mut keys: Vec<_> = sessions.keys().cloned().collect();
+        let mut keys: Vec<_> = self
+            .sessions
+            .lock()
+            .expect("sessions mutex poisoned")
+            .keys()
+            .cloned()
+            .collect();
         keys.push(self.default_session_key());
         keys.sort_by_cached_key(ToString::to_string);
         keys.dedup_by(|a, b| a.to_string() == b.to_string());
@@ -181,7 +190,7 @@ impl Gateway {
             let _typing_guard = if let Some(notifier) = &self.typing_notifier {
                 emit_typing_notifier_event(session_key, true);
                 notifier.set_typing(session_key, true).await;
-                Some(TypingGuard::new(notifier.clone(), session_key.clone()))
+                Some(TypingGuard::new(Arc::clone(notifier), session_key.clone()))
             } else {
                 None
             };
@@ -322,12 +331,12 @@ impl Gateway {
     }
 
     pub(crate) fn clear_session(&self, session_key: &SessionKey) {
-        let mut sessions = self.sessions.lock().unwrap();
+        let mut sessions = self.sessions.lock().expect("sessions mutex poisoned");
         sessions.remove(session_key);
     }
 
     fn append_message(&self, session_key: &SessionKey, message: Message) {
-        let mut sessions = self.sessions.lock().unwrap();
+        let mut sessions = self.sessions.lock().expect("sessions mutex poisoned");
         sessions
             .entry(session_key.clone())
             .or_default()
@@ -335,7 +344,7 @@ impl Gateway {
     }
 
     fn messages(&self, session_key: &SessionKey) -> Vec<Message> {
-        let sessions = self.sessions.lock().unwrap();
+        let sessions = self.sessions.lock().expect("sessions mutex poisoned");
         sessions.get(session_key).cloned().unwrap_or_default()
     }
 
@@ -439,7 +448,7 @@ impl Gateway {
 fn parse_session_key(session: &str, agent_id: &str) -> Option<SessionKey> {
     if session == "main" {
         return Some(SessionKey {
-            agent_id: agent_id.to_string(),
+            agent_id: agent_id.to_owned(),
             kind: SessionKind::Main,
         });
     }
@@ -447,29 +456,29 @@ fn parse_session_key(session: &str, agent_id: &str) -> Option<SessionKey> {
     let rest = session.strip_prefix(&format!("{agent_id}:"))?;
     if rest == "main" {
         return Some(SessionKey {
-            agent_id: agent_id.to_string(),
+            agent_id: agent_id.to_owned(),
             kind: SessionKind::Main,
         });
     }
 
     if let Some(dm) = rest.strip_prefix("dm:") {
         return Some(SessionKey {
-            agent_id: agent_id.to_string(),
-            kind: SessionKind::Dm(dm.to_string()),
+            agent_id: agent_id.to_owned(),
+            kind: SessionKind::Dm(dm.to_owned()),
         });
     }
 
     if let Some(group) = rest.strip_prefix("group:") {
         return Some(SessionKey {
-            agent_id: agent_id.to_string(),
-            kind: SessionKind::Group(group.to_string()),
+            agent_id: agent_id.to_owned(),
+            kind: SessionKind::Group(group.to_owned()),
         });
     }
 
     if let Some(isolated) = rest.strip_prefix("isolated:") {
         let uuid = Uuid::parse_str(isolated).ok()?;
         return Some(SessionKey {
-            agent_id: agent_id.to_string(),
+            agent_id: agent_id.to_owned(),
             kind: SessionKind::Isolated(uuid),
         });
     }
@@ -477,6 +486,7 @@ fn parse_session_key(session: &str, agent_id: &str) -> Option<SessionKey> {
     None
 }
 
+#[allow(clippy::unwrap_used)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -528,7 +538,7 @@ mod tests {
 
     fn test_config() -> Config {
         serde_yaml::from_str(
-            r"
+            "
 agent:
   id: coop
   model: test-model
@@ -543,7 +553,7 @@ agent:
         assert_eq!(
             key,
             SessionKey {
-                agent_id: "coop".to_string(),
+                agent_id: "coop".to_owned(),
                 kind: SessionKind::Main,
             }
         );
@@ -555,8 +565,8 @@ agent:
         assert_eq!(
             key,
             SessionKey {
-                agent_id: "coop".to_string(),
-                kind: SessionKind::Dm("signal:alice-uuid".to_string()),
+                agent_id: "coop".to_owned(),
+                kind: SessionKind::Dm("signal:alice-uuid".to_owned()),
             }
         );
     }
@@ -567,8 +577,8 @@ agent:
         assert_eq!(
             key,
             SessionKey {
-                agent_id: "coop".to_string(),
-                kind: SessionKind::Group("signal:group:deadbeef".to_string()),
+                agent_id: "coop".to_owned(),
+                kind: SessionKind::Group("signal:group:deadbeef".to_owned()),
             }
         );
     }
@@ -589,8 +599,8 @@ agent:
         let workspace = test_workspace();
         let provider: Arc<dyn Provider> = Arc::new(FakeProvider::new("hello"));
         let executor: Arc<dyn ToolExecutor> = Arc::new(DefaultExecutor::new());
-        let notifier = Arc::new(RecordingTypingNotifier::new());
-        let typing_notifier: Arc<dyn TypingNotifier> = notifier.clone();
+        let notifier: Arc<RecordingTypingNotifier> = Arc::new(RecordingTypingNotifier::new());
+        let typing_notifier: Arc<dyn TypingNotifier> = Arc::clone(&notifier) as _;
 
         let gateway = Gateway::new(
             test_config(),

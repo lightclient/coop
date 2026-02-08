@@ -32,7 +32,7 @@ impl StatusLine {
     }
 
     pub fn set_elapsed(&mut self, elapsed: &str) {
-        self.elapsed = elapsed.to_string();
+        elapsed.clone_into(&mut self.elapsed);
     }
 
     pub fn set_error(&mut self, msg: Option<String>) {

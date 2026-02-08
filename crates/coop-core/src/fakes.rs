@@ -1,4 +1,5 @@
 //! Fake implementations for testing.
+#![allow(clippy::unwrap_used)]
 
 use crate::traits::{
     Channel, Provider, ProviderStream, SessionStore, Tool, ToolContext, ToolExecutor,
@@ -248,8 +249,9 @@ impl SessionStore for MemorySessionStore {
     }
 
     async fn save(&self, key: &SessionKey, messages: &[Message]) -> Result<()> {
-        let mut store = self.store.lock().unwrap();
-        store
+        self.store
+            .lock()
+            .unwrap()
             .entry(key.clone())
             .or_default()
             .extend(messages.iter().cloned());
@@ -257,19 +259,19 @@ impl SessionStore for MemorySessionStore {
     }
 
     async fn replace(&self, key: &SessionKey, messages: &[Message]) -> Result<()> {
-        let mut store = self.store.lock().unwrap();
-        store.insert(key.clone(), messages.to_vec());
+        self.store
+            .lock()
+            .unwrap()
+            .insert(key.clone(), messages.to_vec());
         Ok(())
     }
 
     async fn list(&self) -> Result<Vec<SessionKey>> {
-        let store = self.store.lock().unwrap();
-        Ok(store.keys().cloned().collect())
+        Ok(self.store.lock().unwrap().keys().cloned().collect())
     }
 
     async fn delete(&self, key: &SessionKey) -> Result<()> {
-        let mut store = self.store.lock().unwrap();
-        store.remove(key);
+        self.store.lock().unwrap().remove(key);
         Ok(())
     }
 }

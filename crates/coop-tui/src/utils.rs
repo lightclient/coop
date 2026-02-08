@@ -75,6 +75,7 @@ pub fn visible_width(s: &str) -> usize {
 
 /// Truncate a string to fit within `max_width` visible columns.
 /// ANSI-aware: escape sequences don't count toward width.
+#[allow(clippy::unwrap_used)] // chars.next() after chars.peek() is always Some
 pub fn truncate_to_width(s: &str, max_width: usize) -> String {
     let mut result = String::new();
     let mut current_width = 0;
@@ -148,7 +149,7 @@ pub fn wrap_text_with_ansi(text: &str, width: usize) -> Vec<String> {
 
     for input_line in text.split('\n') {
         let line_with_prefix = if result.is_empty() {
-            input_line.to_string()
+            input_line.to_owned()
         } else {
             format!("{active_codes}{input_line}")
         };
@@ -176,9 +177,10 @@ pub fn wrap_text_with_ansi(text: &str, width: usize) -> Vec<String> {
 }
 
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::unwrap_used)] // chars.next() after chars.peek() is always Some
 fn wrap_single_line(line: &str, width: usize) -> Vec<String> {
     if visible_width(line) <= width {
-        return vec![line.to_string()];
+        return vec![line.to_owned()];
     }
 
     let mut lines = Vec::new();
@@ -307,10 +309,11 @@ trait TrimEnd {
 
 impl TrimEnd for String {
     fn trimmed_end(&self) -> String {
-        self.trim_end().to_string()
+        self.trim_end().to_owned()
     }
 }
 
+#[allow(clippy::unwrap_used)] // chars.next() after chars.peek() is always Some
 fn update_ansi_state(text: &str, active_codes: &mut String) {
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
@@ -372,7 +375,7 @@ pub fn inverse(text: &str) -> String {
 pub fn pad_to_width(line: &str, width: usize) -> String {
     let vis = visible_width(line);
     if vis >= width {
-        line.to_string()
+        line.to_owned()
     } else {
         format!("{}{}", line, " ".repeat(width - vis))
     }
@@ -389,6 +392,7 @@ pub fn apply_bg_to_line(line: &str, width: usize, r: u8, g: u8, b: u8) -> String
     format!("\x1b[48;2;{r};{g};{b}m{line}{padding}\x1b[0m")
 }
 
+#[allow(clippy::unwrap_used)]
 #[cfg(test)]
 mod tests {
     use super::*;

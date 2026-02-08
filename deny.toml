@@ -1,9 +1,4 @@
 [advisories]
-ignore = [
-    # paste is unmaintained but still widely used (transitive via ratatui)
-    # ratatui will migrate to pastey eventually
-    "RUSTSEC-2024-0436",
-]
 version = 2
 
 [licenses]
@@ -12,6 +7,7 @@ allow = [
     "Apache-2.0",
     "BSD-2-Clause",
     "BSD-3-Clause",
+    "CDLA-Permissive-2.0",
     "ISC",
     "Unicode-3.0",
     "Unicode-DFS-2016",

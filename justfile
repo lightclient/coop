@@ -10,7 +10,7 @@ _feat := if features != "" { "--features " + features } else { "" }
 _conf := if config != "" { "--config " + config } else { "" }
 
 # Run all checks (what CI will run)
-check: fmt-check toml-check lint deny test
+check: fmt-check toml-check lint deny typos dead-code test
 
 # Format all code
 fmt:
@@ -34,9 +34,10 @@ lint:
 deny:
     cargo deny check
 
-# Run all tests
+# Run all tests (nextest for speed, fallback to cargo test for doctests)
 test:
-    cargo test --all
+    cargo nextest run --workspace
+    cargo test --doc --workspace
 
 # Find unused dependencies
 machete:
@@ -59,6 +60,7 @@ fix:
     cargo fmt --all
     cargo clippy --fix --allow-dirty --allow-staged
     taplo fmt
+    typos -w
 
 # Install git hooks from .githooks/
 hooks:
@@ -109,3 +111,61 @@ trace-turns:
 # Clear trace file
 trace-clear:
     rm -f {{trace_file}}
+
+# ---------------------------------------------------------------------------
+# Code quality & analysis
+# ---------------------------------------------------------------------------
+
+# Spell-check code, docs, and comments
+typos:
+    typos
+
+# Find dead code: orphan .rs files + unused dependencies
+dead-code:
+    @./scripts/find-orphan-files.sh
+    cargo machete
+
+# Code coverage report (text summary)
+coverage:
+    cargo llvm-cov --workspace --text
+
+# Code coverage report (HTML, opens in browser)
+coverage-html:
+    cargo llvm-cov --workspace --html
+    @echo "Report: target/llvm-cov/html/index.html"
+
+# Mutation testing (slow — run on specific crates)
+mutants crate="coop-core":
+    cargo mutants -p {{crate}}
+
+# Show which generics produce the most LLVM IR (compile-time hotspots)
+llvm-lines crate="coop-gateway":
+    cargo llvm-lines -p {{crate}} | head -30
+
+# Module dependency tree for a crate
+modules crate="coop-gateway":
+    cargo modules generate tree --with-types -p {{crate}}
+
+# Workspace crate dependency graph (DOT format)
+depgraph:
+    cargo depgraph --workspace-only | dot -Tsvg -o deps.svg
+    @echo "Written: deps.svg"
+
+# Unsafe usage audit across all dependencies
+geiger:
+    cargo geiger
+
+# Supply chain audit (cargo-vet)
+vet:
+    cargo vet
+
+# Show outdated dependencies
+outdated:
+    cargo outdated --workspace --root-deps-only
+
+# Binary size analysis
+bloat:
+    cargo bloat --release -p coop-gateway -n 20
+
+# Full analysis suite (not for CI — slow, informational)
+analyze: coverage outdated machete geiger bloat

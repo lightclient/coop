@@ -63,7 +63,7 @@ crates/
 ├── coop-channels     # channel adapters (terminal, future: Signal, etc.)
 ├── coop-core         # shared types, traits, prompt builder, test fakes
 ├── coop-gateway      # gateway server, CLI entry, session management
-└── coop-tui          # terminal UI (ratatui)
+└── coop-tui          # terminal UI (crossterm)
 
 docs/                 # design docs
 workspaces/           # agent workspace data (personality, instructions)

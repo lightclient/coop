@@ -20,23 +20,21 @@ pub(crate) struct TracingGuard {
 pub(crate) fn init(console: bool) -> TracingGuard {
     let mut guards = Vec::new();
 
-    let console_layer = if console {
+    let console_layer = console.then(|| {
         let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
             EnvFilter::new("info,libsignal_service=warn,libsignal_protocol=warn")
         });
-        Some(fmt::layer().with_target(false).with_filter(filter))
-    } else {
-        None
-    };
+        fmt::layer().with_target(false).with_filter(filter)
+    });
 
     let jsonl_layer = if let Ok(trace_file) = std::env::var("COOP_TRACE_FILE") {
         let path = std::path::PathBuf::from(&trace_file);
         let dir = path
             .parent()
-            .unwrap_or(std::path::Path::new("."))
+            .unwrap_or_else(|| std::path::Path::new("."))
             .to_path_buf();
         let filename = path.file_name().map_or_else(
-            || "traces.jsonl".to_string(),
+            || "traces.jsonl".to_owned(),
             |f| f.to_string_lossy().into_owned(),
         );
 

@@ -275,7 +275,7 @@ impl WorkspaceIndex {
             return Counted::empty();
         }
 
-        let mut lines = vec!["## Available Context".to_string()];
+        let mut lines = vec!["## Available Context".to_owned()];
         for entry in &entries {
             lines.push(format!(
                 "- {} ({} tok) — {}",
@@ -333,7 +333,7 @@ fn truncate_to_budget(content: &str, path: &str, budget: usize) -> Counted {
     let tokens = count_tokens(content);
     if tokens <= budget {
         return Counted {
-            content: content.to_string(),
+            content: content.to_owned(),
             tokens,
         };
     }
@@ -408,19 +408,19 @@ impl PromptBuilder {
 
     #[must_use]
     pub fn session_kind(mut self, kind: &str) -> Self {
-        self.session_kind = Some(kind.to_string());
+        self.session_kind = Some(kind.to_owned());
         self
     }
 
     #[must_use]
     pub fn model(mut self, model: &str) -> Self {
-        self.model = Some(model.to_string());
+        self.model = Some(model.to_owned());
         self
     }
 
     #[must_use]
     pub fn channel(mut self, channel: &str) -> Self {
-        self.channel = Some(channel.to_string());
+        self.channel = Some(channel.to_owned());
         self
     }
 
@@ -584,7 +584,7 @@ impl PromptBuilder {
     }
 
     fn build_runtime_context(&self) -> Counted {
-        let mut parts = vec!["## Runtime".to_string()];
+        let mut parts = vec!["## Runtime".to_owned()];
 
         let now = chrono::Local::now();
         parts.push(format!("- Date/time: {}", now.format("%Y-%m-%d %H:%M %Z")));
@@ -629,7 +629,7 @@ impl PromptBuilder {
     }
 
     fn render_menu(entries: &[MemoryIndexEntry], budget_remaining: usize) -> Counted {
-        let mut lines = vec!["## Available Context".to_string()];
+        let mut lines = vec!["## Available Context".to_owned()];
         for entry in entries {
             lines.push(format!(
                 "- {} ({} tok) — {}",
@@ -665,6 +665,7 @@ impl PromptBuilder {
 // Tests
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::unwrap_used)]
 #[cfg(test)]
 mod tests {
     use super::*;

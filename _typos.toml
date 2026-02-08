@@ -1,0 +1,19 @@
+# typos configuration — https://github.com/crate-ci/typos
+
+[default.extend-words]
+# Crate names
+Ratatui = "Ratatui"
+ratatui = "ratatui"
+# Signal protocol terms (ACI = Account Control Identifier)
+Aci = "Aci"
+aci = "aci"
+# Crate name (hax-lib)
+hax = "hax"
+
+[default.extend-identifiers]
+# "unparseable" is common in Rust ecosystems
+unparseable = "unparseable"
+
+[files]
+# Don't check generated files
+extend-exclude = ["supply-chain/", "target/"]

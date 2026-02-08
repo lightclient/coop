@@ -15,6 +15,14 @@ if command -v taplo &>/dev/null; then
     fi
 fi
 
+if command -v typos &>/dev/null; then
+    echo "pre-commit: spell-checking..."
+    if ! typos 2>/dev/null; then
+        echo "❌ typos found. Run 'typos -w' to fix, or update _typos.toml for false positives."
+        exit 1
+    fi
+fi
+
 echo "pre-commit: linting..."
 
 if ! cargo clippy --all-targets --all-features -- -D warnings 2>/dev/null; then
@@ -24,8 +32,13 @@ fi
 
 echo "pre-commit: running tests..."
 
-if ! cargo test --all 2>/dev/null; then
+if ! cargo nextest run --workspace 2>/dev/null; then
     echo "❌ tests failed."
+    exit 1
+fi
+
+if ! cargo test --doc --workspace 2>/dev/null; then
+    echo "❌ doc tests failed."
     exit 1
 fi
 

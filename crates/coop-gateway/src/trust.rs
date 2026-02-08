@@ -18,6 +18,7 @@ pub(crate) fn accessible_stores(trust: TrustLevel) -> Vec<&'static str> {
     }
 }
 
+#[allow(clippy::unwrap_used)]
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -60,7 +60,7 @@ pub enum Role {
 }
 
 /// A single piece of content within a message.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Content {
     /// Plain text.
@@ -560,6 +560,7 @@ fn new_id() -> String {
 // Tests
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::unwrap_used)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -630,13 +631,13 @@ mod tests {
     #[test]
     fn inbound_message_serialization_roundtrip_new_fields() {
         let message = InboundMessage {
-            channel: "signal".to_string(),
-            sender: "alice-uuid".to_string(),
-            content: "hello".to_string(),
-            chat_id: Some("group:deadbeef".to_string()),
+            channel: "signal".to_owned(),
+            sender: "alice-uuid".to_owned(),
+            content: "hello".to_owned(),
+            chat_id: Some("group:deadbeef".to_owned()),
             is_group: true,
             timestamp: Utc::now(),
-            reply_to: Some("group:deadbeef".to_string()),
+            reply_to: Some("group:deadbeef".to_owned()),
             kind: InboundKind::Reaction,
             message_timestamp: Some(1234),
         };
