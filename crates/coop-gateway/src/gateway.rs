@@ -1,5 +1,7 @@
 use anyhow::Result;
-use coop_core::prompt::{PromptBuilder, WorkspaceIndex, default_file_configs};
+use coop_core::prompt::{
+    PromptBuilder, SkillEntry, WorkspaceIndex, default_file_configs, scan_skills,
+};
 use coop_core::{
     Message, Provider, SessionKey, SessionKind, ToolContext, ToolDef, ToolExecutor, TrustLevel,
     TurnConfig, TurnEvent, TurnResult, TypingNotifier, Usage,
@@ -18,6 +20,7 @@ pub(crate) struct Gateway {
     config: Config,
     workspace: PathBuf,
     workspace_index: Mutex<WorkspaceIndex>,
+    skills: Vec<SkillEntry>,
     provider: Arc<dyn Provider>,
     executor: Arc<dyn ToolExecutor>,
     typing_notifier: Option<Arc<dyn TypingNotifier>>,
@@ -102,11 +105,16 @@ impl Gateway {
     ) -> Result<Self> {
         let file_configs = default_file_configs();
         let workspace_index = WorkspaceIndex::scan(&workspace, &file_configs)?;
+        let skills = scan_skills(&workspace);
+        if !skills.is_empty() {
+            debug!(count = skills.len(), "loaded skills");
+        }
 
         Ok(Self {
             config,
             workspace,
             workspace_index: Mutex::new(workspace_index),
+            skills,
             provider,
             executor,
             typing_notifier,
@@ -130,7 +138,8 @@ impl Gateway {
 
         let mut builder = PromptBuilder::new(self.workspace.clone(), self.config.agent.id.clone())
             .trust(trust)
-            .model(&self.config.agent.model);
+            .model(&self.config.agent.model)
+            .skills(self.skills.clone());
         if let Some(name) = user_name {
             builder = builder.user(name);
         }

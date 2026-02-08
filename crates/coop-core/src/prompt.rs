@@ -178,6 +178,75 @@ pub fn default_file_configs() -> Vec<PromptFileConfig> {
 }
 
 // ---------------------------------------------------------------------------
+// Skills
+// ---------------------------------------------------------------------------
+
+/// A skill discovered from a `skills/*/SKILL.md` file.
+#[derive(Debug, Clone)]
+pub struct SkillEntry {
+    pub name: String,
+    pub description: String,
+    /// Path to the SKILL.md relative to the workspace (e.g. "skills/tmux/SKILL.md").
+    pub path: String,
+}
+
+/// Parse YAML frontmatter from a SKILL.md file, extracting `name` and `description`.
+fn parse_skill_frontmatter(content: &str) -> Option<(String, String)> {
+    let content = content.strip_prefix("---")?;
+    let end = content.find("---")?;
+    let frontmatter = &content[..end];
+
+    let mut name = None;
+    let mut description = None;
+
+    for line in frontmatter.lines() {
+        if let Some(rest) = line.strip_prefix("name:") {
+            name = Some(rest.trim().trim_matches('"').to_owned());
+        } else if let Some(rest) = line.strip_prefix("description:") {
+            description = Some(rest.trim().trim_matches('"').to_owned());
+        }
+    }
+
+    Some((name?, description?))
+}
+
+/// Scan `{workspace}/skills/*/SKILL.md` for skill entries.
+pub fn scan_skills(workspace: &Path) -> Vec<SkillEntry> {
+    let skills_dir = workspace.join("skills");
+    let Ok(entries) = std::fs::read_dir(&skills_dir) else {
+        return Vec::new();
+    };
+
+    let mut skills = Vec::new();
+    for entry in entries.flatten() {
+        if !entry.file_type().is_ok_and(|ft| ft.is_dir()) {
+            continue;
+        }
+        let skill_file = entry.path().join("SKILL.md");
+        let Ok(content) = std::fs::read_to_string(&skill_file) else {
+            continue;
+        };
+        let Some((name, description)) = parse_skill_frontmatter(&content) else {
+            debug!(
+                path = %skill_file.display(),
+                "SKILL.md missing name/description frontmatter, skipping"
+            );
+            continue;
+        };
+        let rel_path = format!("skills/{}/SKILL.md", entry.file_name().to_string_lossy());
+        debug!(skill = %name, path = %rel_path, "discovered skill");
+        skills.push(SkillEntry {
+            name,
+            description,
+            path: rel_path,
+        });
+    }
+
+    skills.sort_by(|a, b| a.name.cmp(&b.name));
+    skills
+}
+
+// ---------------------------------------------------------------------------
 // Workspace index
 // ---------------------------------------------------------------------------
 
@@ -382,6 +451,7 @@ pub struct PromptBuilder {
     user: Option<String>,
     token_budget: usize,
     file_configs: Vec<PromptFileConfig>,
+    skills: Vec<SkillEntry>,
 }
 
 impl PromptBuilder {
@@ -399,6 +469,7 @@ impl PromptBuilder {
             user: None,
             token_budget: Self::DEFAULT_BUDGET,
             file_configs: default_file_configs(),
+            skills: Vec::new(),
         }
     }
 
@@ -429,6 +500,12 @@ impl PromptBuilder {
     #[must_use]
     pub fn user(mut self, user: &str) -> Self {
         self.user = Some(user.to_owned());
+        self
+    }
+
+    #[must_use]
+    pub fn skills(mut self, skills: Vec<SkillEntry>) -> Self {
+        self.skills = skills;
         self
     }
 
@@ -477,6 +554,18 @@ impl PromptBuilder {
             tokens: runtime.tokens,
             cache: CacheHint::Volatile,
         });
+
+        // Skills index.
+        if !self.skills.is_empty() {
+            let skills_layer = Self::render_skills(&self.skills);
+            used_tokens += skills_layer.tokens;
+            layers.push(PromptLayer {
+                name: "skills",
+                content: skills_layer.content,
+                tokens: skills_layer.tokens,
+                cache: CacheHint::Stable,
+            });
+        }
 
         // Memory index (priced menu) for overflow + not-inlined files.
         let budget_remaining = self.token_budget.saturating_sub(used_tokens);
@@ -600,6 +689,23 @@ impl PromptBuilder {
         }
 
         Ok((layers, used_tokens, overflow))
+    }
+
+    fn render_skills(skills: &[SkillEntry]) -> Counted {
+        let mut lines = vec![
+            "## Skills".to_owned(),
+            String::new(),
+            "The following skills provide specialized instructions for specific tasks.".to_owned(),
+            "Use read_file to load a skill when the task matches its description.".to_owned(),
+            String::new(),
+        ];
+        for skill in skills {
+            lines.push(format!(
+                "- **{}** (`{}`) — {}",
+                skill.name, skill.path, skill.description
+            ));
+        }
+        Counted::new(lines.join("\n"))
     }
 
     /// Try to load `users/{user}/MEMORY.md` as a per-user memory layer.
@@ -1214,6 +1320,119 @@ mod tests {
         assert!(
             !layer_names.contains(&"user_memory"),
             "should not have user_memory layer when file doesn't exist"
+        );
+    }
+
+    #[test]
+    fn parse_skill_frontmatter_extracts_name_and_description() {
+        let content = "---\nname: tmux\ndescription: \"Remote control tmux\"\n---\n# Body";
+        let (name, desc) = parse_skill_frontmatter(content).unwrap();
+        assert_eq!(name, "tmux");
+        assert_eq!(desc, "Remote control tmux");
+    }
+
+    #[test]
+    fn parse_skill_frontmatter_returns_none_for_missing_fields() {
+        assert!(parse_skill_frontmatter("---\nname: tmux\n---\n").is_none());
+        assert!(parse_skill_frontmatter("---\ndescription: foo\n---\n").is_none());
+        assert!(parse_skill_frontmatter("no frontmatter").is_none());
+    }
+
+    #[test]
+    fn scan_skills_discovers_skill_files() {
+        let dir = setup_workspace(&[]);
+        fs::create_dir_all(dir.path().join("skills/tmux")).unwrap();
+        fs::write(
+            dir.path().join("skills/tmux/SKILL.md"),
+            "---\nname: tmux\ndescription: \"Control tmux sessions\"\n---\n# tmux skill",
+        )
+        .unwrap();
+        fs::create_dir_all(dir.path().join("skills/uv")).unwrap();
+        fs::write(
+            dir.path().join("skills/uv/SKILL.md"),
+            "---\nname: uv\ndescription: \"Use uv for Python\"\n---\n# uv skill",
+        )
+        .unwrap();
+
+        let skills = scan_skills(dir.path());
+        assert_eq!(skills.len(), 2);
+        assert_eq!(skills[0].name, "tmux");
+        assert_eq!(skills[0].path, "skills/tmux/SKILL.md");
+        assert_eq!(skills[1].name, "uv");
+    }
+
+    #[test]
+    fn scan_skills_skips_invalid_frontmatter() {
+        let dir = setup_workspace(&[]);
+        fs::create_dir_all(dir.path().join("skills/broken")).unwrap();
+        fs::write(
+            dir.path().join("skills/broken/SKILL.md"),
+            "no frontmatter here",
+        )
+        .unwrap();
+
+        let skills = scan_skills(dir.path());
+        assert!(skills.is_empty());
+    }
+
+    #[test]
+    fn scan_skills_returns_empty_without_skills_dir() {
+        let dir = setup_workspace(&[]);
+        let skills = scan_skills(dir.path());
+        assert!(skills.is_empty());
+    }
+
+    #[test]
+    fn skills_included_in_prompt() {
+        let dir = setup_workspace(&[("SOUL.md", "I am an agent.")]);
+        fs::create_dir_all(dir.path().join("skills/tmux")).unwrap();
+        fs::write(
+            dir.path().join("skills/tmux/SKILL.md"),
+            "---\nname: tmux\ndescription: \"Control tmux sessions\"\n---\n# tmux",
+        )
+        .unwrap();
+
+        let skills = scan_skills(dir.path());
+        let index = WorkspaceIndex::scan(dir.path(), &default_file_configs()).unwrap();
+        let prompt = PromptBuilder::new(dir.path().to_path_buf(), "reid".into())
+            .trust(TrustLevel::Full)
+            .skills(skills)
+            .build(&index)
+            .unwrap();
+
+        let flat = prompt.to_flat_string();
+        assert!(flat.contains("## Skills"), "should have skills header");
+        assert!(flat.contains("tmux"), "should list tmux skill");
+        assert!(
+            flat.contains("Control tmux sessions"),
+            "should include skill description"
+        );
+        assert!(
+            flat.contains("skills/tmux/SKILL.md"),
+            "should include skill path"
+        );
+
+        let layer_names: Vec<&str> = prompt.layers.iter().map(|l| l.name).collect();
+        assert!(
+            layer_names.contains(&"skills"),
+            "should have skills layer, got: {layer_names:?}"
+        );
+    }
+
+    #[test]
+    fn no_skills_layer_when_empty() {
+        let dir = setup_workspace(&[("SOUL.md", "I am an agent.")]);
+
+        let index = WorkspaceIndex::scan(dir.path(), &default_file_configs()).unwrap();
+        let prompt = PromptBuilder::new(dir.path().to_path_buf(), "reid".into())
+            .trust(TrustLevel::Full)
+            .build(&index)
+            .unwrap();
+
+        let layer_names: Vec<&str> = prompt.layers.iter().map(|l| l.name).collect();
+        assert!(
+            !layer_names.contains(&"skills"),
+            "should not have skills layer when no skills"
         );
     }
 }
