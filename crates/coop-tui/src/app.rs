@@ -115,10 +115,6 @@ fn format_tool_args(name: &str, args: &Value) -> String {
                 .map_or(0, |s| s.lines().count());
             format!("{path} ({len} lines)")
         }
-        "list_directory" => {
-            let path = args.get("path").and_then(Value::as_str).unwrap_or(".");
-            path.to_owned()
-        }
         _ => {
             // Generic: show compact JSON of arguments
             let s = serde_json::to_string(args).unwrap_or_default();

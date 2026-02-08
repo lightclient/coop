@@ -121,7 +121,6 @@ fn tool_label(name: &str) -> (&'static str, &'static str) {
         "bash" => ("⚡", "Execute"),
         "read_file" | "Read" => ("📄", "Read"),
         "write_file" | "Write" => ("✏️", "Write"),
-        "list_directory" => ("📂", "List"),
         _ => ("🔧", "Run"),
     }
 }

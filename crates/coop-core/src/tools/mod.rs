@@ -1,6 +1,5 @@
 pub mod bash;
 pub mod edit_file;
-pub mod list_directory;
 pub mod read_file;
 pub mod write_file;
 
@@ -12,7 +11,6 @@ use tracing::{Instrument, debug, info_span};
 
 pub use bash::BashTool;
 pub use edit_file::EditFileTool;
-pub use list_directory::ListDirectoryTool;
 pub use read_file::ReadFileTool;
 pub use write_file::WriteFileTool;
 
@@ -29,7 +27,6 @@ impl DefaultExecutor {
             Box::new(ReadFileTool),
             Box::new(WriteFileTool),
             Box::new(EditFileTool),
-            Box::new(ListDirectoryTool),
         ];
         Self { tools }
     }
