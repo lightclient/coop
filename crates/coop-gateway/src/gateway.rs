@@ -216,6 +216,7 @@ impl Gateway {
             };
 
             let system_prompt = self.build_prompt(trust, user_name)?;
+            let session_len_before = self.messages(session_key).len();
             self.append_message(session_key, Message::user().with_text(user_input));
 
             let tool_defs = self.executor.tools();
@@ -233,7 +234,7 @@ impl Gateway {
                     max = turn_config.max_iterations,
                 );
 
-                let (response, should_break) = async {
+                let iter_result: Result<(Message, bool)> = async {
                     let messages = self.messages(session_key);
                     let (response, usage) = self
                         .assistant_response(&system_prompt, &messages, &tool_defs, &event_tx)
@@ -254,10 +255,40 @@ impl Gateway {
                     );
 
                     let has_tool_requests = response.has_tool_requests();
-                    Ok::<_, anyhow::Error>((response, !has_tool_requests))
+                    Ok((response, !has_tool_requests))
                 }
                 .instrument(iter_span)
-                .await?;
+                .await;
+
+                let (response, should_break) = match iter_result {
+                    Ok(result) => result,
+                    Err(err) => {
+                        let session_len_now = self.messages(session_key).len();
+                        let rolled_back = session_len_now - session_len_before;
+                        error!(
+                            error = %err,
+                            iteration,
+                            trust = ?trust,
+                            messages_rolled_back = rolled_back,
+                            "provider request failed, rolling back session"
+                        );
+                        self.truncate_session(session_key, session_len_before);
+                        let user_msg = if trust == TrustLevel::Full {
+                            format!("{err:#}")
+                        } else {
+                            "Something went wrong. Please try again later.".to_owned()
+                        };
+                        let _ = event_tx.send(TurnEvent::Error(user_msg)).await;
+                        let _ = event_tx
+                            .send(TurnEvent::Done(TurnResult {
+                                messages: new_messages,
+                                usage: total_usage,
+                                hit_limit: false,
+                            }))
+                            .await;
+                        return Ok(());
+                    }
+                };
 
                 if should_break {
                     break;
@@ -361,6 +392,14 @@ impl Gateway {
             .entry(session_key.clone())
             .or_default()
             .push(message);
+    }
+
+    /// Truncate session history back to `len` messages.
+    fn truncate_session(&self, session_key: &SessionKey, len: usize) {
+        let mut sessions = self.sessions.lock().expect("sessions mutex poisoned");
+        if let Some(msgs) = sessions.get_mut(session_key) {
+            msgs.truncate(len);
+        }
     }
 
     fn messages(&self, session_key: &SessionKey) -> Vec<Message> {
@@ -522,6 +561,8 @@ mod tests {
     use async_trait::async_trait;
     use coop_core::fakes::FakeProvider;
     use coop_core::tools::DefaultExecutor;
+    use coop_core::traits::ProviderStream;
+    use coop_core::types::ModelInfo;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -633,6 +674,285 @@ agent:
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("SOUL.md"), "You are a test agent.").unwrap();
         dir
+    }
+
+    /// Provider that always fails with the given error message.
+    #[derive(Debug)]
+    struct FailingProvider {
+        error_msg: String,
+        model: ModelInfo,
+    }
+
+    impl FailingProvider {
+        fn new(msg: impl Into<String>) -> Self {
+            Self {
+                error_msg: msg.into(),
+                model: ModelInfo {
+                    name: "fail-model".into(),
+                    context_limit: 128_000,
+                },
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Provider for FailingProvider {
+        fn name(&self) -> &'static str {
+            "failing"
+        }
+
+        fn model_info(&self) -> &ModelInfo {
+            &self.model
+        }
+
+        async fn complete(
+            &self,
+            _system: &str,
+            _messages: &[Message],
+            _tools: &[ToolDef],
+        ) -> Result<(Message, Usage)> {
+            anyhow::bail!("{}", self.error_msg)
+        }
+
+        async fn stream(
+            &self,
+            _system: &str,
+            _messages: &[Message],
+            _tools: &[ToolDef],
+        ) -> Result<ProviderStream> {
+            anyhow::bail!("{}", self.error_msg)
+        }
+    }
+
+    /// Provider that succeeds on the first call (returning a tool_use),
+    /// then fails on the second call.
+    #[derive(Debug)]
+    struct FailOnSecondCallProvider {
+        model: ModelInfo,
+        call_count: Mutex<u32>,
+        error_msg: String,
+    }
+
+    impl FailOnSecondCallProvider {
+        fn new(msg: impl Into<String>) -> Self {
+            Self {
+                model: ModelInfo {
+                    name: "fail-second".into(),
+                    context_limit: 128_000,
+                },
+                call_count: Mutex::new(0),
+                error_msg: msg.into(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Provider for FailOnSecondCallProvider {
+        fn name(&self) -> &'static str {
+            "fail-second"
+        }
+
+        fn model_info(&self) -> &ModelInfo {
+            &self.model
+        }
+
+        async fn complete(
+            &self,
+            _system: &str,
+            _messages: &[Message],
+            _tools: &[ToolDef],
+        ) -> Result<(Message, Usage)> {
+            let mut count = self.call_count.lock().unwrap();
+            *count += 1;
+            if *count == 1 {
+                // First call: return a tool_use so the turn continues
+                Ok((
+                    Message::assistant().with_tool_request(
+                        "tool_1",
+                        "bash",
+                        serde_json::json!({"command": "echo hi"}),
+                    ),
+                    Usage {
+                        input_tokens: Some(100),
+                        output_tokens: Some(50),
+                        ..Default::default()
+                    },
+                ))
+            } else {
+                anyhow::bail!("{}", self.error_msg)
+            }
+        }
+
+        async fn stream(
+            &self,
+            _system: &str,
+            _messages: &[Message],
+            _tools: &[ToolDef],
+        ) -> Result<ProviderStream> {
+            anyhow::bail!("not supported")
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_error_mid_turn_rolls_back_all_messages() {
+        let workspace = test_workspace();
+        let provider: Arc<dyn Provider> = Arc::new(FailOnSecondCallProvider::new(
+            "Anthropic API error: 500 - internal server error",
+        ));
+        let executor = Arc::new(DefaultExecutor::new());
+        let gateway = Arc::new(
+            Gateway::new(
+                test_config(),
+                workspace.path().to_path_buf(),
+                provider,
+                executor,
+                None,
+            )
+            .unwrap(),
+        );
+
+        let session_key = gateway.default_session_key();
+        let (event_tx, mut event_rx) = mpsc::channel(32);
+
+        let result = gateway
+            .run_turn_with_trust(
+                &session_key,
+                "hello",
+                TrustLevel::Full,
+                Some("alice"),
+                event_tx,
+            )
+            .await;
+
+        assert!(result.is_ok(), "should not propagate error");
+
+        let mut saw_error = false;
+        let mut saw_tool_start = false;
+        let mut saw_done = false;
+        while let Ok(event) = event_rx.try_recv() {
+            match event {
+                TurnEvent::Error(_) => saw_error = true,
+                TurnEvent::ToolStart { .. } => saw_tool_start = true,
+                TurnEvent::Done(_) => saw_done = true,
+                _ => {}
+            }
+        }
+
+        assert!(saw_tool_start, "tool should have executed on iteration 0");
+        assert!(saw_error, "should emit error on iteration 1 failure");
+        assert!(saw_done, "should emit Done after error");
+
+        // Session must be fully rolled back — no user msg, no assistant msg,
+        // no tool result from the partial turn.
+        assert!(
+            gateway.messages(&session_key).is_empty(),
+            "session should be fully rolled back after mid-turn error"
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_error_sends_detail_to_full_trust_user() {
+        let workspace = test_workspace();
+        let provider: Arc<dyn Provider> = Arc::new(FailingProvider::new(
+            "Anthropic API error: 400 - bad request",
+        ));
+        let executor = Arc::new(DefaultExecutor::new());
+        let gateway = Arc::new(
+            Gateway::new(
+                test_config(),
+                workspace.path().to_path_buf(),
+                provider,
+                executor,
+                None,
+            )
+            .unwrap(),
+        );
+
+        let session_key = gateway.default_session_key();
+        let (event_tx, mut event_rx) = mpsc::channel(32);
+
+        let result = gateway
+            .run_turn_with_trust(
+                &session_key,
+                "hello",
+                TrustLevel::Full,
+                Some("alice"),
+                event_tx,
+            )
+            .await;
+
+        assert!(result.is_ok(), "should not propagate error");
+
+        let mut saw_error = false;
+        let mut error_msg = String::new();
+        let mut saw_done = false;
+        while let Ok(event) = event_rx.try_recv() {
+            match event {
+                TurnEvent::Error(msg) => {
+                    saw_error = true;
+                    error_msg = msg;
+                }
+                TurnEvent::Done(_) => saw_done = true,
+                _ => {}
+            }
+        }
+
+        assert!(saw_error, "should emit TurnEvent::Error");
+        assert!(
+            error_msg.contains("400"),
+            "full-trust user should see actual error: {error_msg}"
+        );
+        assert!(saw_done, "should emit TurnEvent::Done after error");
+
+        // Session should be rolled back — no leftover user message
+        assert!(
+            gateway.messages(&session_key).is_empty(),
+            "session should be rolled back on error"
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_error_hides_detail_from_public_trust_user() {
+        let workspace = test_workspace();
+        let provider: Arc<dyn Provider> = Arc::new(FailingProvider::new(
+            "Anthropic API error: 400 - bad request",
+        ));
+        let executor = Arc::new(DefaultExecutor::new());
+        let gateway = Arc::new(
+            Gateway::new(
+                test_config(),
+                workspace.path().to_path_buf(),
+                provider,
+                executor,
+                None,
+            )
+            .unwrap(),
+        );
+
+        let session_key = gateway.default_session_key();
+        let (event_tx, mut event_rx) = mpsc::channel(32);
+
+        let result = gateway
+            .run_turn_with_trust(&session_key, "hello", TrustLevel::Public, None, event_tx)
+            .await;
+
+        assert!(result.is_ok());
+
+        let mut error_msg = String::new();
+        while let Ok(event) = event_rx.try_recv() {
+            if let TurnEvent::Error(msg) = event {
+                error_msg = msg;
+            }
+        }
+
+        assert!(
+            !error_msg.contains("400"),
+            "public user should NOT see API details: {error_msg}"
+        );
+        assert!(
+            error_msg.contains("Something went wrong"),
+            "public user should get generic message: {error_msg}"
+        );
     }
 
     #[tokio::test]

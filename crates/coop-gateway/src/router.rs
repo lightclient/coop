@@ -83,7 +83,7 @@ impl MessageRouter {
                     }
                 }
                 TurnEvent::Error(message) => {
-                    return Err(anyhow::anyhow!(message));
+                    text = message;
                 }
                 TurnEvent::Done(_) => {
                     break;
@@ -460,6 +460,119 @@ users:
                 .list_sessions()
                 .iter()
                 .any(|key| key == &decision.session_key)
+        );
+    }
+
+    /// Provider that always fails — used to test error handling paths.
+    #[derive(Debug)]
+    struct FailingProvider {
+        model: coop_core::ModelInfo,
+        error_msg: String,
+    }
+
+    impl FailingProvider {
+        fn new(msg: &str) -> Self {
+            Self {
+                model: coop_core::ModelInfo {
+                    name: "fail-model".into(),
+                    context_limit: 128_000,
+                },
+                error_msg: msg.to_owned(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for FailingProvider {
+        fn name(&self) -> &'static str {
+            "failing"
+        }
+        fn model_info(&self) -> &coop_core::ModelInfo {
+            &self.model
+        }
+        async fn complete(
+            &self,
+            _s: &str,
+            _m: &[coop_core::Message],
+            _t: &[coop_core::ToolDef],
+        ) -> Result<(coop_core::Message, coop_core::Usage)> {
+            anyhow::bail!("{}", self.error_msg)
+        }
+        async fn stream(
+            &self,
+            _s: &str,
+            _m: &[coop_core::Message],
+            _t: &[coop_core::ToolDef],
+        ) -> Result<coop_core::traits::ProviderStream> {
+            anyhow::bail!("{}", self.error_msg)
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_collect_text_returns_error_as_text() {
+        let workspace = test_workspace();
+        let config = test_config();
+        let provider: Arc<dyn Provider> = Arc::new(FailingProvider::new(
+            "Anthropic API error: 500 - overloaded",
+        ));
+        let executor = Arc::new(DefaultExecutor::new());
+        let gateway = Arc::new(
+            Gateway::new(
+                config.clone(),
+                workspace.path().to_path_buf(),
+                provider,
+                executor,
+                None,
+            )
+            .unwrap(),
+        );
+        let router = MessageRouter::new(config, gateway);
+
+        // alice has trust: full, so she should see the real error
+        let msg = inbound("signal", "alice-uuid", None, false, None);
+        let result = router.dispatch_collect_text(&msg).await;
+
+        assert!(result.is_ok(), "should not crash on provider error");
+        let (_decision, response) = result.unwrap();
+        assert!(
+            response.contains("500"),
+            "full-trust user should see error detail: {response}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_collect_text_returns_generic_error_for_public_user() {
+        let workspace = test_workspace();
+        let config = test_config();
+        let provider: Arc<dyn Provider> = Arc::new(FailingProvider::new(
+            "Anthropic API error: 500 - overloaded",
+        ));
+        let executor = Arc::new(DefaultExecutor::new());
+        let gateway = Arc::new(
+            Gateway::new(
+                config.clone(),
+                workspace.path().to_path_buf(),
+                provider,
+                executor,
+                None,
+            )
+            .unwrap(),
+        );
+        let router = MessageRouter::new(config, gateway);
+
+        // mallory is unknown → public trust, should get generic error
+        let msg = inbound("signal", "mallory-uuid", None, false, None);
+        let result = router.dispatch_collect_text(&msg).await;
+
+        assert!(result.is_ok(), "should not crash on provider error");
+        let (_decision, response) = result.unwrap();
+        assert!(
+            !response.contains("500"),
+            "public user should NOT see API details: {response}"
+        );
+        assert!(
+            response.contains("Something went wrong"),
+            "public user should get generic message: {response}"
         );
     }
 
