@@ -3,6 +3,10 @@
 ## Gateway
 
 - add encryption and authentication flow to channel connections
+- add support for blocking tool / request, e.g. i'm about to open a new group,
+  wait until you see it then text me the name to confirm adding it to allowed
+  list
+- convert config to toml
 
 ## Agent
 

@@ -8,6 +8,7 @@ use tokio::sync::mpsc;
 #[allow(missing_debug_implementations)] // contains mpsc channels
 pub struct TerminalChannel {
     id: String,
+    sender: String,
     rx: mpsc::Receiver<String>,
     tx: mpsc::Sender<String>,
 }
@@ -22,12 +23,16 @@ pub struct TerminalHandle {
 /// Create a linked pair of (TerminalChannel, TerminalHandle).
 /// Messages sent by the TUI via `TerminalHandle.tx` are received by `TerminalChannel.recv()`.
 /// Messages sent by the gateway via `TerminalChannel.send()` are received by `TerminalHandle.rx`.
-pub fn terminal_pair(buffer: usize) -> (TerminalChannel, TerminalHandle) {
+pub fn terminal_pair(
+    buffer: usize,
+    sender: impl Into<String>,
+) -> (TerminalChannel, TerminalHandle) {
     let (tui_to_gw_tx, tui_to_gw_rx) = mpsc::channel(buffer);
     let (gw_to_tui_tx, gw_to_tui_rx) = mpsc::channel(buffer);
 
     let channel = TerminalChannel {
         id: "terminal:default".to_owned(),
+        sender: sender.into(),
         rx: tui_to_gw_rx,
         tx: gw_to_tui_tx,
     };
@@ -55,7 +60,7 @@ impl Channel for TerminalChannel {
 
         Ok(InboundMessage {
             channel: self.id.clone(),
-            sender: "alice".to_owned(),
+            sender: self.sender.clone(),
             content,
             chat_id: None,
             is_group: false,

@@ -283,6 +283,7 @@ mod tests {
             session_id: "test".into(),
             trust: TrustLevel::Full,
             workspace: dir.to_path_buf(),
+            user_name: None,
         }
     }
 
@@ -416,6 +417,7 @@ mod tests {
                 session_id: "test".into(),
                 trust,
                 workspace: dir.path().to_path_buf(),
+                user_name: None,
             };
             let output = run_edit(&EditFileTool, &ctx, "file.txt", "hello", "hi").await;
             assert!(output.is_error);

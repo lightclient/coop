@@ -379,6 +379,7 @@ pub struct PromptBuilder {
     session_kind: Option<String>,
     model: Option<String>,
     channel: Option<String>,
+    user: Option<String>,
     token_budget: usize,
     file_configs: Vec<PromptFileConfig>,
 }
@@ -395,6 +396,7 @@ impl PromptBuilder {
             session_kind: None,
             model: None,
             channel: None,
+            user: None,
             token_budget: Self::DEFAULT_BUDGET,
             file_configs: default_file_configs(),
         }
@@ -425,6 +427,12 @@ impl PromptBuilder {
     }
 
     #[must_use]
+    pub fn user(mut self, user: &str) -> Self {
+        self.user = Some(user.to_owned());
+        self
+    }
+
+    #[must_use]
     pub fn token_budget(mut self, budget: usize) -> Self {
         self.token_budget = budget;
         self
@@ -450,6 +458,15 @@ impl PromptBuilder {
         let file_budget = self.token_budget.saturating_sub(runtime_reserve);
 
         let (mut layers, mut used_tokens, overflow) = self.build_file_layers(index, file_budget)?;
+
+        // Per-user memory layer (after shared files, before runtime).
+        if let Some(user) = &self.user {
+            let remaining = file_budget.saturating_sub(used_tokens);
+            if let Some(layer) = self.build_user_memory_layer(user, remaining)? {
+                used_tokens += layer.tokens;
+                layers.push(layer);
+            }
+        }
 
         // Runtime context layer.
         let runtime = self.build_runtime_context();
@@ -535,6 +552,8 @@ impl PromptBuilder {
                 continue;
             }
 
+            let header = self.layer_header(&cfg.path);
+
             if indexed.entry.tokens <= remaining {
                 let content = std::fs::read_to_string(self.workspace.join(&cfg.path))
                     .with_context(|| format!("failed to read {}", cfg.path))?;
@@ -548,7 +567,7 @@ impl PromptBuilder {
                 );
                 layers.push(PromptLayer {
                     name: Self::layer_name(&cfg.path),
-                    content: format!("## {}\n{}", cfg.path, counted.content),
+                    content: format!("{header}\n{}", counted.content),
                     tokens: counted.tokens,
                     cache: cfg.cache,
                 });
@@ -565,7 +584,7 @@ impl PromptBuilder {
                 );
                 layers.push(PromptLayer {
                     name: Self::layer_name(&cfg.path),
-                    content: format!("## {}\n{}", cfg.path, truncated.content),
+                    content: format!("{header}\n{}", truncated.content),
                     tokens: truncated.tokens,
                     cache: cfg.cache,
                 });
@@ -583,6 +602,55 @@ impl PromptBuilder {
         Ok((layers, used_tokens, overflow))
     }
 
+    /// Try to load `users/{user}/MEMORY.md` as a per-user memory layer.
+    fn build_user_memory_layer(
+        &self,
+        user: &str,
+        remaining_budget: usize,
+    ) -> Result<Option<PromptLayer>> {
+        let rel_path = format!("users/{user}/MEMORY.md");
+        let full_path = self.workspace.join(&rel_path);
+
+        let content = match std::fs::read_to_string(&full_path) {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                trace!(user, path = %rel_path, "no per-user memory file");
+                return Ok(None);
+            }
+            Err(e) => return Err(e).with_context(|| format!("failed to read {rel_path}")),
+        };
+
+        if content.trim().is_empty() {
+            return Ok(None);
+        }
+
+        let header = format!("## {user}'s memory\n");
+        let counted = Counted::new(format!("{header}{content}"));
+
+        if remaining_budget < 200 || counted.tokens > remaining_budget {
+            debug!(
+                user,
+                tokens = counted.tokens,
+                remaining_budget,
+                "per-user memory overflowed budget"
+            );
+            return Ok(None);
+        }
+
+        debug!(
+            user,
+            tokens = counted.tokens,
+            "per-user memory included in prompt"
+        );
+
+        Ok(Some(PromptLayer {
+            name: "user_memory",
+            content: counted.content,
+            tokens: counted.tokens,
+            cache: CacheHint::Session,
+        }))
+    }
+
     fn build_runtime_context(&self) -> Counted {
         let mut parts = vec!["## Runtime".to_owned()];
 
@@ -598,6 +666,10 @@ impl PromptBuilder {
         }
         if let Some(kind) = &self.session_kind {
             parts.push(format!("- Session: {kind}"));
+        }
+        if let Some(user) = &self.user {
+            parts.push(format!("- User: {user}"));
+            parts.push(format!("- User home: users/{user}/"));
         }
         parts.push(format!("- Trust: {:?}", self.trust));
 
@@ -642,6 +714,17 @@ impl PromptBuilder {
             budget_remaining / 1000
         ));
         Counted::new(lines.join("\n"))
+    }
+
+    /// Build the markdown header for a file layer.
+    /// When a user is set, MEMORY.md is labeled as shared to distinguish it
+    /// from the per-user memory layer.
+    fn layer_header(&self, path: &str) -> String {
+        if path == "MEMORY.md" && self.user.is_some() {
+            "## MEMORY.md (shared)".to_owned()
+        } else {
+            format!("## {path}")
+        }
     }
 
     /// Derive a stable layer name from a file path.
@@ -961,5 +1044,176 @@ mod tests {
         assert!(flat.contains("Agent: reid"));
         assert!(flat.contains("Model: claude-opus-4-5"));
         assert!(flat.contains("Channel: signal"));
+    }
+
+    #[test]
+    fn runtime_layer_includes_user_and_home() {
+        let dir = setup_workspace(&[]);
+
+        let index = WorkspaceIndex::scan(dir.path(), &default_file_configs()).unwrap();
+        let prompt = PromptBuilder::new(dir.path().to_path_buf(), "reid".into())
+            .trust(TrustLevel::Full)
+            .user("alice")
+            .build(&index)
+            .unwrap();
+
+        let flat = prompt.to_flat_string();
+        assert!(flat.contains("User: alice"), "should contain user name");
+        assert!(
+            flat.contains("User home: users/alice/"),
+            "should contain user home dir"
+        );
+    }
+
+    #[test]
+    fn runtime_layer_omits_user_when_unset() {
+        let dir = setup_workspace(&[]);
+
+        let index = WorkspaceIndex::scan(dir.path(), &default_file_configs()).unwrap();
+        let prompt = PromptBuilder::new(dir.path().to_path_buf(), "reid".into())
+            .trust(TrustLevel::Full)
+            .build(&index)
+            .unwrap();
+
+        let flat = prompt.to_flat_string();
+        assert!(!flat.contains("User:"), "should not contain user line");
+        assert!(
+            !flat.contains("User home:"),
+            "should not contain user home line"
+        );
+    }
+
+    #[test]
+    fn per_user_memory_included_in_prompt() {
+        let dir = setup_workspace(&[("SOUL.md", "I am an agent.")]);
+        fs::create_dir_all(dir.path().join("users/alice")).unwrap();
+        fs::write(
+            dir.path().join("users/alice/MEMORY.md"),
+            "Alice likes rust.",
+        )
+        .unwrap();
+
+        let index = WorkspaceIndex::scan(dir.path(), &default_file_configs()).unwrap();
+        let prompt = PromptBuilder::new(dir.path().to_path_buf(), "reid".into())
+            .trust(TrustLevel::Full)
+            .user("alice")
+            .build(&index)
+            .unwrap();
+
+        let flat = prompt.to_flat_string();
+        assert!(
+            flat.contains("alice's memory"),
+            "should have per-user memory header"
+        );
+        assert!(
+            flat.contains("Alice likes rust."),
+            "should include per-user memory content"
+        );
+
+        let layer_names: Vec<&str> = prompt.layers.iter().map(|l| l.name).collect();
+        assert!(
+            layer_names.contains(&"user_memory"),
+            "should have user_memory layer, got: {layer_names:?}"
+        );
+    }
+
+    #[test]
+    fn per_user_memory_not_included_without_user() {
+        let dir = setup_workspace(&[("SOUL.md", "I am an agent.")]);
+        fs::create_dir_all(dir.path().join("users/alice")).unwrap();
+        fs::write(
+            dir.path().join("users/alice/MEMORY.md"),
+            "Alice likes rust.",
+        )
+        .unwrap();
+
+        let index = WorkspaceIndex::scan(dir.path(), &default_file_configs()).unwrap();
+        let prompt = PromptBuilder::new(dir.path().to_path_buf(), "reid".into())
+            .trust(TrustLevel::Full)
+            .build(&index)
+            .unwrap();
+
+        let flat = prompt.to_flat_string();
+        assert!(
+            !flat.contains("Alice likes rust."),
+            "should not include per-user memory without user set"
+        );
+    }
+
+    #[test]
+    fn shared_memory_labeled_when_user_set() {
+        let dir = setup_workspace(&[
+            ("SOUL.md", "I am an agent."),
+            ("MEMORY.md", "Shared knowledge."),
+        ]);
+        fs::create_dir_all(dir.path().join("users/alice")).unwrap();
+        fs::write(dir.path().join("users/alice/MEMORY.md"), "Alice's stuff.").unwrap();
+
+        let index = WorkspaceIndex::scan(dir.path(), &default_file_configs()).unwrap();
+        let prompt = PromptBuilder::new(dir.path().to_path_buf(), "reid".into())
+            .trust(TrustLevel::Full)
+            .user("alice")
+            .build(&index)
+            .unwrap();
+
+        let flat = prompt.to_flat_string();
+        assert!(
+            flat.contains("## MEMORY.md (shared)"),
+            "shared MEMORY.md should be labeled as shared when user is set"
+        );
+        assert!(
+            flat.contains("Shared knowledge."),
+            "shared memory content should be present"
+        );
+        assert!(
+            flat.contains("alice's memory"),
+            "per-user memory should be present"
+        );
+        assert!(
+            flat.contains("Alice's stuff."),
+            "per-user memory content should be present"
+        );
+    }
+
+    #[test]
+    fn shared_memory_not_labeled_without_user() {
+        let dir = setup_workspace(&[
+            ("SOUL.md", "I am an agent."),
+            ("MEMORY.md", "Shared knowledge."),
+        ]);
+
+        let index = WorkspaceIndex::scan(dir.path(), &default_file_configs()).unwrap();
+        let prompt = PromptBuilder::new(dir.path().to_path_buf(), "reid".into())
+            .trust(TrustLevel::Full)
+            .build(&index)
+            .unwrap();
+
+        let flat = prompt.to_flat_string();
+        assert!(
+            flat.contains("## MEMORY.md\n"),
+            "MEMORY.md should have plain header without user"
+        );
+        assert!(
+            !flat.contains("(shared)"),
+            "should not be labeled shared without user"
+        );
+    }
+
+    #[test]
+    fn missing_per_user_memory_is_fine() {
+        let dir = setup_workspace(&[("SOUL.md", "I am an agent.")]);
+
+        let index = WorkspaceIndex::scan(dir.path(), &default_file_configs()).unwrap();
+        let prompt = PromptBuilder::new(dir.path().to_path_buf(), "reid".into())
+            .trust(TrustLevel::Full)
+            .user("alice")
+            .build(&index)
+            .unwrap();
+
+        let layer_names: Vec<&str> = prompt.layers.iter().map(|l| l.name).collect();
+        assert!(
+            !layer_names.contains(&"user_memory"),
+            "should not have user_memory layer when file doesn't exist"
+        );
     }
 }

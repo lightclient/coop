@@ -110,6 +110,7 @@ mod tests {
             session_id: "session".to_owned(),
             trust: TrustLevel::Full,
             workspace: PathBuf::from("."),
+            user_name: None,
         }
     }
 

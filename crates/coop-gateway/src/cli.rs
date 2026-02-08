@@ -13,7 +13,11 @@ pub(crate) struct Cli {
 #[derive(Subcommand)]
 pub(crate) enum Commands {
     Start,
-    Chat,
+    Chat {
+        /// User to load as (defaults to first user in config).
+        #[arg(short, long)]
+        user: Option<String>,
+    },
     Attach {
         #[arg(short, long, default_value = "main")]
         session: String,

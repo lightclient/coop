@@ -13,6 +13,7 @@ use crate::trust::resolve_trust;
 pub(crate) struct RouteDecision {
     pub session_key: SessionKey,
     pub trust: TrustLevel,
+    pub user_name: Option<String>,
 }
 
 #[derive(Clone)]
@@ -40,6 +41,7 @@ impl MessageRouter {
             "route_message",
             session = %decision.session_key,
             trust = ?decision.trust,
+            user = ?decision.user_name,
             source = %msg.channel,
         );
         debug!(parent: &span, sender = %msg.sender, "routing message");
@@ -48,6 +50,7 @@ impl MessageRouter {
                 &decision.session_key,
                 &msg.content,
                 decision.trust,
+                decision.user_name.as_deref(),
                 event_tx,
             )
             .instrument(span)
@@ -114,15 +117,14 @@ pub(crate) fn route_message(msg: &InboundMessage, config: &Config) -> RouteDecis
         None
     };
 
-    let user_trust = config
-        .users
-        .iter()
-        .find(|user| {
-            user.r#match.iter().any(|pattern| {
-                pattern == &identity || pattern == &msg.channel || pattern == &msg.sender
-            })
+    let matched_user = config.users.iter().find(|user| {
+        user.r#match.iter().any(|pattern| {
+            pattern == &identity || pattern == &msg.channel || pattern == &msg.sender
         })
-        .map_or(TrustLevel::Public, |user| user.trust);
+    });
+
+    let user_trust = matched_user.map_or(TrustLevel::Public, |user| user.trust);
+    let user_name = matched_user.map(|user| user.name.clone());
 
     let group_context = msg.is_group
         || explicit_kind
@@ -156,6 +158,7 @@ pub(crate) fn route_message(msg: &InboundMessage, config: &Config) -> RouteDecis
     RouteDecision {
         session_key: SessionKey { agent_id, kind },
         trust,
+        user_name,
     }
 }
 
@@ -238,6 +241,7 @@ users:
         assert_eq!(decision.session_key.agent_id, "reid");
         assert_eq!(decision.session_key.kind, SessionKind::Main);
         assert_eq!(decision.trust, TrustLevel::Full);
+        assert_eq!(decision.user_name.as_deref(), Some("alice"));
     }
 
     #[test]
@@ -250,6 +254,7 @@ users:
             SessionKind::Dm("signal:alice-uuid".to_owned())
         );
         assert_eq!(decision.trust, TrustLevel::Full);
+        assert_eq!(decision.user_name.as_deref(), Some("alice"));
     }
 
     #[test]
@@ -262,6 +267,7 @@ users:
             SessionKind::Dm("signal:mallory-uuid".to_owned())
         );
         assert_eq!(decision.trust, TrustLevel::Public);
+        assert_eq!(decision.user_name, None);
     }
 
     #[test]

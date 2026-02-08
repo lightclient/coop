@@ -37,6 +37,7 @@ async fn tool_execution_produces_expected_spans() {
         session_id: "test-session".to_owned(),
         trust: TrustLevel::Full,
         workspace,
+        user_name: None,
     };
 
     let _result = executor

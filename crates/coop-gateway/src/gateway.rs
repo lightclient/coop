@@ -115,7 +115,7 @@ impl Gateway {
     }
 
     /// Build a trust-gated system prompt for this turn.
-    fn build_prompt(&self, trust: TrustLevel) -> Result<String> {
+    fn build_prompt(&self, trust: TrustLevel, user_name: Option<&str>) -> Result<String> {
         let file_configs = default_file_configs();
         let mut index = self
             .workspace_index
@@ -128,10 +128,13 @@ impl Gateway {
             debug!("workspace index refreshed");
         }
 
-        let prompt = PromptBuilder::new(self.workspace.clone(), self.config.agent.id.clone())
+        let mut builder = PromptBuilder::new(self.workspace.clone(), self.config.agent.id.clone())
             .trust(trust)
-            .model(&self.config.agent.model)
-            .build(&index)?;
+            .model(&self.config.agent.model);
+        if let Some(name) = user_name {
+            builder = builder.user(name);
+        }
+        let prompt = builder.build(&index)?;
         drop(index);
 
         Ok(prompt.to_flat_string())
@@ -162,11 +165,17 @@ impl Gateway {
         parse_session_key(session, &self.config.agent.id)
     }
 
-    fn tool_context(&self, session_key: &SessionKey, trust: TrustLevel) -> ToolContext {
+    fn tool_context(
+        &self,
+        session_key: &SessionKey,
+        trust: TrustLevel,
+        user_name: Option<&str>,
+    ) -> ToolContext {
         ToolContext {
             session_id: session_key.to_string(),
             trust,
             workspace: self.workspace.clone(),
+            user_name: user_name.map(str::to_owned),
         }
     }
 
@@ -176,6 +185,7 @@ impl Gateway {
         session_key: &SessionKey,
         user_input: &str,
         trust: TrustLevel,
+        user_name: Option<&str>,
         event_tx: mpsc::Sender<TurnEvent>,
     ) -> Result<()> {
         let span = info_span!(
@@ -184,6 +194,7 @@ impl Gateway {
             input_len = user_input.len(),
             user_input = user_input,
             trust = ?trust,
+            user = ?user_name,
         );
 
         async {
@@ -195,11 +206,11 @@ impl Gateway {
                 None
             };
 
-            let system_prompt = self.build_prompt(trust)?;
+            let system_prompt = self.build_prompt(trust, user_name)?;
             self.append_message(session_key, Message::user().with_text(user_input));
 
             let tool_defs = self.executor.tools();
-            let ctx = self.tool_context(session_key, trust);
+            let ctx = self.tool_context(session_key, trust, user_name);
             let turn_config = TurnConfig::default();
 
             let mut total_usage = Usage::default();
@@ -615,7 +626,13 @@ agent:
         let (event_tx, _event_rx) = mpsc::channel(16);
 
         gateway
-            .run_turn_with_trust(&session_key, "hello", TrustLevel::Full, event_tx)
+            .run_turn_with_trust(
+                &session_key,
+                "hello",
+                TrustLevel::Full,
+                Some("alice"),
+                event_tx,
+            )
             .await
             .unwrap();
 

@@ -103,6 +103,7 @@ pub struct ToolContext {
     pub session_id: String,
     pub trust: TrustLevel,
     pub workspace: PathBuf,
+    pub user_name: Option<String>,
 }
 
 /// A tool that Coop can execute (native or MCP).

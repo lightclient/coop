@@ -73,13 +73,37 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Start => cmd_start(cli.config.as_deref()).await,
-        Commands::Chat => cmd_chat(cli.config.as_deref()).await,
+        Commands::Chat { user } => cmd_chat(cli.config.as_deref(), user.as_deref()).await,
         Commands::Attach { session } => cmd_attach(cli.config.as_deref(), &session).await,
         Commands::Signal { command } => cmd_signal(cli.config.as_deref(), command).await,
         Commands::Version => {
             println!("🐔 coop {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
+    }
+}
+
+/// Resolve which user the TUI session runs as.
+/// If `--user` is given, validate it exists in config.
+/// Otherwise, default to "root".
+fn resolve_tui_user(config: &Config, user_flag: Option<&str>) -> String {
+    if let Some(name) = user_flag {
+        if !config.users.iter().any(|u| u.name == name) {
+            let available = config
+                .users
+                .iter()
+                .map(|u| u.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            tracing::warn!(
+                user = name,
+                available = available,
+                "user not found in config, using anyway"
+            );
+        }
+        name.to_owned()
+    } else {
+        "root".to_owned()
     }
 }
 
@@ -307,7 +331,7 @@ async fn handle_send(
 ) -> Result<()> {
     let inbound = InboundMessage {
         channel: "terminal:default".to_owned(),
-        sender: "alice".to_owned(),
+        sender: "tui".to_owned(),
         content,
         chat_id: None,
         is_group: false,
@@ -354,10 +378,12 @@ async fn handle_send(
 // ---------------------------------------------------------------------------
 
 #[allow(clippy::too_many_lines, clippy::items_after_statements)]
-async fn cmd_chat(config_path: Option<&str>) -> Result<()> {
+async fn cmd_chat(config_path: Option<&str>, user_flag: Option<&str>) -> Result<()> {
     let config_file = Config::find_config_path(config_path);
     let config = Config::load(&config_file)
         .with_context(|| format!("loading config from {}", config_file.display()))?;
+
+    let tui_user = resolve_tui_user(&config, user_flag);
 
     let config_dir = config_file
         .parent()
@@ -438,9 +464,16 @@ async fn cmd_chat(config_path: Option<&str>) -> Result<()> {
                             let gw = Arc::clone(&gateway);
                             let sk = session_key.clone();
                             let tx = event_tx.clone();
+                            let user = tui_user.clone();
                             turn_task = Some(tokio::spawn(async move {
-                                gw.run_turn_with_trust(&sk, &input, coop_core::TrustLevel::Full, tx)
-                                    .await
+                                gw.run_turn_with_trust(
+                                    &sk,
+                                    &input,
+                                    coop_core::TrustLevel::Full,
+                                    Some(&user),
+                                    tx,
+                                )
+                                .await
                             }));
                         }
                     }
@@ -900,5 +933,64 @@ fn clear_chat(tui: &mut Tui) {
         .and_then(|a| a.downcast_mut::<Container>());
     if let Some(c) = chat {
         c.clear();
+    }
+}
+
+#[allow(clippy::unwrap_used)]
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_config() -> Config {
+        serde_yaml::from_str(
+            "
+agent:
+  id: test
+  model: test-model
+users:
+  - name: alice
+    trust: full
+    match: ['terminal:default']
+  - name: bob
+    trust: full
+    match: ['signal:bob-uuid']
+",
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn resolve_tui_user_defaults_to_root() {
+        let config = test_config();
+        let user = resolve_tui_user(&config, None);
+        assert_eq!(user, "root");
+    }
+
+    #[test]
+    fn resolve_tui_user_explicit_flag() {
+        let config = test_config();
+        let user = resolve_tui_user(&config, Some("bob"));
+        assert_eq!(user, "bob");
+    }
+
+    #[test]
+    fn resolve_tui_user_accepts_unknown_with_warning() {
+        let config = test_config();
+        let user = resolve_tui_user(&config, Some("mallory"));
+        assert_eq!(user, "mallory");
+    }
+
+    #[test]
+    fn resolve_tui_user_defaults_to_root_with_empty_config() {
+        let config: Config = serde_yaml::from_str(
+            "
+agent:
+  id: test
+  model: test-model
+",
+        )
+        .unwrap();
+        let user = resolve_tui_user(&config, None);
+        assert_eq!(user, "root");
     }
 }
