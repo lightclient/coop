@@ -7,6 +7,60 @@ use tracing::info;
 
 use crate::config_write::safe_write_config;
 
+// ---------------------------------------------------------------------------
+// config_read
+// ---------------------------------------------------------------------------
+
+#[derive(Debug)]
+struct ConfigReadTool {
+    config_path: PathBuf,
+}
+
+impl ConfigReadTool {
+    fn new(config_path: PathBuf) -> Self {
+        Self { config_path }
+    }
+}
+
+#[async_trait]
+impl Tool for ConfigReadTool {
+    fn definition(&self) -> ToolDef {
+        ToolDef::new(
+            "config_read",
+            "Read the current coop.yaml configuration file.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {},
+            }),
+        )
+    }
+
+    async fn execute(
+        &self,
+        _arguments: serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<ToolOutput> {
+        if ctx.trust != TrustLevel::Full {
+            return Ok(ToolOutput::error("config_read requires Full trust level"));
+        }
+
+        match std::fs::read_to_string(&self.config_path) {
+            Ok(content) => {
+                info!(config = %self.config_path.display(), "config_read");
+                Ok(ToolOutput::success(content))
+            }
+            Err(e) => Ok(ToolOutput::error(format!(
+                "failed to read {}: {e}",
+                self.config_path.display()
+            ))),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// config_write
+// ---------------------------------------------------------------------------
+
 #[derive(Debug)]
 struct ConfigWriteTool {
     config_path: PathBuf,
@@ -73,13 +127,15 @@ impl Tool for ConfigWriteTool {
 
 #[allow(missing_debug_implementations)]
 pub(crate) struct ConfigToolExecutor {
-    tool: ConfigWriteTool,
+    read_tool: ConfigReadTool,
+    write_tool: ConfigWriteTool,
 }
 
 impl ConfigToolExecutor {
     pub(crate) fn new(config_path: PathBuf) -> Self {
         Self {
-            tool: ConfigWriteTool::new(config_path),
+            read_tool: ConfigReadTool::new(config_path.clone()),
+            write_tool: ConfigWriteTool::new(config_path),
         }
     }
 }
@@ -92,15 +148,15 @@ impl ToolExecutor for ConfigToolExecutor {
         arguments: serde_json::Value,
         ctx: &ToolContext,
     ) -> Result<ToolOutput> {
-        if name == "config_write" {
-            self.tool.execute(arguments, ctx).await
-        } else {
-            Ok(ToolOutput::error(format!("unknown tool: {name}")))
+        match name {
+            "config_read" => self.read_tool.execute(arguments, ctx).await,
+            "config_write" => self.write_tool.execute(arguments, ctx).await,
+            _ => Ok(ToolOutput::error(format!("unknown tool: {name}"))),
         }
     }
 
     fn tools(&self) -> Vec<ToolDef> {
-        vec![self.tool.definition()]
+        vec![self.read_tool.definition(), self.write_tool.definition()]
     }
 }
 
@@ -134,6 +190,52 @@ mod tests {
         )
         .unwrap();
         config_path
+    }
+
+    #[tokio::test]
+    async fn test_config_read_returns_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = write_test_config(dir.path());
+        let expected = std::fs::read_to_string(&config_path).unwrap();
+
+        let tool = ConfigReadTool::new(config_path);
+        let output = tool
+            .execute(serde_json::json!({}), &tool_context(TrustLevel::Full))
+            .await
+            .unwrap();
+
+        assert!(!output.is_error);
+        assert_eq!(output.content, expected);
+    }
+
+    #[tokio::test]
+    async fn test_config_read_trust_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = write_test_config(dir.path());
+
+        let tool = ConfigReadTool::new(config_path);
+        let output = tool
+            .execute(serde_json::json!({}), &tool_context(TrustLevel::Public))
+            .await
+            .unwrap();
+
+        assert!(output.is_error);
+        assert!(output.content.contains("Full trust"));
+    }
+
+    #[tokio::test]
+    async fn test_config_read_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("nonexistent.yaml");
+
+        let tool = ConfigReadTool::new(config_path);
+        let output = tool
+            .execute(serde_json::json!({}), &tool_context(TrustLevel::Full))
+            .await
+            .unwrap();
+
+        assert!(output.is_error);
+        assert!(output.content.contains("failed to read"));
     }
 
     #[tokio::test]
