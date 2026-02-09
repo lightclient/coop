@@ -39,15 +39,16 @@ impl DiskSessionStore {
                                     name,
                                     arguments,
                                 } = content
-                                    && let serde_json::Value::String(s) = arguments {
-                                        warn!(
-                                            session = %key,
-                                            tool_id = %id,
-                                            tool_name = %name,
-                                            serialized_args = %s,
-                                            "loaded message with tool arguments as string from session store"
-                                        );
-                                    }
+                                    && let serde_json::Value::String(s) = arguments
+                                {
+                                    warn!(
+                                        session = %key,
+                                        tool_id = %id,
+                                        tool_name = %name,
+                                        serialized_args = %s,
+                                        "loaded message with tool arguments as string from session store"
+                                    );
+                                }
                             }
                             messages.push(msg);
                         }
