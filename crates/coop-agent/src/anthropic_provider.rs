@@ -297,8 +297,9 @@ impl AnthropicProvider {
                         } else {
                             name.clone()
                         };
-                        // Ensure input is a valid JSON object, not a serialized string
+                        // Ensure input is a valid JSON object — the API rejects null or string
                         let input = match arguments {
+                            Value::Null => json!({}),
                             Value::String(s) => {
                                 warn!(
                                     tool_id = id,

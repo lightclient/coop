@@ -110,8 +110,9 @@ impl Content {
         let id = id.into();
         let name = name.into();
 
-        // Defensive check: ensure arguments is not a serialized string
+        // Defensive: ensure arguments is a JSON object — the API rejects null or string
         let arguments = match &arguments {
+            serde_json::Value::Null => serde_json::json!({}),
             serde_json::Value::String(s) => {
                 tracing::warn!(
                     tool_id = %id,
@@ -119,7 +120,6 @@ impl Content {
                     serialized_args = %s,
                     "tool arguments passed as string to Content::tool_request, attempting to parse"
                 );
-                // Try to parse string as JSON, fall back to original if parsing fails
                 serde_json::from_str::<serde_json::Value>(s).unwrap_or(arguments)
             }
             _ => arguments,
@@ -612,6 +612,18 @@ mod tests {
         assert_eq!(reqs.len(), 1);
         assert_eq!(reqs[0].name, "read_file");
         assert_eq!(reqs[0].id, "call_1");
+    }
+
+    #[test]
+    fn null_tool_input_coerced_to_empty_object() {
+        let content = Content::tool_request("call_1", "config_read", serde_json::Value::Null);
+        match &content {
+            Content::ToolRequest { arguments, .. } => {
+                assert!(arguments.is_object(), "null should be coerced to {{}}");
+                assert_eq!(arguments, &serde_json::json!({}));
+            }
+            _ => panic!("expected ToolRequest"),
+        }
     }
 
     #[test]
