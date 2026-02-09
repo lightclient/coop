@@ -535,7 +535,7 @@ pub struct TurnConfig {
 
 impl Default for TurnConfig {
     fn default() -> Self {
-        Self { max_iterations: 25 }
+        Self { max_iterations: 40 }
     }
 }
 

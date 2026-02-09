@@ -587,12 +587,21 @@ impl Gateway {
             let cancelled = turn_cancel.is_cancelled();
 
             // If we hit the iteration limit while the model still wanted to use
-            // tools, do one final provider call with no tools so the model is
-            // forced to produce a text summary for the user.
+            // tools, inject a user message explaining the situation and do one
+            // final provider call with no tools so the model is forced to
+            // produce a text summary for the user.
             if hit_limit && !cancelled {
                 let final_span = info_span!("turn_limit_completion");
                 let final_result: Result<()> = async {
                     info!("forcing final completion (iteration limit reached)");
+
+                    let limit_msg = Message::user().with_text(
+                        "You have reached the maximum number of tool-call iterations for this turn. \
+                         You cannot call any more tools. Summarize what you accomplished, what is \
+                         still incomplete, and what the user should know to continue.",
+                    );
+                    self.append_message(session_key, limit_msg.clone());
+                    new_messages.push(limit_msg);
 
                     let all_messages = self.messages(session_key);
                     let compaction_state = self.get_compaction(session_key);
@@ -629,6 +638,11 @@ impl Gateway {
 
                 if let Err(e) = final_result {
                     warn!(error = %e, "limit completion failed");
+                    let _ = event_tx
+                        .send(TurnEvent::Error(
+                            "Hit iteration limit and failed to generate summary.".to_owned(),
+                        ))
+                        .await;
                 }
             }
 
@@ -1906,8 +1920,8 @@ agent:
 
         assert!(result.is_ok());
 
-        // 25 iterations + 1 forced final completion = 26 provider calls
-        assert_eq!(provider_ref.calls(), 26);
+        // 40 iterations + 1 forced final completion = 41 provider calls
+        assert_eq!(provider_ref.calls(), 41);
 
         let mut assistant_messages = Vec::new();
         let mut hit_limit = false;
@@ -1936,6 +1950,133 @@ agent:
             !last.has_tool_requests(),
             "final message should not request tools"
         );
+
+        // The session should contain the injected limit explanation message
+        let session_msgs = gateway.messages(&session_key);
+        let has_limit_msg = session_msgs
+            .iter()
+            .any(|m| m.role == Role::User && m.text().contains("maximum number of tool-call"));
+        assert!(
+            has_limit_msg,
+            "session should contain the limit explanation user message"
+        );
+    }
+
+    /// Provider that always returns tool_use but fails when called with no tools
+    /// (simulating a failed forced completion at the iteration limit).
+    #[derive(Debug)]
+    struct FailOnLimitCompletionProvider {
+        model: ModelInfo,
+    }
+
+    #[async_trait]
+    impl Provider for FailOnLimitCompletionProvider {
+        fn name(&self) -> &'static str {
+            "fail-on-limit"
+        }
+
+        fn model_info(&self) -> ModelInfo {
+            self.model.clone()
+        }
+
+        async fn complete(
+            &self,
+            _system: &str,
+            _messages: &[Message],
+            tools: &[ToolDef],
+        ) -> Result<(Message, Usage)> {
+            let usage = Usage {
+                input_tokens: Some(100),
+                output_tokens: Some(50),
+                ..Default::default()
+            };
+            if tools.is_empty() {
+                anyhow::bail!("API error during limit completion")
+            }
+            Ok((
+                Message::assistant().with_tool_request(
+                    "tool_1",
+                    "bash",
+                    serde_json::json!({"command": "echo hi"}),
+                ),
+                usage,
+            ))
+        }
+
+        async fn stream(
+            &self,
+            _system: &str,
+            _messages: &[Message],
+            _tools: &[ToolDef],
+        ) -> Result<ProviderStream> {
+            anyhow::bail!("not supported")
+        }
+    }
+
+    #[tokio::test]
+    async fn hit_limit_completion_failure_emits_error_event() {
+        let workspace = test_workspace();
+        let provider: Arc<dyn Provider> = Arc::new(FailOnLimitCompletionProvider {
+            model: ModelInfo {
+                name: "fail-on-limit".into(),
+                context_limit: 128_000,
+            },
+        });
+        let executor = Arc::new(DefaultExecutor::new());
+        let gateway = Arc::new(
+            Gateway::new(
+                shared_config(test_config()),
+                workspace.path().to_path_buf(),
+                provider,
+                executor,
+                None,
+                None,
+            )
+            .unwrap(),
+        );
+
+        let session_key = gateway.default_session_key();
+        let (event_tx, mut event_rx) = mpsc::channel(256);
+
+        let result = gateway
+            .run_turn_with_trust(
+                &session_key,
+                "hello",
+                TrustLevel::Full,
+                Some("alice"),
+                None,
+                event_tx,
+            )
+            .await;
+
+        assert!(result.is_ok());
+
+        let mut saw_error = false;
+        let mut saw_done = false;
+        let mut hit_limit = false;
+        while let Ok(event) = event_rx.try_recv() {
+            match event {
+                TurnEvent::Error(msg) => {
+                    saw_error = true;
+                    assert!(
+                        msg.contains("iteration limit"),
+                        "error should mention iteration limit: {msg}"
+                    );
+                }
+                TurnEvent::Done(result) => {
+                    saw_done = true;
+                    hit_limit = result.hit_limit;
+                }
+                _ => {}
+            }
+        }
+
+        assert!(hit_limit, "should report hit_limit=true");
+        assert!(
+            saw_error,
+            "should emit error event when limit completion fails"
+        );
+        assert!(saw_done, "should still emit Done after error");
     }
 
     #[tokio::test]
