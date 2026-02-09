@@ -50,6 +50,27 @@ impl MessageRouter {
     ) -> Result<RouteDecision> {
         let decision = self.route(msg);
 
+        // TODO: Replace this simple full-trust gate with a proper authorization
+        // system that supports per-session, per-channel, and per-command policies.
+        if !is_trust_authorized(&decision, msg) {
+            info!(
+                session = %decision.session_key,
+                trust = ?decision.trust,
+                sender = %msg.sender,
+                channel = %msg.channel,
+                "message rejected: sender lacks full trust"
+            );
+            let _ = event_tx.send(TurnEvent::TextDelta(String::new())).await;
+            let _ = event_tx
+                .send(TurnEvent::Done(TurnResult {
+                    messages: Vec::new(),
+                    usage: Usage::default(),
+                    hit_limit: false,
+                }))
+                .await;
+            return Ok(decision);
+        }
+
         // Intercept slash commands before sending to the LLM.
         // Channels tag these as InboundKind::Command with the raw command
         // text (no envelope prefix), so matching is exact.
@@ -271,6 +292,15 @@ pub(crate) fn route_message(msg: &InboundMessage, config: &Config) -> RouteDecis
     }
 }
 
+/// Simple trust gate: only full-trust users may trigger agent turns.
+/// Terminal sessions are always allowed (local physical access).
+fn is_trust_authorized(decision: &RouteDecision, msg: &InboundMessage) -> bool {
+    if msg.channel.starts_with("terminal") {
+        return true;
+    }
+    decision.trust == TrustLevel::Full
+}
+
 fn parse_explicit_session_kind(session: &str, agent_id: &str) -> Option<SessionKind> {
     if session == "main" {
         return Some(SessionKind::Main);
@@ -340,6 +370,62 @@ users:
             kind: InboundKind::Text,
             message_timestamp: None,
         }
+    }
+
+    #[test]
+    fn trust_gate_allows_full_trust() {
+        let decision = RouteDecision {
+            session_key: SessionKey {
+                agent_id: "reid".into(),
+                kind: SessionKind::Dm("signal:alice-uuid".into()),
+            },
+            trust: TrustLevel::Full,
+            user_name: Some("alice".into()),
+        };
+        let msg = inbound("signal", "alice-uuid", None, false, None);
+        assert!(is_trust_authorized(&decision, &msg));
+    }
+
+    #[test]
+    fn trust_gate_rejects_inner_trust() {
+        let decision = RouteDecision {
+            session_key: SessionKey {
+                agent_id: "reid".into(),
+                kind: SessionKind::Dm("signal:bob-uuid".into()),
+            },
+            trust: TrustLevel::Inner,
+            user_name: Some("bob".into()),
+        };
+        let msg = inbound("signal", "bob-uuid", None, false, None);
+        assert!(!is_trust_authorized(&decision, &msg));
+    }
+
+    #[test]
+    fn trust_gate_rejects_public_trust() {
+        let decision = RouteDecision {
+            session_key: SessionKey {
+                agent_id: "reid".into(),
+                kind: SessionKind::Dm("signal:mallory-uuid".into()),
+            },
+            trust: TrustLevel::Public,
+            user_name: None,
+        };
+        let msg = inbound("signal", "mallory-uuid", None, false, None);
+        assert!(!is_trust_authorized(&decision, &msg));
+    }
+
+    #[test]
+    fn trust_gate_always_allows_terminal() {
+        let decision = RouteDecision {
+            session_key: SessionKey {
+                agent_id: "reid".into(),
+                kind: SessionKind::Main,
+            },
+            trust: TrustLevel::Full,
+            user_name: Some("alice".into()),
+        };
+        let msg = inbound("terminal:default", "alice", None, false, None);
+        assert!(is_trust_authorized(&decision, &msg));
     }
 
     #[test]
@@ -519,13 +605,13 @@ users:
         );
         let router = MessageRouter::new(config, Arc::clone(&gateway));
 
-        let msg = inbound("signal", "bob-uuid", None, false, None);
+        let msg = inbound("signal", "alice-uuid", None, false, None);
         let (event_tx, mut event_rx) = mpsc::channel(32);
 
         let decision = router.dispatch(&msg, event_tx).await.unwrap();
         assert_eq!(
             decision.session_key.kind,
-            SessionKind::Dm("signal:bob-uuid".to_owned())
+            SessionKind::Dm("signal:alice-uuid".to_owned())
         );
 
         let mut saw_done = false;
@@ -624,12 +710,11 @@ users:
     }
 
     #[tokio::test]
-    async fn dispatch_collect_text_returns_generic_error_for_public_user() {
+    async fn dispatch_rejects_public_user_silently() {
         let workspace = test_workspace();
         let config = test_config();
-        let provider: Arc<dyn Provider> = Arc::new(FailingProvider::new(
-            "Anthropic API error: 500 - overloaded",
-        ));
+        let provider: Arc<dyn Provider> =
+            Arc::new(FakeProvider::new("should not reach LLM for public user"));
         let executor = Arc::new(DefaultExecutor::new());
         let gateway = Arc::new(
             Gateway::new(
@@ -642,21 +727,70 @@ users:
             )
             .unwrap(),
         );
-        let router = MessageRouter::new(config, gateway);
+        let router = MessageRouter::new(config, Arc::clone(&gateway));
 
-        // mallory is unknown → public trust, should get generic error
+        // mallory is unknown → public trust, should be silently rejected
         let msg = inbound("signal", "mallory-uuid", None, false, None);
-        let result = router.dispatch_collect_text(&msg).await;
+        let (decision, response) = router.dispatch_collect_text(&msg).await.unwrap();
 
-        assert!(result.is_ok(), "should not crash on provider error");
-        let (_decision, response) = result.unwrap();
+        assert_eq!(decision.trust, TrustLevel::Public);
         assert!(
-            !response.contains("500"),
-            "public user should NOT see API details: {response}"
+            response.is_empty(),
+            "public user should get no response: {response}"
         );
+        assert_eq!(
+            gateway.session_message_count(&decision.session_key),
+            0,
+            "no session should be created for rejected user"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_rejects_inner_trust_user_on_signal() {
+        let config = test_config();
+        let (router, gateway) = make_router_and_gateway(&config);
+
+        // bob has inner trust — should be rejected on signal
+        let msg = inbound_with_content("signal", "bob-uuid", "hello");
+        let (decision, text) = dispatch_and_collect_text(&router, &msg).await;
+
+        assert_eq!(decision.trust, TrustLevel::Inner);
+        assert!(text.is_empty(), "inner-trust user should get no response");
+        assert_eq!(
+            gateway.session_message_count(&decision.session_key),
+            0,
+            "no session should be created for rejected user"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_allows_full_trust_user_on_signal() {
+        let config = test_config();
+        let (router, _gw) = make_router_and_gateway(&config);
+
+        let msg = inbound_with_content("signal", "alice-uuid", "hello");
+        let (decision, text) = dispatch_and_collect_text(&router, &msg).await;
+
+        assert_eq!(decision.trust, TrustLevel::Full);
         assert!(
-            response.contains("Something went wrong"),
-            "public user should get generic message: {response}"
+            !text.is_empty(),
+            "full-trust user should get a response from the LLM"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_always_allows_terminal_users() {
+        let config = test_config();
+        let (router, _gw) = make_router_and_gateway(&config);
+
+        // Terminal users always get through regardless of trust resolution
+        let msg = inbound_with_content("terminal:default", "alice", "hello");
+        let (decision, text) = dispatch_and_collect_text(&router, &msg).await;
+
+        assert_eq!(decision.trust, TrustLevel::Full);
+        assert!(
+            !text.is_empty(),
+            "terminal user should always get a response"
         );
     }
 
