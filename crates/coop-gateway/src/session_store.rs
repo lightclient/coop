@@ -31,7 +31,26 @@ impl DiskSessionStore {
                         continue;
                     }
                     match serde_json::from_str::<Message>(line) {
-                        Ok(msg) => messages.push(msg),
+                        Ok(msg) => {
+                            // Defensive check: validate tool requests don't have string arguments
+                            for content in &msg.content {
+                                if let coop_core::Content::ToolRequest {
+                                    id,
+                                    name,
+                                    arguments,
+                                } = content
+                                    && let serde_json::Value::String(s) = arguments {
+                                        warn!(
+                                            session = %key,
+                                            tool_id = %id,
+                                            tool_name = %name,
+                                            serialized_args = %s,
+                                            "loaded message with tool arguments as string from session store"
+                                        );
+                                    }
+                            }
+                            messages.push(msg);
+                        }
                         Err(e) => {
                             warn!(
                                 path = %path.display(),

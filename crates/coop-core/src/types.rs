@@ -107,9 +107,27 @@ impl Content {
         name: impl Into<String>,
         arguments: serde_json::Value,
     ) -> Self {
+        let id = id.into();
+        let name = name.into();
+
+        // Defensive check: ensure arguments is not a serialized string
+        let arguments = match &arguments {
+            serde_json::Value::String(s) => {
+                tracing::warn!(
+                    tool_id = %id,
+                    tool_name = %name,
+                    serialized_args = %s,
+                    "tool arguments passed as string to Content::tool_request, attempting to parse"
+                );
+                // Try to parse string as JSON, fall back to original if parsing fails
+                serde_json::from_str::<serde_json::Value>(s).unwrap_or(arguments)
+            }
+            _ => arguments,
+        };
+
         Self::ToolRequest {
-            id: id.into(),
-            name: name.into(),
+            id,
+            name,
             arguments,
         }
     }
