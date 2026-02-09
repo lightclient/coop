@@ -1,11 +1,13 @@
 # Memory System Design (Current Implementation)
 
-This document describes what Coop memory is **today** in this repository.
+This document reflects the memory system as implemented in this repository today.
 
-It replaces the earlier aspirational design with concrete behavior from:
+Relevant code paths:
 - `crates/coop-memory`
 - `crates/coop-gateway/src/memory_tools.rs`
-- `crates/coop-gateway/src/gateway.rs`
+- `crates/coop-gateway/src/memory_prompt_index.rs`
+- `crates/coop-gateway/src/memory_embedding.rs`
+- `crates/coop-gateway/src/memory_reconcile.rs`
 - `crates/coop-gateway/src/main.rs`
 
 ---
@@ -13,314 +15,232 @@ It replaces the earlier aspirational design with concrete behavior from:
 ## Status
 
 Implemented now:
-- Structured observations stored in SQLite
-- FTS5 full-text search over observation fields
+- Structured observations in SQLite (`observations`)
+- FTS5 retrieval
+- Optional semantic vector retrieval via `sqlite-vec` (`observations_vec`) with graceful fallback
+- Hybrid ranking (FTS + vector + recency + mention_count)
+- Embedding pipeline wired for query/search and write mutations
+- Reconciliation pipeline with `ADD / UPDATE / DELETE / NONE`
+- Exact-dedup (`title + facts` hash) with `mention_count` bump
+- Observation history records for `ADD / UPDATE / DELETE / COMPRESS`
 - Trust-gated memory tools (`memory_search`, `memory_timeline`, `memory_get`, `memory_write`, `memory_history`, `memory_people`)
-- Hash-based exact dedup (`title + facts`) with `mention_count` bump
-- Observation history table (currently logs ADD events)
-- People index table promoted from observation writes
-- Auto-capture of non-memory tool executions into memory
+- Auto-capture of non-memory tool executions into observations
+- Gateway E2E reconciliation integration coverage (ADD/UPDATE/DELETE/NONE/exact_dup/trust-gate)
+- Trust-gated prompt boot-time DB memory index injection
+- Retention / deterministic compression / archive cleanup maintenance pipeline
+- Periodic maintenance runner in gateway (startup + interval)
+- Expanded embedding provider wiring (`openai`, `voyage`, `cohere`, `openai-compatible`)
 
-Not implemented yet (still future work):
-- sqlite-vec vector search
-- Embedding computation pipeline
-- LLM reconciliation (ADD/UPDATE/DELETE/NONE)
-- Retention/compression tiers
-- DB-backed memory index injected at prompt boot
-- Flat-file import command
+Still not implemented:
+- Flat-file import/migration command
+- LLM-based semantic compression (current compression is deterministic rule-based)
 
 ---
 
-## High-Level Architecture
+## Runtime Wiring
 
-### Crate boundary
+Gateway startup (`coop-gateway/src/main.rs`) wires memory with optional embedding and reconciliation components:
 
-`coop-memory` is a dedicated crate with:
-- `Memory` trait
-- `SqliteMemory` implementation
-- memory domain types (`Observation`, `MemoryQuery`, etc.)
+1. Resolve `memory.db_path`
+2. Build optional `EmbeddingProvider` from `memory.embedding`
+3. Build `ProviderReconciler` from the configured LLM provider (`complete_fast`)
+4. Open memory with `SqliteMemory::open_with_components(...)`
+5. Start maintenance loop when `memory.retention.enabled`:
+   - run once at startup
+   - run periodically in background
 
-`coop-gateway` owns runtime wiring:
-- opens SQLite DB on startup
-- registers memory tools
-- passes memory handle into `Gateway`
-- auto-captures tool executions into observations
-
-### Runtime wiring
-
-At startup/chat init (`coop-gateway/src/main.rs`):
-1. Resolve `memory.db_path` from config dir
-2. Open SQLite DB via `SqliteMemory::open(...)`
-3. Add `MemoryToolExecutor` to `CompositeExecutor`
-4. Pass `Some(memory)` into `Gateway`
-
-Trace event verified in runtime:
-- `"initializing memory store"` with DB path field
+Key startup traces include:
+- `initializing memory store`
+- `memory embedding configured`
+- `memory maintenance loop started`
+- `memory maintenance run started` / stage completion events
 
 ---
 
-## Data Model (SQLite)
+## Prompt Boot-Time DB Memory Index
 
-Schema lives in `crates/coop-memory/src/sqlite/schema.rs`.
+Gateway prompt build now appends a compact DB memory index before each turn when enabled:
 
-### `observations`
-
-Core memory record:
-- identity/context: `agent_id`, `session_key`, `store`
-- structure: `type`, `title`, `narrative`, `facts`, `tags`
-- provenance: `source`, `related_files`, `related_people`
-- dedup/weighting: `hash`, `mention_count`
-- metadata: `token_count`, `created_at`, `updated_at`, `expires_at`, `min_trust`
-
-### `observations_fts`
-
-FTS5 virtual table indexed on:
-- `title`, `narrative`, `facts`, `tags`
-
-Maintained by triggers:
-- insert/update/delete triggers keep FTS rowid aligned to `observations.id`
-
-### `observation_history`
-
-Mutation history table:
-- `observation_id`, old/new title/facts, event, timestamp
-
-Current behavior:
-- only `ADD` events are emitted by current write path
-
-### `session_summaries`
-
-Stores generated session summary rows:
-- `request`, `outcome`, `decisions`, `open_items`, `observation_count`
-
-### `people`
-
-Promoted people index:
-- `name`, `store`, `facts`, `last_mentioned`, `mention_count`
-- unique key: `(agent_id, name)`
-
-### Indexes
-
-Implemented indexes:
-- `idx_obs_agent`, `idx_obs_store`, `idx_obs_type`, `idx_obs_created`, `idx_obs_trust`, `idx_obs_hash`
-- `idx_history_obs`
-
----
-
-## Memory API (Trait)
-
-`coop-memory/src/traits.rs`:
-- `search(query) -> Vec<ObservationIndex>`
-- `timeline(anchor, before, after) -> Vec<ObservationIndex>`
-- `get(ids) -> Vec<Observation>`
-- `write(obs) -> WriteOutcome`
-- `people(query) -> Vec<Person>`
-- `summarize_session(session_key) -> SessionSummary`
-- `history(observation_id) -> Vec<ObservationHistoryEntry>`
-
-`EmbeddingProvider` trait exists in the crate but is not used by the current SQLite backend.
-
----
-
-## Retrieval Semantics (Current)
-
-### Search (`SqliteMemory::search`)
-
-Two query modes:
-1. `text` present → FTS5 query (`MATCH`) + BM25 score
-2. no `text` → recency list (`ORDER BY updated_at DESC`)
-
-Filters supported:
-- `stores`
-- `types`
-- `after` / `before`
-- `people` (applied post-fetch using `related_people` JSON)
-
-Token budgeting:
-- `limit` defaults to 10 when zero
-- backend fetches up to `limit * 5` candidates
-- optional `max_tokens` stops accumulation once budget exceeded (after at least one result)
-
-Scoring (implemented):
-- with text query:
-  - `0.6 * fts + 0.2 * recency + 0.2 * mention`
-- without text query:
-  - `0.7 * recency + 0.3 * mention`
-- recency: `1 / (1 + days_since_update)`
-- mention: `min(mention_count / 10, 1)`
-- `ObservationIndex.score` is populated with this computed score
-
-### Timeline
-
-`timeline(anchor, before, after)`:
-- fetch anchor by id
-- fetch `before` older observations by `created_at`
-- fetch `after` newer observations by `created_at`
-- return chronological window
-- score is `0.0` for timeline entries
-
-### Get
-
-`get(ids)`:
-- returns full observations in requested order
-- silently omits missing/expired IDs
-
----
-
-## Write Semantics (Current)
-
-### Dedup path
-
-Hash = SHA-256 of:
-- `title`
-- null separator
-- each `fact` + null separator
-
-If exact hash exists for same `agent_id` and non-expired row:
-- increment `mention_count`
-- update `updated_at`
-- return `WriteOutcome::ExactDup`
-
-### Insert path
-
-If not exact duplicate:
-- insert new row into `observations`
-- insert `ADD` row into `observation_history`
-- upsert all `related_people` into `people`
-- return `WriteOutcome::Added(id)`
-
-### Current `WriteOutcome` in practice
-
-Enum includes:
-- `Added`, `Updated`, `Deleted`, `Skipped`, `ExactDup`
-
-Current backend behavior emits:
-- `Added`
-- `ExactDup`
-
-(UPDATE/DELETE/SKIPPED are reserved for future reconciliation flow.)
-
----
-
-## Tool Surface (Gateway)
-
-Implemented in `crates/coop-gateway/src/memory_tools.rs`.
-
-### `memory_search`
-Args:
-- `query`, `stores`, `types`, `people`, `after_ms`, `before_ms`, `limit`, `max_tokens`
-
-### `memory_timeline`
-Args:
-- `anchor` (required), `before`, `after`
-
-### `memory_get`
-Args:
-- `ids` (required)
-
-### `memory_write`
-Args:
-- required: `title`
-- optional: `store`, `type`, `narrative`, `facts`, `tags`, `related_files`, `related_people`, `source`, `token_count`, `expires_at_ms`, `session_key`
-
-Defaults:
-- `store`: derived from trust (`trust_to_store`)
-- `type`: `discovery`
-- `source`: `agent`
-- `session_key`: current tool context session
-
-### `memory_history`
-Args:
-- `observation_id` (required)
-
-### `memory_people`
-Args:
-- `query`
-
-All tools return JSON text payloads.
-
----
-
-## Trust Gating (Enforced Today)
-
-Store visibility matrix:
-- `full` → `private`, `shared`, `social`
-- `inner` → `shared`, `social`
-- `familiar` → `social`
-- `public` → none
-
-Applied in tool layer:
-- `memory_search`: requested stores intersected with accessible stores
-- `memory_get`, `memory_timeline`, `memory_people`: post-filtered by accessible stores
-- `memory_history`: verifies target observation store is accessible
-- `memory_write`: rejects writes to inaccessible store
-
-Store defaults from trust:
-- `full` → `private`
-- `inner` → `shared`
-- `familiar/public` → `social` (but `public` cannot write because accessible stores are empty)
-
----
-
-## Automatic Tool Capture (Implemented)
-
-In `Gateway::run_turn_with_trust`, after every tool result:
-- non-memory tools are auto-captured via `capture_tool_observation(...)`
-- capture runs in background (`tokio::spawn`)
-- writes a `technical` observation with:
-  - title: `Tool run: <tool_name>`
-  - narrative: serialized args + truncated output
-  - facts: tool name + error flag
-  - tags: `["tool", <tool_name>]`
-  - source: `auto`
-  - store/min_trust derived from turn trust
-  - related file hints from args keys (`path`, `file`, `target`, `from`, `to`)
-
-Current behavior is direct write, not LLM compression.
-
----
-
-## Prompt Integration (Current Reality)
-
-The database memory is available through tools, but prompt assembly is still file-centric today.
-
-Specifically:
-- `PromptBuilder` still manages file-based memory/menu behavior
-- DB observations are **not** yet injected as a startup index layer in the system prompt
-
-So current retrieval model is:
-- agent asks via memory tools on demand
-- not automatic DB preload at boot
-
----
-
-## Configuration
-
-`coop.yaml` now supports:
+Config:
 
 ```yaml
 memory:
-  db_path: ./data/memory.db
-  embedding:            # optional, currently not consumed by SqliteMemory
-    provider: voyage
-    model: voyage-3-large
-    dimensions: 1024
+  prompt_index:
+    enabled: true
+    limit: 12
+    max_tokens: 1200
 ```
 
-Notes:
-- `db_path` is resolved relative to config directory when not absolute
-- config check validates memory path shape and embedding field sanity
+Behavior:
+- Built in `coop-gateway` (`memory_prompt_index.rs`), not in `coop-core`
+- Uses trust-gated stores:
+  - `full`: private/shared/social
+  - `inner`: shared/social
+  - `familiar`: social
+  - `public`: none
+- Includes compact rows only (id/store/type/title/score/mention/created)
+- Enforces `limit` and `max_tokens`
+- If generation fails, prompt creation degrades gracefully (turn still proceeds)
+
+Trace events:
+- `memory prompt index built`
+- `memory prompt index skipped` (with reason)
+- `memory prompt index injected`
 
 ---
 
-## Known Gaps vs Original Target Design
+## Data Model
 
-Still pending from the earlier design draft:
-- hybrid semantic retrieval (sqlite-vec + embeddings)
-- reconciliation worker with LLM decisions
-- archive/retention jobs
-- contradiction handling / UPDATE / DELETE flows
-- boot-time DB memory index in prompt
-- migration/import CLI from markdown memory files
+### Active tables
+- `observations`
+- `observations_fts` + triggers
+- `observation_embeddings`
+- `observation_history`
+- `session_summaries`
+- `people`
 
-This doc should be updated as each gap is implemented.
+### Archive table
+- `observation_archive`
+  - stores original observation payload + metadata
+  - fields include `original_observation_id`, store/type/title/narrative/facts/tags/source,
+    related files/people, hash, mention/token counts, created/updated/expires timestamps,
+    `archived_at`, `archive_reason`
+
+---
+
+## Retrieval Semantics
+
+`Memory::search`:
+- With `query.text`: FTS candidate retrieval
+- Without `query.text`: recency retrieval
+- With text + query embedding + vec enabled: merges vector candidates with FTS
+
+Fallback behavior:
+- No embedder: FTS-only
+- Embedding request failure: FTS-only for that query
+- `sqlite-vec` unavailable/query errors: vector path disables and search continues FTS-only
+
+Store/type/date filters are applied in SQL before ranking.
+People filters apply before final sort.
+
+---
+
+## Reconciliation Pipeline
+
+`SqliteMemory::write` flow:
+
+1. Exact hash dedup check
+   - match: bump mention_count, return `ExactDup`
+2. Similar candidate retrieval (hybrid search; fallback FTS)
+3. If no candidate above threshold: `ADD`
+4. If candidates exist and reconciler configured:
+   - send `ReconcileRequest` with dense candidate indices
+   - parse strict JSON decision
+   - apply decision
+
+Decision application:
+- `ADD`: insert new observation
+- `UPDATE`: mutate matched row, record `UPDATE` history
+- `DELETE`: expire stale row, insert replacement, record `DELETE` history
+- `NONE`: bump mention_count only
+
+If reconciliation fails or returns invalid candidate index, fallback is `ADD`.
+
+---
+
+## Lifecycle Maintenance (Retention / Compression / Archive)
+
+Maintenance API:
+- `Memory::run_maintenance(&MemoryMaintenanceConfig)`
+
+Config:
+
+```yaml
+memory:
+  retention:
+    enabled: true
+    archive_after_days: 30
+    delete_archive_after_days: 365
+    compress_after_days: 14
+    compression_min_cluster_size: 3
+    max_rows_per_run: 200
+```
+
+Stages per run:
+1. **Compression**
+   - scans stale observations older than `compress_after_days`
+   - clusters by stable key (`store + type + normalized title`)
+   - for clusters meeting `compression_min_cluster_size`:
+     - inserts deterministic summary observation
+     - expires original rows
+     - records `COMPRESS` history on originals
+2. **Archive move**
+   - archives aged/expired observations into `observation_archive`
+   - removes archived rows from active table
+3. **Archive cleanup**
+   - deletes archive rows older than `delete_archive_after_days`
+
+All stages are bounded by `max_rows_per_run`.
+
+---
+
+## Embedding Providers
+
+Embedding implementation is gateway-owned (`memory_embedding.rs`) and uses provider registry wiring.
+
+Supported providers:
+- `openai` (`OPENAI_API_KEY`)
+- `voyage` (`VOYAGE_API_KEY`)
+- `cohere` (`COHERE_API_KEY`)
+- `openai-compatible` (requires `base_url` + `api_key_env`)
+
+`openai-compatible` example:
+
+```yaml
+memory:
+  embedding:
+    provider: openai-compatible
+    model: text-embedding-3-small
+    dimensions: 1536
+    base_url: https://your-endpoint.example/v1
+    api_key_env: OPENAI_COMPAT_API_KEY
+```
+
+Safety:
+- dimension mismatch is rejected
+- traces log metadata only (provider/model/text length/status/dimensions)
+- API keys are never logged
+
+---
+
+## Config Validation (`coop check`)
+
+Current memory validation covers:
+- `memory.db_path` parent validity
+- `memory.prompt_index` (`limit > 0`, `max_tokens > 0`)
+- `memory.retention` field constraints + cross-checks
+- embedding provider support list
+- embedding model non-empty
+- embedding dimensions bounded (`1..=8192`)
+- provider-specific embedding requirements (e.g. openai-compatible base URL + env var)
+- embedding API key env presence
+
+---
+
+## Tracing
+
+Memory tracing includes:
+- embedding request/response metadata
+- vector fallback activation
+- reconciliation request/decision/application
+- prompt index build/skip/injection events
+- maintenance loop/run/stage metrics
+
+JSONL traces (`COOP_TRACE_FILE`) are the primary debugging interface.
+
+---
+
+## Known Remaining Gaps
+
+- Flat-file memory import/migration path
+- Higher-level compaction policies beyond deterministic cluster summarization

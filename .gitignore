@@ -5,6 +5,7 @@
 /root/workspace/
 workspace/
 data/
+db/
 dev.yaml
 traces.jsonl
 *.jsonl

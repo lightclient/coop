@@ -1,22 +1,54 @@
 use anyhow::Result;
 use rusqlite::{OptionalExtension, params};
-use std::collections::HashMap;
-use tracing::debug;
+use std::collections::{HashMap, HashSet};
+use tracing::{debug, info, warn};
 
 use crate::types::{MemoryQuery, Observation, ObservationIndex};
 
 use super::{SqliteMemory, helpers};
 
-pub(super) fn search(memory: &SqliteMemory, query: &MemoryQuery) -> Result<Vec<ObservationIndex>> {
+pub(super) fn search(
+    memory: &SqliteMemory,
+    query: &MemoryQuery,
+    query_embedding: Option<&[f32]>,
+) -> Result<Vec<ObservationIndex>> {
     let now_ms = helpers::now_ms();
     let limit = if query.limit == 0 { 10 } else { query.limit };
     let fetch_limit = limit.max(1).saturating_mul(5);
+    let query_has_text = query.text.as_ref().is_some_and(|t| !t.trim().is_empty());
 
-    let mut rows = if query.text.as_ref().is_some_and(|t| !t.trim().is_empty()) {
+    let mut rows = if query_has_text {
         memory.search_fts(query, now_ms, fetch_limit)?
     } else {
         memory.search_recent(query, now_ms, fetch_limit)?
     };
+
+    let mut vector_scores = HashMap::new();
+    if query_has_text {
+        if let Some(embedding) = query_embedding {
+            if memory.vector_search_enabled() {
+                let vector_rows = memory.search_vector(query, embedding, now_ms, fetch_limit)?;
+                let mut seen = rows.iter().map(|row| row.id).collect::<HashSet<_>>();
+
+                for (row, similarity) in vector_rows {
+                    vector_scores.insert(row.id, similarity);
+                    if seen.insert(row.id) {
+                        rows.push(row);
+                    }
+                }
+
+                debug!(
+                    vector_candidates = vector_scores.len(),
+                    merged_candidates = rows.len(),
+                    "memory vector candidate retrieval complete"
+                );
+            } else {
+                info!("memory vector retrieval unavailable, using FTS-only path");
+            }
+        } else if memory.embedder.is_some() {
+            warn!("memory query embedding missing, using FTS-only path");
+        }
+    }
 
     if !query.people.is_empty() {
         let people = query
@@ -31,10 +63,14 @@ pub(super) fn search(memory: &SqliteMemory, query: &MemoryQuery) -> Result<Vec<O
         });
     }
 
-    let query_has_text = query.text.as_ref().is_some_and(|t| !t.trim().is_empty());
     rows.sort_by(|a, b| {
-        helpers::score_row(b, now_ms, query_has_text)
-            .partial_cmp(&helpers::score_row(a, now_ms, query_has_text))
+        helpers::score_row(b, now_ms, query_has_text, vector_scores.get(&b.id).copied())
+            .partial_cmp(&helpers::score_row(
+                a,
+                now_ms,
+                query_has_text,
+                vector_scores.get(&a.id).copied(),
+            ))
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
@@ -54,7 +90,12 @@ pub(super) fn search(memory: &SqliteMemory, query: &MemoryQuery) -> Result<Vec<O
             break;
         }
 
-        let score = helpers::score_row(&row, now_ms, query_has_text);
+        let score = helpers::score_row(
+            &row,
+            now_ms,
+            query_has_text,
+            vector_scores.get(&row.id).copied(),
+        );
         total_tokens = total_tokens.saturating_add(token_cost);
         out.push(helpers::to_index(row, score));
     }

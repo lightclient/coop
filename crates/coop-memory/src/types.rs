@@ -84,6 +84,64 @@ impl NewObservation {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReconcileObservation {
+    pub store: String,
+    pub obs_type: String,
+    pub title: String,
+    pub narrative: String,
+    pub facts: Vec<String>,
+    pub tags: Vec<String>,
+    pub related_files: Vec<String>,
+    pub related_people: Vec<String>,
+}
+
+impl From<&NewObservation> for ReconcileObservation {
+    fn from(value: &NewObservation) -> Self {
+        Self {
+            store: value.store.clone(),
+            obs_type: value.obs_type.clone(),
+            title: value.title.clone(),
+            narrative: value.narrative.clone(),
+            facts: value.facts.clone(),
+            tags: value.tags.clone(),
+            related_files: value.related_files.clone(),
+            related_people: value.related_people.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReconcileCandidate {
+    pub index: usize,
+    pub score: f32,
+    pub mention_count: u32,
+    pub created_at: DateTime<Utc>,
+    pub observation: ReconcileObservation,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReconcileRequest {
+    pub incoming: ReconcileObservation,
+    pub candidates: Vec<ReconcileCandidate>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "decision", rename_all = "UPPERCASE")]
+pub enum ReconcileDecision {
+    Add,
+    Update {
+        candidate_index: usize,
+        merged: ReconcileObservation,
+    },
+    Delete {
+        candidate_index: usize,
+    },
+    None {
+        candidate_index: usize,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WriteOutcome {
     Added(i64),
@@ -91,6 +149,23 @@ pub enum WriteOutcome {
     Deleted(i64),
     Skipped,
     ExactDup,
+}
+
+#[derive(Debug, Clone)]
+pub struct MemoryMaintenanceConfig {
+    pub archive_after_days: i64,
+    pub delete_archive_after_days: i64,
+    pub compress_after_days: i64,
+    pub compression_min_cluster_size: usize,
+    pub max_rows_per_run: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MemoryMaintenanceReport {
+    pub compressed_rows: usize,
+    pub summary_rows: usize,
+    pub archived_rows: usize,
+    pub archive_deleted_rows: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -122,6 +197,15 @@ pub struct SessionSummary {
     pub open_items: Vec<String>,
     pub observation_count: usize,
     pub created_at: DateTime<Utc>,
+}
+
+pub fn embedding_text(title: &str, facts: &[String]) -> String {
+    let title = title.trim();
+    if facts.is_empty() {
+        return title.to_owned();
+    }
+
+    format!("{title}; {}", facts.join("; "))
 }
 
 pub fn trust_to_store(trust: TrustLevel) -> &'static str {

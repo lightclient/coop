@@ -18,6 +18,7 @@ use tracing::{Instrument, debug, error, info, info_span, warn};
 use uuid::Uuid;
 
 use crate::config::Config;
+use crate::memory_prompt_index;
 use crate::session_store::DiskSessionStore;
 
 pub(crate) struct Gateway {
@@ -151,30 +152,62 @@ impl Gateway {
     }
 
     /// Build a trust-gated system prompt for this turn.
-    fn build_prompt(&self, trust: TrustLevel, user_name: Option<&str>) -> Result<String> {
+    async fn build_prompt(&self, trust: TrustLevel, user_name: Option<&str>) -> Result<String> {
         let file_configs = default_file_configs();
-        let mut index = self
-            .workspace_index
-            .lock()
-            .expect("workspace index mutex poisoned");
-        let refreshed = index
-            .refresh(&self.workspace, &file_configs)
-            .unwrap_or(false);
-        if refreshed {
-            debug!("workspace index refreshed");
+        let mut system_prompt = {
+            let mut index = self
+                .workspace_index
+                .lock()
+                .expect("workspace index mutex poisoned");
+            let refreshed = index
+                .refresh(&self.workspace, &file_configs)
+                .unwrap_or(false);
+            if refreshed {
+                debug!("workspace index refreshed");
+            }
+
+            let mut builder =
+                PromptBuilder::new(self.workspace.clone(), self.config.agent.id.clone())
+                    .trust(trust)
+                    .model(&self.config.agent.model)
+                    .skills(self.skills.clone());
+            if let Some(name) = user_name {
+                builder = builder.user(name);
+            }
+            let prompt = builder.build(&index)?;
+            drop(index);
+            prompt.to_flat_string()
+        };
+
+        if let Some(memory) = &self.memory {
+            match memory_prompt_index::build_prompt_index(
+                memory.as_ref(),
+                trust,
+                &self.config.memory.prompt_index,
+            )
+            .await
+            {
+                Ok(Some(memory_index)) => {
+                    info!(
+                        trust = ?trust,
+                        index_len = memory_index.len(),
+                        "memory prompt index injected"
+                    );
+                    system_prompt.push_str("\n\n");
+                    system_prompt.push_str(&memory_index);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    warn!(
+                        error = %error,
+                        trust = ?trust,
+                        "memory prompt index generation failed, continuing without index"
+                    );
+                }
+            }
         }
 
-        let mut builder = PromptBuilder::new(self.workspace.clone(), self.config.agent.id.clone())
-            .trust(trust)
-            .model(&self.config.agent.model)
-            .skills(self.skills.clone());
-        if let Some(name) = user_name {
-            builder = builder.user(name);
-        }
-        let prompt = builder.build(&index)?;
-        drop(index);
-
-        Ok(prompt.to_flat_string())
+        Ok(system_prompt)
     }
 
     pub(crate) fn default_session_key(&self) -> SessionKey {
@@ -312,7 +345,7 @@ impl Gateway {
                 None
             };
 
-            let system_prompt = self.build_prompt(trust, user_name)?;
+            let system_prompt = self.build_prompt(trust, user_name).await?;
             let session_len_before = self.messages(session_key).len();
             self.append_message(session_key, Message::user().with_text(user_input));
 

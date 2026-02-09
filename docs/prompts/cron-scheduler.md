@@ -525,7 +525,7 @@ cron:
 
 channels:
   signal:
-    db_path: ./data/signal.db
+    db_path: ./db/signal.db
 
 provider:
   name: anthropic

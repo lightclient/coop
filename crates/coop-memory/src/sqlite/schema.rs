@@ -1,8 +1,10 @@
 use anyhow::Result;
 use rusqlite::{Connection, types::Value};
+use tracing::warn;
 
 use crate::types::MemoryQuery;
 
+#[allow(clippy::too_many_lines)]
 pub(super) fn init_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "
@@ -35,6 +37,16 @@ pub(super) fn init_schema(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_obs_trust ON observations(min_trust);
         CREATE INDEX IF NOT EXISTS idx_obs_hash ON observations(agent_id, hash);
 
+        CREATE TABLE IF NOT EXISTS observation_embeddings (
+            observation_id INTEGER PRIMARY KEY,
+            embedding TEXT NOT NULL,
+            dimensions INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            FOREIGN KEY(observation_id) REFERENCES observations(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_obs_embedding_dims ON observation_embeddings(dimensions);
+
         CREATE VIRTUAL TABLE IF NOT EXISTS observations_fts USING fts5(
             title,
             narrative,
@@ -63,7 +75,7 @@ pub(super) fn init_schema(conn: &Connection) -> Result<()> {
 
         CREATE TABLE IF NOT EXISTS observation_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            observation_id INTEGER NOT NULL REFERENCES observations(id),
+            observation_id INTEGER NOT NULL REFERENCES observations(id) ON DELETE CASCADE,
             old_title TEXT,
             old_facts TEXT,
             new_title TEXT,
@@ -73,6 +85,36 @@ pub(super) fn init_schema(conn: &Connection) -> Result<()> {
         );
 
         CREATE INDEX IF NOT EXISTS idx_history_obs ON observation_history(observation_id);
+
+        CREATE TABLE IF NOT EXISTS observation_archive (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            original_observation_id INTEGER NOT NULL,
+            agent_id TEXT NOT NULL,
+            session_key TEXT,
+            store TEXT NOT NULL,
+            type TEXT NOT NULL,
+            title TEXT NOT NULL,
+            narrative TEXT,
+            facts TEXT NOT NULL,
+            tags TEXT NOT NULL,
+            source TEXT,
+            related_files TEXT NOT NULL,
+            related_people TEXT NOT NULL,
+            hash TEXT NOT NULL,
+            mention_count INTEGER NOT NULL,
+            token_count INTEGER,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            expires_at INTEGER,
+            min_trust TEXT NOT NULL,
+            archived_at INTEGER NOT NULL,
+            archive_reason TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_obs_archive_agent_created
+            ON observation_archive(agent_id, archived_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_obs_archive_original
+            ON observation_archive(agent_id, original_observation_id);
 
         CREATE TABLE IF NOT EXISTS session_summaries (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -102,28 +144,67 @@ pub(super) fn init_schema(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+pub(super) fn init_vector_schema(conn: &Connection, dimensions: Option<usize>) -> bool {
+    let Some(dimensions) = dimensions else {
+        return false;
+    };
+
+    let sql = format!(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS observations_vec USING vec0(embedding float[{dimensions}]);"
+    );
+
+    match conn.execute_batch(&sql) {
+        Ok(()) => true,
+        Err(error) => {
+            warn!(
+                error = %error,
+                dimensions,
+                "sqlite-vec unavailable, falling back to FTS-only retrieval"
+            );
+            false
+        }
+    }
+}
+
 pub(super) fn append_filters(sql: &mut String, params: &mut Vec<Value>, query: &MemoryQuery) {
+    append_filters_with_prefix(sql, params, query, "");
+}
+
+pub(super) fn append_filters_with_prefix(
+    sql: &mut String,
+    params: &mut Vec<Value>,
+    query: &MemoryQuery,
+    prefix: &str,
+) {
     if !query.stores.is_empty() {
-        sql.push_str(" AND store IN (");
+        sql.push_str(" AND ");
+        sql.push_str(prefix);
+        sql.push_str("store IN (");
         append_placeholders(sql, query.stores.len());
         sql.push(')');
         params.extend(query.stores.iter().cloned().map(Value::from));
     }
 
     if !query.types.is_empty() {
-        sql.push_str(" AND type IN (");
+        sql.push_str(" AND ");
+        sql.push_str(prefix);
+        sql.push_str("type IN (");
         append_placeholders(sql, query.types.len());
         sql.push(')');
         params.extend(query.types.iter().cloned().map(Value::from));
     }
 
     if let Some(after) = query.after {
-        sql.push_str(" AND created_at >= ?");
+        sql.push_str(" AND ");
+        sql.push_str(prefix);
+        sql.push_str("created_at >= ?");
         params.push(Value::from(after.timestamp_millis()));
     }
 
     if let Some(before) = query.before {
-        sql.push_str(" AND created_at <= ?");
+        sql.push_str(" AND ");
+        sql.push_str(prefix);
+        sql.push_str("created_at <= ?");
         params.push(Value::from(before.timestamp_millis()));
     }
 }

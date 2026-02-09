@@ -3,7 +3,8 @@ use async_trait::async_trait;
 use coop_core::SessionKey;
 
 use crate::types::{
-    MemoryQuery, NewObservation, Observation, ObservationHistoryEntry, ObservationIndex, Person,
+    MemoryMaintenanceConfig, MemoryMaintenanceReport, MemoryQuery, NewObservation, Observation,
+    ObservationHistoryEntry, ObservationIndex, Person, ReconcileDecision, ReconcileRequest,
     SessionSummary, WriteOutcome,
 };
 
@@ -20,6 +21,11 @@ pub trait EmbeddingProvider: Send + Sync {
     }
 
     fn dimensions(&self) -> usize;
+}
+
+#[async_trait]
+pub trait Reconciler: Send + Sync {
+    async fn reconcile(&self, request: &ReconcileRequest) -> Result<ReconcileDecision>;
 }
 
 #[async_trait]
@@ -42,4 +48,9 @@ pub trait Memory: Send + Sync {
     async fn summarize_session(&self, session_key: &SessionKey) -> Result<SessionSummary>;
 
     async fn history(&self, observation_id: i64) -> Result<Vec<ObservationHistoryEntry>>;
+
+    async fn run_maintenance(
+        &self,
+        config: &MemoryMaintenanceConfig,
+    ) -> Result<MemoryMaintenanceReport>;
 }

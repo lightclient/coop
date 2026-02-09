@@ -47,14 +47,20 @@ pub(super) fn observation_from_row(row: &Row<'_>) -> rusqlite::Result<Observatio
 }
 
 #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
-pub(super) fn score_row(row: &RawIndex, now_ms: i64, has_text_query: bool) -> f32 {
+pub(super) fn score_row(
+    row: &RawIndex,
+    now_ms: i64,
+    has_text_query: bool,
+    vector_similarity: Option<f32>,
+) -> f32 {
     let recency_days = ((now_ms - row.updated_at).max(0) as f32) / DAY_MS;
     let recency_score = 1.0 / (1.0 + recency_days);
     let mention_score = (row.mention_count as f32 / 10.0).min(1.0);
 
     if has_text_query {
         let fts_score = 1.0 / (1.0 + row.fts_raw.abs() as f32);
-        0.6 * fts_score + 0.2 * recency_score + 0.2 * mention_score
+        let vector_score = vector_similarity.unwrap_or(0.0).clamp(0.0, 1.0);
+        0.45 * fts_score + 0.25 * vector_score + 0.15 * recency_score + 0.15 * mention_score
     } else {
         0.7 * recency_score + 0.3 * mention_score
     }
@@ -88,6 +94,15 @@ pub(super) fn observation_hash(title: &str, facts: &[String]) -> String {
 
 pub(super) fn to_json(values: &[String]) -> String {
     serde_json::to_string(values).unwrap_or_else(|_| "[]".to_owned())
+}
+
+pub(super) fn fts_query(text: &str) -> String {
+    text.split_whitespace()
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(|token| format!("\"{}\"", token.replace('"', " ")))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 pub(super) fn from_json(raw: &str) -> Vec<String> {

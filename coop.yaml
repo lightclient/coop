@@ -10,11 +10,11 @@ users:
 
 channels:
   signal:
-    db_path: ./data/signal.db
+    db_path: ./db/signal.db
 
 provider:
   name: anthropic
   # API key from env: ANTHROPIC_API_KEY
 
 memory:
-  db_path: ./data/memory.db
+  db_path: ./db/memory.db

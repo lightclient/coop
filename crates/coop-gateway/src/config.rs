@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use coop_core::TrustLevel;
+use coop_memory::MemoryMaintenanceConfig;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tracing::debug;
@@ -62,6 +63,10 @@ pub(crate) struct MemoryConfig {
     pub db_path: String,
     #[serde(default)]
     pub embedding: Option<MemoryEmbeddingConfig>,
+    #[serde(default)]
+    pub prompt_index: MemoryPromptIndexConfig,
+    #[serde(default)]
+    pub retention: MemoryRetentionConfig,
 }
 
 impl Default for MemoryConfig {
@@ -69,6 +74,69 @@ impl Default for MemoryConfig {
         Self {
             db_path: default_memory_db_path(),
             embedding: None,
+            prompt_index: MemoryPromptIndexConfig::default(),
+            retention: MemoryRetentionConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct MemoryPromptIndexConfig {
+    #[serde(default = "default_prompt_index_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_prompt_index_limit")]
+    pub limit: usize,
+    #[serde(default = "default_prompt_index_max_tokens")]
+    pub max_tokens: usize,
+}
+
+impl Default for MemoryPromptIndexConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_prompt_index_enabled(),
+            limit: default_prompt_index_limit(),
+            max_tokens: default_prompt_index_max_tokens(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct MemoryRetentionConfig {
+    #[serde(default = "default_memory_retention_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_memory_archive_after_days")]
+    pub archive_after_days: i64,
+    #[serde(default = "default_memory_delete_archive_after_days")]
+    pub delete_archive_after_days: i64,
+    #[serde(default = "default_memory_compress_after_days")]
+    pub compress_after_days: i64,
+    #[serde(default = "default_memory_compression_min_cluster_size")]
+    pub compression_min_cluster_size: usize,
+    #[serde(default = "default_memory_max_rows_per_run")]
+    pub max_rows_per_run: usize,
+}
+
+impl Default for MemoryRetentionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_memory_retention_enabled(),
+            archive_after_days: default_memory_archive_after_days(),
+            delete_archive_after_days: default_memory_delete_archive_after_days(),
+            compress_after_days: default_memory_compress_after_days(),
+            compression_min_cluster_size: default_memory_compression_min_cluster_size(),
+            max_rows_per_run: default_memory_max_rows_per_run(),
+        }
+    }
+}
+
+impl MemoryRetentionConfig {
+    pub(crate) fn to_maintenance_config(&self) -> MemoryMaintenanceConfig {
+        MemoryMaintenanceConfig {
+            archive_after_days: self.archive_after_days,
+            delete_archive_after_days: self.delete_archive_after_days,
+            compress_after_days: self.compress_after_days,
+            compression_min_cluster_size: self.compression_min_cluster_size,
+            max_rows_per_run: self.max_rows_per_run,
         }
     }
 }
@@ -78,6 +146,37 @@ pub(crate) struct MemoryEmbeddingConfig {
     pub provider: String,
     pub model: String,
     pub dimensions: usize,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub api_key_env: Option<String>,
+}
+
+impl MemoryEmbeddingConfig {
+    pub(crate) fn normalized_provider(&self) -> String {
+        self.provider.trim().to_ascii_lowercase()
+    }
+
+    pub(crate) fn is_supported_provider(&self) -> bool {
+        matches!(
+            self.normalized_provider().as_str(),
+            "openai" | "voyage" | "cohere" | "openai-compatible"
+        )
+    }
+
+    pub(crate) fn required_api_key_env(&self) -> Option<String> {
+        match self.normalized_provider().as_str() {
+            "openai" => Some("OPENAI_API_KEY".to_owned()),
+            "voyage" => Some("VOYAGE_API_KEY".to_owned()),
+            "cohere" => Some("COHERE_API_KEY".to_owned()),
+            "openai-compatible" => self
+                .api_key_env
+                .as_ref()
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty()),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -104,7 +203,43 @@ fn default_provider() -> String {
 }
 
 fn default_memory_db_path() -> String {
-    "./data/memory.db".to_owned()
+    "./db/memory.db".to_owned()
+}
+
+const fn default_prompt_index_enabled() -> bool {
+    true
+}
+
+const fn default_prompt_index_limit() -> usize {
+    12
+}
+
+const fn default_prompt_index_max_tokens() -> usize {
+    1_200
+}
+
+const fn default_memory_retention_enabled() -> bool {
+    true
+}
+
+const fn default_memory_archive_after_days() -> i64 {
+    30
+}
+
+const fn default_memory_delete_archive_after_days() -> i64 {
+    365
+}
+
+const fn default_memory_compress_after_days() -> i64 {
+    14
+}
+
+const fn default_memory_compression_min_cluster_size() -> usize {
+    3
+}
+
+const fn default_memory_max_rows_per_run() -> usize {
+    200
 }
 
 impl Config {
@@ -186,7 +321,16 @@ agent:
         assert_eq!(config.agent.model, "anthropic/claude-sonnet-4-20250514");
         assert!(config.users.is_empty());
         assert!(config.channels.signal.is_none());
-        assert_eq!(config.memory.db_path, "./data/memory.db");
+        assert_eq!(config.memory.db_path, "./db/memory.db");
+        assert!(config.memory.prompt_index.enabled);
+        assert_eq!(config.memory.prompt_index.limit, 12);
+        assert_eq!(config.memory.prompt_index.max_tokens, 1_200);
+        assert!(config.memory.retention.enabled);
+        assert_eq!(config.memory.retention.archive_after_days, 30);
+        assert_eq!(config.memory.retention.delete_archive_after_days, 365);
+        assert_eq!(config.memory.retention.compress_after_days, 14);
+        assert_eq!(config.memory.retention.compression_min_cluster_size, 3);
+        assert_eq!(config.memory.retention.max_rows_per_run, 200);
         assert!(config.cron.is_empty());
     }
 
@@ -208,7 +352,7 @@ users:
 
 channels:
   signal:
-    db_path: ./data/signal.db
+    db_path: ./db/signal.db
 
 provider:
   name: anthropic
@@ -220,10 +364,15 @@ provider:
         assert_eq!(config.users[1].trust, TrustLevel::Inner);
         assert_eq!(
             config.channels.signal.unwrap().db_path,
-            "./data/signal.db".to_owned()
+            "./db/signal.db".to_owned()
         );
         assert_eq!(config.provider.name, "anthropic");
-        assert_eq!(config.memory.db_path, "./data/memory.db");
+        assert_eq!(config.memory.db_path, "./db/memory.db");
+        assert!(config.memory.prompt_index.enabled);
+        assert_eq!(config.memory.prompt_index.limit, 12);
+        assert_eq!(config.memory.prompt_index.max_tokens, 1_200);
+        assert!(config.memory.retention.enabled);
+        assert_eq!(config.memory.retention.archive_after_days, 30);
     }
 
     #[test]
@@ -304,6 +453,17 @@ agent:
   model: test
 memory:
   db_path: ./state/memory.db
+  prompt_index:
+    enabled: false
+    limit: 5
+    max_tokens: 300
+  retention:
+    enabled: true
+    archive_after_days: 10
+    delete_archive_after_days: 20
+    compress_after_days: 4
+    compression_min_cluster_size: 2
+    max_rows_per_run: 50
   embedding:
     provider: voyage
     model: voyage-3-large
@@ -311,10 +471,46 @@ memory:
 ";
         let config: Config = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.memory.db_path, "./state/memory.db");
+        assert!(!config.memory.prompt_index.enabled);
+        assert_eq!(config.memory.prompt_index.limit, 5);
+        assert_eq!(config.memory.prompt_index.max_tokens, 300);
+        assert!(config.memory.retention.enabled);
+        assert_eq!(config.memory.retention.archive_after_days, 10);
+        assert_eq!(config.memory.retention.delete_archive_after_days, 20);
+        assert_eq!(config.memory.retention.compress_after_days, 4);
+        assert_eq!(config.memory.retention.compression_min_cluster_size, 2);
+        assert_eq!(config.memory.retention.max_rows_per_run, 50);
         let embedding = config.memory.embedding.as_ref().unwrap();
         assert_eq!(embedding.provider, "voyage");
         assert_eq!(embedding.model, "voyage-3-large");
         assert_eq!(embedding.dimensions, 1024);
+    }
+
+    #[test]
+    fn parse_config_with_openai_compatible_embedding() {
+        let yaml = "
+agent:
+  id: coop
+  model: test
+memory:
+  embedding:
+    provider: openai-compatible
+    model: text-embedding-3-small
+    dimensions: 1536
+    base_url: https://example.test/v1
+    api_key_env: OPENAI_COMPAT_API_KEY
+";
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let embedding = config.memory.embedding.as_ref().unwrap();
+        assert_eq!(embedding.provider, "openai-compatible");
+        assert_eq!(
+            embedding.base_url.as_deref(),
+            Some("https://example.test/v1")
+        );
+        assert_eq!(
+            embedding.api_key_env.as_deref(),
+            Some("OPENAI_COMPAT_API_KEY")
+        );
     }
 
     #[test]

@@ -34,6 +34,7 @@ cron = "0.15.0"
 crossterm = { workspace = true }
 futures = { workspace = true }
 qr2term = { workspace = true, optional = true }
+reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
