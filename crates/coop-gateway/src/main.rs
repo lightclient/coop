@@ -440,10 +440,13 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
         shutdown_token.clone(),
     );
 
+    let cron_notify = Arc::new(tokio::sync::Notify::new());
+
     let _config_watcher = config_watcher::spawn_config_watcher(
         config_file,
         Arc::clone(&shared),
         shutdown_token.clone(),
+        Some(Arc::clone(&cron_notify)),
     );
 
     #[cfg(feature = "signal")]
@@ -460,8 +463,16 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
         let sched_config = Arc::clone(&shared);
         let sched_router = Arc::clone(&router);
         let sched_token = shutdown_token.clone();
+        let sched_notify = Arc::clone(&cron_notify);
         tokio::spawn(async move {
-            scheduler::run_scheduler(sched_config, sched_router, deliver_tx, sched_token).await;
+            scheduler::run_scheduler_with_notify(
+                sched_config,
+                sched_router,
+                deliver_tx,
+                sched_token,
+                Some(sched_notify),
+            )
+            .await;
         });
     }
 
@@ -687,6 +698,7 @@ async fn cmd_chat(config_path: Option<&str>, user_flag: Option<&str>) -> Result<
         config_file,
         Arc::clone(&shared),
         shutdown_token.clone(),
+        None,
     );
 
     let session_key = gateway.default_session_key();

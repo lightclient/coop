@@ -13,15 +13,19 @@ use crate::config_check;
 /// Fields that require a process restart (`agent.id`, `agent.workspace`,
 /// `provider.name`, `channels`, `memory.db_path`, `memory.embedding`) are
 /// guarded — the reload is rejected if any of those change.
+///
+/// If `cron_notify` is provided, it is notified whenever cron entries change
+/// so the scheduler can wake from its sleep and re-evaluate.
 pub(crate) fn spawn_config_watcher(
     config_path: PathBuf,
     config: SharedConfig,
     shutdown: CancellationToken,
+    cron_notify: Option<Arc<tokio::sync::Notify>>,
 ) -> tokio::task::JoinHandle<()> {
     let span = info_span!("config_watcher", path = %config_path.display());
     tokio::spawn(
         async move {
-            config_poll_loop(&config_path, &config, shutdown).await;
+            config_poll_loop(&config_path, &config, shutdown, cron_notify.as_deref()).await;
         }
         .instrument(span),
     )
@@ -30,7 +34,12 @@ pub(crate) fn spawn_config_watcher(
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 const DEBOUNCE: Duration = Duration::from_millis(200);
 
-async fn config_poll_loop(config_path: &Path, config: &SharedConfig, shutdown: CancellationToken) {
+async fn config_poll_loop(
+    config_path: &Path,
+    config: &SharedConfig,
+    shutdown: CancellationToken,
+    cron_notify: Option<&tokio::sync::Notify>,
+) {
     let mut last_modified = file_modified(config_path);
     info!("config watcher started");
 
@@ -52,7 +61,14 @@ async fn config_poll_loop(config_path: &Path, config: &SharedConfig, shutdown: C
         // Debounce: editors often write-rename-delete in quick succession.
         tokio::time::sleep(DEBOUNCE).await;
 
+        let old_cron = config.load().cron.clone();
         try_reload(config_path, config);
+
+        if let Some(notify) = cron_notify
+            && config.load().cron != old_cron
+        {
+            notify.notify_one();
+        }
     }
 }
 
@@ -333,7 +349,8 @@ mod tests {
         let config = shared_config(Config::load(&path).unwrap());
         let shutdown = CancellationToken::new();
 
-        let handle = spawn_config_watcher(path.clone(), Arc::clone(&config), shutdown.clone());
+        let handle =
+            spawn_config_watcher(path.clone(), Arc::clone(&config), shutdown.clone(), None);
 
         // Wait for the watcher to start
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -363,7 +380,7 @@ mod tests {
         let config = shared_config(Config::load(&path).unwrap());
         let shutdown = CancellationToken::new();
 
-        let handle = spawn_config_watcher(path, Arc::clone(&config), shutdown.clone());
+        let handle = spawn_config_watcher(path, Arc::clone(&config), shutdown.clone(), None);
 
         tokio::time::sleep(Duration::from_millis(100)).await;
         shutdown.cancel();

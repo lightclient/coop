@@ -74,16 +74,28 @@ pub(crate) fn parse_cron(expr: &str) -> Result<Schedule> {
         .map_err(|e| anyhow::anyhow!("invalid cron expression '{expr}': {e}"))
 }
 
-/// How often to re-check config when no cron entries are configured.
-const CONFIG_POLL_INTERVAL: Duration = Duration::from_secs(10);
-
+#[cfg(test)]
 pub(crate) async fn run_scheduler(
     config: SharedConfig,
     router: Arc<MessageRouter>,
     deliver_tx: Option<DeliverySender>,
     shutdown: CancellationToken,
 ) {
+    run_scheduler_with_notify(config, router, deliver_tx, shutdown, None).await;
+}
+
+pub(crate) async fn run_scheduler_with_notify(
+    config: SharedConfig,
+    router: Arc<MessageRouter>,
+    deliver_tx: Option<DeliverySender>,
+    shutdown: CancellationToken,
+    cron_notify: Option<Arc<tokio::sync::Notify>>,
+) {
     info!("scheduler started");
+
+    // Default notify that is never triggered — simplifies select! below.
+    let default_notify = tokio::sync::Notify::new();
+    let notify = cron_notify.as_deref().unwrap_or(&default_notify);
 
     let mut last_cron: Vec<CronConfig> = Vec::new();
     let mut parsed: Vec<(CronConfig, Schedule)> = Vec::new();
@@ -106,16 +118,6 @@ pub(crate) async fn run_scheduler(
         // Drop the config snapshot so it isn't held across the sleep.
         drop(snapshot);
 
-        if parsed.is_empty() {
-            tokio::select! {
-                () = tokio::time::sleep(CONFIG_POLL_INTERVAL) => continue,
-                () = shutdown.cancelled() => {
-                    info!("scheduler shutting down");
-                    return;
-                }
-            }
-        }
-
         let now = Utc::now();
         let next = parsed
             .iter()
@@ -123,9 +125,10 @@ pub(crate) async fn run_scheduler(
             .min_by_key(|(_, t)| *t);
 
         let Some((cfg, fire_time)) = next else {
-            // All schedules exhausted (shouldn't happen for recurring cron).
+            // No cron entries or all schedules exhausted — wait for config
+            // change or shutdown.
             tokio::select! {
-                () = tokio::time::sleep(CONFIG_POLL_INTERVAL) => continue,
+                () = notify.notified() => continue,
                 () = shutdown.cancelled() => {
                     info!("scheduler shutting down");
                     return;
@@ -135,28 +138,26 @@ pub(crate) async fn run_scheduler(
 
         let delay = (fire_time - now).to_std().unwrap_or(Duration::ZERO);
 
-        // Cap sleep so we notice config changes within CONFIG_POLL_INTERVAL.
-        let capped = delay.min(CONFIG_POLL_INTERVAL);
-
         debug!(
             cron.name = %cfg.name,
             fire_time = %fire_time,
             delay_secs = delay.as_secs(),
-            "scheduler sleeping until next cron"
+            "scheduler waiting for next cron"
         );
 
         tokio::select! {
-            () = tokio::time::sleep(capped) => {
-                // Only fire if we've actually reached the scheduled time.
-                if Utc::now() >= fire_time {
-                    let cfg = cfg.clone();
-                    let router = Arc::clone(&router);
-                    let deliver_tx = deliver_tx.clone();
-                    let sched_config = Arc::clone(&config);
-                    tokio::spawn(async move {
-                        fire_cron(&cfg, &router, deliver_tx.as_ref(), &sched_config).await;
-                    });
-                }
+            () = tokio::time::sleep(delay) => {
+                let cfg = cfg.clone();
+                let router = Arc::clone(&router);
+                let deliver_tx = deliver_tx.clone();
+                let sched_config = Arc::clone(&config);
+                tokio::spawn(async move {
+                    fire_cron(&cfg, &router, deliver_tx.as_ref(), &sched_config).await;
+                });
+            }
+            () = notify.notified() => {
+                // Config changed — re-evaluate cron entries on next iteration.
+                debug!("scheduler woken by config change");
             }
             () = shutdown.cancelled() => {
                 info!("scheduler shutting down");
@@ -853,17 +854,20 @@ mod tests {
         let (shared, router, gateway) = make_shared_config_and_router(None, &[], "hot reload ok");
         let router = Arc::new(router);
         let cancel = CancellationToken::new();
+        let notify = Arc::new(tokio::sync::Notify::new());
 
         let sched_shared = Arc::clone(&shared);
         let sched_cancel = cancel.clone();
+        let sched_notify = Arc::clone(&notify);
         let handle = tokio::spawn(async move {
-            run_scheduler(sched_shared, router, None, sched_cancel).await;
+            run_scheduler_with_notify(sched_shared, router, None, sched_cancel, Some(sched_notify))
+                .await;
         });
 
-        // Give the scheduler time to start and enter its empty-poll loop.
+        // Give the scheduler time to start and enter its wait.
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        // Simulate hot-reload: add a cron entry via SharedConfig.
+        // Simulate hot-reload: add a cron entry and notify the scheduler.
         let mut new_config = shared.load().as_ref().clone();
         new_config.cron = vec![CronConfig {
             name: "hotcron".to_owned(),
@@ -873,9 +877,10 @@ mod tests {
             deliver: None,
         }];
         shared.store(Arc::new(new_config));
+        notify.notify_one();
 
-        // Wait for the scheduler to pick up the change and fire.
-        tokio::time::sleep(Duration::from_secs(12)).await;
+        // Scheduler wakes immediately, parses new cron, fires within ~1s.
+        tokio::time::sleep(Duration::from_secs(2)).await;
         cancel.cancel();
         let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
 
