@@ -7,8 +7,11 @@
   nicely
 - ~~log rotation~~ ✅ **DONE** - Size and date-based rotation implemented
 - Don't save keys to memory!!!
-- need to be able to run coop in a way that it can restart itself
-- add coop specific info to system prompt 
+- handle timezone in cron
+- need better per-user tracking of memories
+- let user interject in the middle of a stream with new prompt / info
+- inject user AGENTS.md
+- trace-follow also needs to create destination folder if it doesn't exist
 
 ## Gateway
 
