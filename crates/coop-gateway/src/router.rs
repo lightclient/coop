@@ -7,7 +7,7 @@ use tracing::{Instrument, debug, info, info_span};
 
 use std::sync::Arc;
 
-use crate::config::Config;
+use crate::config::{Config, SharedConfig};
 use crate::gateway::Gateway;
 use crate::trust::resolve_trust;
 
@@ -20,17 +20,17 @@ pub(crate) struct RouteDecision {
 
 #[derive(Clone)]
 pub(crate) struct MessageRouter {
-    config: Config,
+    config: SharedConfig,
     gateway: Arc<Gateway>,
 }
 
 impl MessageRouter {
-    pub(crate) fn new(config: Config, gateway: Arc<Gateway>) -> Self {
+    pub(crate) fn new(config: SharedConfig, gateway: Arc<Gateway>) -> Self {
         Self { config, gateway }
     }
 
     pub(crate) fn route(&self, msg: &InboundMessage) -> RouteDecision {
-        route_message(msg, &self.config)
+        route_message(msg, &self.config.load())
     }
 
     #[allow(dead_code)]
@@ -340,6 +340,7 @@ fn parse_explicit_session_kind(session: &str, agent_id: &str) -> Option<SessionK
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::shared_config;
     use chrono::Utc;
     use coop_core::Provider;
     use coop_core::fakes::FakeProvider;
@@ -605,9 +606,10 @@ users:
         let config = test_config();
         let provider: Arc<dyn Provider> = Arc::new(FakeProvider::new("hello from fake"));
         let executor = Arc::new(DefaultExecutor::new());
+        let shared = shared_config(config);
         let gateway = Arc::new(
             Gateway::new(
-                config.clone(),
+                Arc::clone(&shared),
                 workspace.path().to_path_buf(),
                 provider,
                 executor,
@@ -616,7 +618,7 @@ users:
             )
             .unwrap(),
         );
-        let router = MessageRouter::new(config, Arc::clone(&gateway));
+        let router = MessageRouter::new(shared, Arc::clone(&gateway));
 
         let msg = inbound("signal", "alice-uuid", None, false, None);
         let (event_tx, mut event_rx) = mpsc::channel(32);
@@ -697,9 +699,10 @@ users:
             "Anthropic API error: 500 - overloaded",
         ));
         let executor = Arc::new(DefaultExecutor::new());
+        let shared = shared_config(config);
         let gateway = Arc::new(
             Gateway::new(
-                config.clone(),
+                Arc::clone(&shared),
                 workspace.path().to_path_buf(),
                 provider,
                 executor,
@@ -708,7 +711,7 @@ users:
             )
             .unwrap(),
         );
-        let router = MessageRouter::new(config, gateway);
+        let router = MessageRouter::new(shared, gateway);
 
         // alice has trust: full, so she should see the real error
         let msg = inbound("signal", "alice-uuid", None, false, None);
@@ -729,9 +732,10 @@ users:
         let provider: Arc<dyn Provider> =
             Arc::new(FakeProvider::new("should not reach LLM for public user"));
         let executor = Arc::new(DefaultExecutor::new());
+        let shared = shared_config(config);
         let gateway = Arc::new(
             Gateway::new(
-                config.clone(),
+                Arc::clone(&shared),
                 workspace.path().to_path_buf(),
                 provider,
                 executor,
@@ -740,7 +744,7 @@ users:
             )
             .unwrap(),
         );
-        let router = MessageRouter::new(config, Arc::clone(&gateway));
+        let router = MessageRouter::new(shared, Arc::clone(&gateway));
 
         // mallory is unknown → public trust, should be silently rejected
         let msg = inbound("signal", "mallory-uuid", None, false, None);
@@ -813,9 +817,10 @@ users:
         let config = test_config();
         let provider: Arc<dyn Provider> = Arc::new(FakeProvider::new("hi from fake"));
         let executor = Arc::new(DefaultExecutor::new());
+        let shared = shared_config(config);
         let gateway = Arc::new(
             Gateway::new(
-                config.clone(),
+                Arc::clone(&shared),
                 workspace.path().to_path_buf(),
                 provider,
                 executor,
@@ -824,7 +829,7 @@ users:
             )
             .unwrap(),
         );
-        let router = MessageRouter::new(config, gateway);
+        let router = MessageRouter::new(shared, gateway);
 
         let msg = inbound("signal", "alice-uuid", None, false, None);
         let (decision, response) = router.dispatch_collect_text(&msg).await.unwrap();
@@ -840,9 +845,10 @@ users:
         let workspace = test_workspace();
         let provider: Arc<dyn Provider> = Arc::new(FakeProvider::new("should not reach LLM"));
         let executor = Arc::new(DefaultExecutor::new());
+        let shared = shared_config(config.clone());
         let gateway = Arc::new(
             Gateway::new(
-                config.clone(),
+                Arc::clone(&shared),
                 workspace.path().to_path_buf(),
                 provider,
                 executor,
@@ -851,7 +857,7 @@ users:
             )
             .unwrap(),
         );
-        let router = MessageRouter::new(config.clone(), Arc::clone(&gateway));
+        let router = MessageRouter::new(shared, Arc::clone(&gateway));
         (router, gateway)
     }
 

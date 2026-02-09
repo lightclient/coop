@@ -19,12 +19,12 @@ use uuid::Uuid;
 
 use crate::compaction::{self, CompactionState};
 use crate::compaction_store::CompactionStore;
-use crate::config::Config;
+use crate::config::SharedConfig;
 use crate::memory_prompt_index;
 use crate::session_store::DiskSessionStore;
 
 pub(crate) struct Gateway {
-    config: Config,
+    config: SharedConfig,
     workspace: PathBuf,
     workspace_index: Mutex<WorkspaceIndex>,
     skills: Vec<SkillEntry>,
@@ -137,7 +137,7 @@ fn signal_target_from_session(session_key: &SessionKey) -> Option<(&'static str,
 
 impl Gateway {
     pub(crate) fn new(
-        config: Config,
+        config: SharedConfig,
         workspace: PathBuf,
         provider: Arc<dyn Provider>,
         executor: Arc<dyn ToolExecutor>,
@@ -192,11 +192,11 @@ impl Gateway {
                 debug!("workspace index refreshed");
             }
 
-            let mut builder =
-                PromptBuilder::new(self.workspace.clone(), self.config.agent.id.clone())
-                    .trust(trust)
-                    .model(&self.config.agent.model)
-                    .skills(self.skills.clone());
+            let cfg = self.config.load();
+            let mut builder = PromptBuilder::new(self.workspace.clone(), cfg.agent.id.clone())
+                .trust(trust)
+                .model(&cfg.agent.model)
+                .skills(self.skills.clone());
             if let Some(name) = user_name {
                 builder = builder.user(name);
             }
@@ -209,10 +209,11 @@ impl Gateway {
         };
 
         if let Some(memory) = &self.memory {
+            let cfg = self.config.load();
             match memory_prompt_index::build_prompt_index(
                 memory.as_ref(),
                 trust,
-                &self.config.memory.prompt_index,
+                &cfg.memory.prompt_index,
             )
             .await
             {
@@ -241,7 +242,7 @@ impl Gateway {
 
     pub(crate) fn default_session_key(&self) -> SessionKey {
         SessionKey {
-            agent_id: self.config.agent.id.clone(),
+            agent_id: self.config.load().agent.id.clone(),
             kind: SessionKind::Main,
         }
     }
@@ -261,7 +262,7 @@ impl Gateway {
     }
 
     pub(crate) fn resolve_session(&self, session: &str) -> Option<SessionKey> {
-        parse_session_key(session, &self.config.agent.id)
+        parse_session_key(session, &self.config.load().agent.id)
     }
 
     fn tool_context(
@@ -812,13 +813,13 @@ impl Gateway {
     }
 
     /// Agent model name from config.
-    pub(crate) fn model_name(&self) -> &str {
-        &self.config.agent.model
+    pub(crate) fn model_name(&self) -> String {
+        self.config.load().agent.model.clone()
     }
 
     /// Agent ID from config.
-    pub(crate) fn agent_id(&self) -> &str {
-        &self.config.agent.id
+    pub(crate) fn agent_id(&self) -> String {
+        self.config.load().agent.id.clone()
     }
 
     /// Context window size in tokens.
@@ -1038,7 +1039,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use crate::config::Config;
+    use crate::config::{Config, shared_config};
 
     struct RecordingTypingNotifier {
         events: tokio::sync::Mutex<Vec<bool>>,
@@ -1274,7 +1275,7 @@ agent:
         let executor = Arc::new(DefaultExecutor::new());
         let gateway = Arc::new(
             Gateway::new(
-                test_config(),
+                shared_config(test_config()),
                 workspace.path().to_path_buf(),
                 provider,
                 executor,
@@ -1333,7 +1334,7 @@ agent:
         let executor = Arc::new(DefaultExecutor::new());
         let gateway = Arc::new(
             Gateway::new(
-                test_config(),
+                shared_config(test_config()),
                 workspace.path().to_path_buf(),
                 provider,
                 executor,
@@ -1396,7 +1397,7 @@ agent:
         let executor = Arc::new(DefaultExecutor::new());
         let gateway = Arc::new(
             Gateway::new(
-                test_config(),
+                shared_config(test_config()),
                 workspace.path().to_path_buf(),
                 provider,
                 executor,
@@ -1448,7 +1449,7 @@ agent:
         let typing_notifier: Arc<dyn TypingNotifier> = Arc::clone(&notifier) as _;
 
         let gateway = Gateway::new(
-            test_config(),
+            shared_config(test_config()),
             workspace.path().to_path_buf(),
             provider,
             executor,
@@ -1668,7 +1669,7 @@ agent:
         let executor = Arc::new(DefaultExecutor::new());
         let gateway = Arc::new(
             Gateway::new(
-                test_config(),
+                shared_config(test_config()),
                 workspace.path().to_path_buf(),
                 provider,
                 executor,
@@ -1726,7 +1727,7 @@ agent:
         let provider: Arc<dyn Provider> = Arc::new(FakeProvider::new("hello"));
         let executor = Arc::new(DefaultExecutor::new());
         let gateway = Gateway::new(
-            test_config(),
+            shared_config(test_config()),
             workspace.path().to_path_buf(),
             provider,
             executor,
@@ -1748,7 +1749,7 @@ agent:
         let executor = Arc::new(DefaultExecutor::new());
         let gateway = Arc::new(
             Gateway::new(
-                test_config(),
+                shared_config(test_config()),
                 workspace.path().to_path_buf(),
                 provider as Arc<dyn Provider>,
                 executor,
