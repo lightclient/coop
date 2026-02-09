@@ -315,7 +315,7 @@ After linking, the gateway uses `Manager::load_registered()` on startup.
 # coop.yaml
 channels:
   signal:
-    db_path: ./data/signal.db
+    db_path: ./db/signal.db
 ```
 
 #### 2d. Reconnection
@@ -419,7 +419,7 @@ For Signal, responses are collected into a single text message (no streaming). F
 
 channels:
   signal:
-    db_path: ./data/signal.db
+    db_path: ./db/signal.db
 
 users:
   - name: alice

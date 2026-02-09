@@ -28,11 +28,13 @@ coop-agent = { path = "../coop-agent" }
 coop-channels = { path = "../coop-channels" }
 coop-core = { path = "../coop-core" }
 coop-ipc = { path = "../coop-ipc" }
+coop-memory = { version = "0.1.0", path = "../coop-memory" }
 coop-tui = { path = "../coop-tui" }
 cron = "0.15.0"
 crossterm = { workspace = true }
 futures = { workspace = true }
 qr2term = { workspace = true, optional = true }
+reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }

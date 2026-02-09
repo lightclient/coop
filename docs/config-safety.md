@@ -45,7 +45,7 @@ $ coop check
 ✓ workspace files: SOUL.md (287 tok), AGENTS.md (1204 tok)
 ✓ prompt builds successfully (2,891 / 30,000 tokens)
 ✓ users: alice (full), bob (inner)
-✓ channels: signal (db: ./data/signal.db)
+✓ channels: signal (db: ./db/signal.db)
 ✓ cron: 2 entries valid
 ✓ all checks passed
 

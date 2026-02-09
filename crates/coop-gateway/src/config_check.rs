@@ -129,6 +129,7 @@ impl CheckReport {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) fn validate_config(config_path: &Path, config_dir: &Path) -> CheckReport {
     let mut report = CheckReport::default();
 
@@ -221,15 +222,18 @@ pub(crate) fn validate_config(config_path: &Path, config_dir: &Path) -> CheckRep
         },
     });
 
-    // 6-7 depend on workspace
+    // 6. memory config
+    check_memory(&mut report, &config, config_dir);
+
+    // 7-8 depend on workspace
     if let Some(ref ws) = workspace {
         check_workspace_files(&mut report, ws, &config);
     }
 
-    // 8. users
+    // 9. users
     check_users(&mut report, &config);
 
-    // 9. signal_channel
+    // 10. signal_channel
     if let Some(ref signal) = config.channels.signal {
         let db_path = crate::tui_helpers::resolve_config_path(config_dir, &signal.db_path);
         let exists = db_path.exists();
@@ -245,10 +249,140 @@ pub(crate) fn validate_config(config_path: &Path, config_dir: &Path) -> CheckRep
         });
     }
 
-    // 10-12. cron checks
+    // 11-13. cron checks
     check_cron(&mut report, &config);
 
     report
+}
+
+#[allow(clippy::too_many_lines)]
+fn check_memory(report: &mut CheckReport, config: &Config, config_dir: &Path) {
+    let db_path = crate::tui_helpers::resolve_config_path(config_dir, &config.memory.db_path);
+    let (passed, message) = match db_path.parent() {
+        Some(parent) if parent.exists() && parent.is_dir() => {
+            (true, format!("memory db: {}", db_path.display()))
+        }
+        Some(parent) if !parent.exists() => (
+            true,
+            format!(
+                "memory db parent will be created on first start: {}",
+                parent.display()
+            ),
+        ),
+        Some(parent) => (
+            false,
+            format!("memory db parent is not a directory: {}", parent.display()),
+        ),
+        None => (
+            false,
+            format!("invalid memory db path: {}", db_path.display()),
+        ),
+    };
+
+    report.push(CheckResult {
+        name: "memory_db_path",
+        severity: Severity::Error,
+        passed,
+        message,
+    });
+
+    let prompt_index = &config.memory.prompt_index;
+    let prompt_index_valid = prompt_index.limit > 0 && prompt_index.max_tokens > 0;
+    report.push(CheckResult {
+        name: "memory_prompt_index",
+        severity: Severity::Error,
+        passed: prompt_index_valid,
+        message: if prompt_index_valid {
+            format!(
+                "memory.prompt_index: enabled={}, limit={}, max_tokens={}",
+                prompt_index.enabled, prompt_index.limit, prompt_index.max_tokens
+            )
+        } else {
+            "memory.prompt_index requires limit > 0 and max_tokens > 0".to_owned()
+        },
+    });
+
+    let retention = &config.memory.retention;
+    let retention_valid = retention.archive_after_days > 0
+        && retention.delete_archive_after_days > 0
+        && retention.compress_after_days > 0
+        && retention.compression_min_cluster_size > 1
+        && retention.max_rows_per_run > 0
+        && retention.delete_archive_after_days >= retention.archive_after_days;
+
+    report.push(CheckResult {
+        name: "memory_retention",
+        severity: Severity::Error,
+        passed: retention_valid,
+        message: if retention_valid {
+            format!(
+                "memory.retention: enabled={}, archive_after_days={}, delete_archive_after_days={}, compress_after_days={}, compression_min_cluster_size={}, max_rows_per_run={}",
+                retention.enabled,
+                retention.archive_after_days,
+                retention.delete_archive_after_days,
+                retention.compress_after_days,
+                retention.compression_min_cluster_size,
+                retention.max_rows_per_run,
+            )
+        } else {
+            "memory.retention requires positive day values, compression_min_cluster_size > 1, max_rows_per_run > 0, and delete_archive_after_days >= archive_after_days"
+                .to_owned()
+        },
+    });
+
+    if let Some(embedding) = &config.memory.embedding {
+        let provider = embedding.normalized_provider();
+        let has_required_fields = !provider.is_empty()
+            && !embedding.model.trim().is_empty()
+            && embedding.dimensions > 0
+            && embedding.dimensions <= 8_192
+            && embedding.is_supported_provider();
+
+        let provider_fields_valid = if provider == "openai-compatible" {
+            embedding.base_url.as_ref().is_some_and(|value| {
+                let trimmed = value.trim();
+                !trimmed.is_empty()
+                    && (trimmed.starts_with("http://") || trimmed.starts_with("https://"))
+            }) && embedding
+                .api_key_env
+                .as_ref()
+                .is_some_and(|value| !value.trim().is_empty())
+        } else {
+            true
+        };
+
+        let valid = has_required_fields && provider_fields_valid;
+
+        report.push(CheckResult {
+            name: "memory_embedding",
+            severity: Severity::Error,
+            passed: valid,
+            message: if valid {
+                format!(
+                    "embedding: provider={}, model={}, dimensions={}",
+                    provider, embedding.model, embedding.dimensions
+                )
+            } else {
+                "memory.embedding requires provider in {openai,voyage,cohere,openai-compatible}, non-empty model, dimensions in 1..=8192, and openai-compatible base_url/api_key_env"
+                    .to_owned()
+            },
+        });
+
+        if valid {
+            let env_var = embedding.required_api_key_env().unwrap_or_default();
+            let api_key_present = !env_var.is_empty() && std::env::var(&env_var).is_ok();
+            report.push(CheckResult {
+                name: "memory_embedding_api_key",
+                severity: Severity::Error,
+                passed: api_key_present,
+                message: if api_key_present {
+                    format!("{env_var}: present")
+                } else {
+                    format!("{env_var} environment variable not set")
+                },
+            });
+        }
+    }
 }
 
 fn check_workspace_files(report: &mut CheckReport, ws: &Path, config: &Config) {
@@ -421,7 +555,12 @@ mod tests {
         report
             .results
             .iter()
-            .filter(|r| r.severity == Severity::Error && !r.passed && r.name != "api_key_present")
+            .filter(|r| {
+                r.severity == Severity::Error
+                    && !r.passed
+                    && r.name != "api_key_present"
+                    && r.name != "memory_embedding_api_key"
+            })
             .collect()
     }
 
@@ -499,6 +638,159 @@ mod tests {
             .unwrap();
         assert!(!provider_check.passed);
         assert!(provider_check.message.contains("openai"));
+    }
+
+    #[test]
+    fn test_invalid_memory_embedding() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        let config_path = dir.path().join("coop.yaml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "agent:\n  id: test\n  model: test-model\n  workspace: {}\nmemory:\n  db_path: ./db/memory.db\n  embedding:\n    provider: ''\n    model: ''\n    dimensions: 0\n",
+                workspace.display()
+            ),
+        )
+        .unwrap();
+
+        let report = validate_config(&config_path, dir.path());
+        let embedding_check = report
+            .results
+            .iter()
+            .find(|r| r.name == "memory_embedding")
+            .unwrap();
+        assert!(!embedding_check.passed);
+    }
+
+    #[test]
+    fn test_embedding_dimension_upper_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        let config_path = dir.path().join("coop.yaml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "agent:\n  id: test\n  model: test-model\n  workspace: {}\nmemory:\n  embedding:\n    provider: openai\n    model: text-embedding-3-small\n    dimensions: 99999\n",
+                workspace.display()
+            ),
+        )
+        .unwrap();
+
+        let report = validate_config(&config_path, dir.path());
+        let embedding_check = report
+            .results
+            .iter()
+            .find(|r| r.name == "memory_embedding")
+            .unwrap();
+        assert!(!embedding_check.passed);
+    }
+
+    #[test]
+    fn test_openai_compatible_embedding_requires_extra_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        let config_path = dir.path().join("coop.yaml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "agent:\n  id: test\n  model: test-model\n  workspace: {}\nmemory:\n  embedding:\n    provider: openai-compatible\n    model: text-embedding-3-small\n    dimensions: 1536\n",
+                workspace.display()
+            ),
+        )
+        .unwrap();
+
+        let report = validate_config(&config_path, dir.path());
+        let embedding_check = report
+            .results
+            .iter()
+            .find(|r| r.name == "memory_embedding")
+            .unwrap();
+        assert!(!embedding_check.passed);
+    }
+
+    #[test]
+    fn test_memory_embedding_api_key_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        let config_path = dir.path().join("coop.yaml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "agent:\n  id: test\n  model: test-model\n  workspace: {}\nmemory:\n  db_path: ./db/memory.db\n  embedding:\n    provider: openai\n    model: text-embedding-3-small\n    dimensions: 8\n",
+                workspace.display()
+            ),
+        )
+        .unwrap();
+
+        let report = validate_config(&config_path, dir.path());
+        let api_key_check = report
+            .results
+            .iter()
+            .find(|r| r.name == "memory_embedding_api_key")
+            .unwrap();
+        assert_eq!(
+            api_key_check.passed,
+            std::env::var("OPENAI_API_KEY").is_ok()
+        );
+    }
+
+    #[test]
+    fn test_invalid_memory_prompt_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        let config_path = dir.path().join("coop.yaml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "agent:\n  id: test\n  model: test-model\n  workspace: {}\nmemory:\n  prompt_index:\n    enabled: true\n    limit: 0\n    max_tokens: 0\n",
+                workspace.display()
+            ),
+        )
+        .unwrap();
+
+        let report = validate_config(&config_path, dir.path());
+        let prompt_index_check = report
+            .results
+            .iter()
+            .find(|r| r.name == "memory_prompt_index")
+            .unwrap();
+        assert!(!prompt_index_check.passed);
+    }
+
+    #[test]
+    fn test_invalid_memory_retention() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        let config_path = dir.path().join("coop.yaml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "agent:\n  id: test\n  model: test-model\n  workspace: {}\nmemory:\n  retention:\n    enabled: true\n    archive_after_days: 30\n    delete_archive_after_days: 10\n    compress_after_days: 0\n    compression_min_cluster_size: 1\n    max_rows_per_run: 0\n",
+                workspace.display()
+            ),
+        )
+        .unwrap();
+
+        let report = validate_config(&config_path, dir.path());
+        let retention_check = report
+            .results
+            .iter()
+            .find(|r| r.name == "memory_retention")
+            .unwrap();
+        assert!(!retention_check.passed);
     }
 
     #[test]

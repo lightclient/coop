@@ -31,10 +31,12 @@ impl MessageRouter {
         route_message(msg, &self.config)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn session_is_empty(&self, session_key: &SessionKey) -> bool {
         self.gateway.session_is_empty(session_key)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn seed_signal_history(&self, session_key: &SessionKey, history: &[InboundMessage]) {
         self.gateway.seed_signal_history(session_key, history);
     }
@@ -441,6 +443,7 @@ users:
                 provider,
                 executor,
                 None,
+                None,
             )
             .unwrap(),
         );
@@ -532,6 +535,7 @@ users:
                 provider,
                 executor,
                 None,
+                None,
             )
             .unwrap(),
         );
@@ -563,6 +567,7 @@ users:
                 workspace.path().to_path_buf(),
                 provider,
                 executor,
+                None,
                 None,
             )
             .unwrap(),
@@ -597,6 +602,7 @@ users:
                 workspace.path().to_path_buf(),
                 provider,
                 executor,
+                None,
                 None,
             )
             .unwrap(),

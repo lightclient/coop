@@ -3,6 +3,8 @@
 ## Project
 
 - make it clear that deps like sccache need to be installed to compile
+- make the just follow trace script print the message and tool messages more
+  nicely
 
 ## Gateway
 

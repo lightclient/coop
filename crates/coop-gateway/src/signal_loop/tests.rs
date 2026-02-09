@@ -178,6 +178,7 @@ fn build_router(
             provider,
             executor,
             typing_notifier,
+            None,
         )
         .unwrap(),
     );

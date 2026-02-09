@@ -6,6 +6,10 @@ mod config_check;
 mod config_tool;
 mod config_write;
 mod gateway;
+mod memory_embedding;
+mod memory_prompt_index;
+mod memory_reconcile;
+mod memory_tools;
 mod router;
 mod scheduler;
 mod session_store;
@@ -25,22 +29,26 @@ use coop_ipc::{
     ClientMessage, IpcClient, IpcConnection, IpcServer, PROTOCOL_VERSION, ServerMessage,
     socket_path,
 };
+use coop_memory::{Memory, SqliteMemory};
 use coop_tui::{
     App, Container, DisplayMessage, Editor, Footer, InputAction, StatusLine, Tui, handle_key_event,
     poll_event,
 };
 use crossterm::event::Event;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::{Instrument, info, info_span, warn};
 
 use crate::cli::{Cli, Commands, SignalCommands};
-use crate::config::Config;
+use crate::config::{Config, MemoryRetentionConfig};
 use crate::gateway::Gateway;
+use crate::memory_embedding::build_embedder;
+use crate::memory_reconcile::ProviderReconciler;
+use crate::memory_tools::MemoryToolExecutor;
 use crate::router::MessageRouter;
 #[cfg(feature = "signal")]
 use crate::signal_loop::run_signal_loop;
@@ -137,6 +145,130 @@ fn cmd_check(config_path: Option<&str>, format: &str) -> Result<()> {
     Ok(())
 }
 
+fn init_memory_store(
+    config: &Config,
+    config_dir: &Path,
+    provider: Arc<dyn Provider>,
+) -> Result<Arc<dyn Memory>> {
+    let memory_db_path = tui_helpers::resolve_config_path(config_dir, &config.memory.db_path);
+    info!(path = %memory_db_path.display(), "initializing memory store");
+
+    if let Some(embedding) = &config.memory.embedding {
+        info!(
+            provider = %embedding.provider,
+            model = %embedding.model,
+            dimensions = embedding.dimensions,
+            "memory embedding configured"
+        );
+    }
+
+    let embedder = build_embedder(config.memory.embedding.as_ref())
+        .context("failed to initialize memory embedding provider")?;
+    let reconciler: Arc<dyn coop_memory::Reconciler> = Arc::new(ProviderReconciler::new(provider));
+
+    let memory: Arc<dyn Memory> = Arc::new(
+        SqliteMemory::open_with_components(
+            &memory_db_path,
+            config.agent.id.clone(),
+            embedder,
+            Some(reconciler),
+        )
+        .with_context(|| {
+            format!(
+                "failed to initialize memory db at {}",
+                memory_db_path.display()
+            )
+        })?,
+    );
+
+    Ok(memory)
+}
+
+fn spawn_memory_maintenance_loop(
+    memory: Arc<dyn Memory>,
+    retention: &MemoryRetentionConfig,
+    shutdown_token: CancellationToken,
+) -> Option<tokio::task::JoinHandle<()>> {
+    spawn_memory_maintenance_loop_with_interval(
+        memory,
+        retention,
+        shutdown_token,
+        Duration::from_secs(3600),
+    )
+}
+
+fn spawn_memory_maintenance_loop_with_interval(
+    memory: Arc<dyn Memory>,
+    retention: &MemoryRetentionConfig,
+    shutdown_token: CancellationToken,
+    interval_duration: Duration,
+) -> Option<tokio::task::JoinHandle<()>> {
+    if !retention.enabled {
+        info!("memory maintenance loop disabled");
+        return None;
+    }
+
+    let maintenance = retention.to_maintenance_config();
+    let span = info_span!(
+        "memory_maintenance_loop",
+        archive_after_days = maintenance.archive_after_days,
+        delete_archive_after_days = maintenance.delete_archive_after_days,
+        compress_after_days = maintenance.compress_after_days,
+        compression_min_cluster_size = maintenance.compression_min_cluster_size,
+        max_rows_per_run = maintenance.max_rows_per_run,
+    );
+
+    Some(tokio::spawn(
+        async move {
+            info!("memory maintenance loop started");
+            run_memory_maintenance_once(&memory, &maintenance, "startup").await;
+
+            let mut interval = tokio::time::interval(interval_duration);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+            loop {
+                tokio::select! {
+                    () = shutdown_token.cancelled() => {
+                        info!("memory maintenance loop stopped");
+                        break;
+                    }
+                    _ = interval.tick() => {
+                        run_memory_maintenance_once(&memory, &maintenance, "periodic").await;
+                    }
+                }
+            }
+        }
+        .instrument(span),
+    ))
+}
+
+async fn run_memory_maintenance_once(
+    memory: &Arc<dyn Memory>,
+    maintenance: &coop_memory::MemoryMaintenanceConfig,
+    phase: &'static str,
+) {
+    let span = info_span!("memory_maintenance_run", phase);
+    async {
+        match memory.run_maintenance(maintenance).await {
+            Ok(report) => {
+                info!(
+                    phase,
+                    compressed_rows = report.compressed_rows,
+                    summary_rows = report.summary_rows,
+                    archived_rows = report.archived_rows,
+                    archive_deleted_rows = report.archive_deleted_rows,
+                    "memory maintenance run succeeded"
+                );
+            }
+            Err(error) => {
+                warn!(phase, error = %error, "memory maintenance run failed");
+            }
+        }
+    }
+    .instrument(span)
+    .await;
+}
+
 // ---------------------------------------------------------------------------
 // cmd_start — gateway daemon
 // ---------------------------------------------------------------------------
@@ -202,12 +334,18 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
         }
     }
 
+    let memory = init_memory_store(&config, &config_dir, Arc::clone(&provider))?;
+
     let default_executor = DefaultExecutor::new();
     let config_executor = config_tool::ConfigToolExecutor::new(config_file.clone());
+    let memory_executor = MemoryToolExecutor::new(Arc::clone(&memory));
 
     #[allow(unused_mut)]
-    let mut executors: Vec<Box<dyn coop_core::ToolExecutor>> =
-        vec![Box::new(default_executor), Box::new(config_executor)];
+    let mut executors: Vec<Box<dyn coop_core::ToolExecutor>> = vec![
+        Box::new(default_executor),
+        Box::new(config_executor),
+        Box::new(memory_executor),
+    ];
 
     #[cfg(feature = "signal")]
     if let (Some(action_tx), Some(query_tx)) = (signal_action_tx.clone(), signal_query_tx.clone()) {
@@ -226,12 +364,15 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
     #[cfg(not(feature = "signal"))]
     let typing_notifier: Option<Arc<dyn coop_core::TypingNotifier>> = None;
 
+    let maintenance_memory = Arc::clone(&memory);
+
     let gateway = Arc::new(Gateway::new(
         config.clone(),
         workspace,
         provider,
         executor,
         typing_notifier,
+        Some(memory),
     )?);
     let router = Arc::new(MessageRouter::new(config.clone(), Arc::clone(&gateway)));
 
@@ -246,6 +387,12 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
     let server = IpcServer::bind(&socket)?;
 
     let shutdown_token = CancellationToken::new();
+
+    let _maintenance_task = spawn_memory_maintenance_loop(
+        maintenance_memory,
+        &config.memory.retention,
+        shutdown_token.clone(),
+    );
 
     #[cfg(feature = "signal")]
     if let Some(signal_channel) = signal_channel {
@@ -455,11 +602,16 @@ async fn cmd_chat(config_path: Option<&str>, user_flag: Option<&str>) -> Result<
         AnthropicProvider::from_env(&config.agent.model)
             .context("failed to initialize Anthropic provider")?,
     );
+
+    let memory = init_memory_store(&config, &config_dir, Arc::clone(&provider))?;
+
     let default_executor = DefaultExecutor::new();
     let config_executor = config_tool::ConfigToolExecutor::new(config_file.clone());
+    let memory_executor = MemoryToolExecutor::new(Arc::clone(&memory));
     let executor: Arc<dyn coop_core::ToolExecutor> = Arc::new(CompositeExecutor::new(vec![
         Box::new(default_executor),
         Box::new(config_executor),
+        Box::new(memory_executor),
     ]));
     let gateway = Arc::new(Gateway::new(
         config.clone(),
@@ -467,6 +619,7 @@ async fn cmd_chat(config_path: Option<&str>, user_flag: Option<&str>) -> Result<
         provider,
         executor,
         None,
+        Some(memory),
     )?);
 
     let session_key = gateway.default_session_key();
@@ -1000,6 +1153,13 @@ fn clear_chat(tui: &mut Tui) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use coop_core::SessionKey;
+    use coop_memory::{
+        MemoryMaintenanceConfig, MemoryMaintenanceReport, MemoryQuery, NewObservation, Observation,
+        ObservationHistoryEntry, ObservationIndex, Person, SessionSummary, WriteOutcome,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn test_config() -> Config {
         serde_yaml::from_str(
@@ -1017,6 +1177,69 @@ users:
 ",
         )
         .unwrap()
+    }
+
+    #[derive(Debug, Default)]
+    struct CountingMemory {
+        maintenance_calls: AtomicUsize,
+    }
+
+    impl CountingMemory {
+        fn maintenance_calls(&self) -> usize {
+            self.maintenance_calls.load(Ordering::Relaxed)
+        }
+    }
+
+    #[async_trait]
+    impl Memory for CountingMemory {
+        async fn search(&self, _query: &MemoryQuery) -> Result<Vec<ObservationIndex>> {
+            Ok(Vec::new())
+        }
+
+        async fn timeline(
+            &self,
+            _anchor: i64,
+            _before: usize,
+            _after: usize,
+        ) -> Result<Vec<ObservationIndex>> {
+            Ok(Vec::new())
+        }
+
+        async fn get(&self, _ids: &[i64]) -> Result<Vec<Observation>> {
+            Ok(Vec::new())
+        }
+
+        async fn write(&self, _obs: NewObservation) -> Result<WriteOutcome> {
+            Ok(WriteOutcome::Skipped)
+        }
+
+        async fn people(&self, _query: &str) -> Result<Vec<Person>> {
+            Ok(Vec::new())
+        }
+
+        async fn summarize_session(&self, session_key: &SessionKey) -> Result<SessionSummary> {
+            Ok(SessionSummary {
+                session_key: session_key.to_string(),
+                request: String::new(),
+                outcome: String::new(),
+                decisions: Vec::new(),
+                open_items: Vec::new(),
+                observation_count: 0,
+                created_at: Utc::now(),
+            })
+        }
+
+        async fn history(&self, _observation_id: i64) -> Result<Vec<ObservationHistoryEntry>> {
+            Ok(Vec::new())
+        }
+
+        async fn run_maintenance(
+            &self,
+            _config: &MemoryMaintenanceConfig,
+        ) -> Result<MemoryMaintenanceReport> {
+            self.maintenance_calls.fetch_add(1, Ordering::Relaxed);
+            Ok(MemoryMaintenanceReport::default())
+        }
     }
 
     #[test]
@@ -1052,5 +1275,59 @@ agent:
         .unwrap();
         let user = resolve_tui_user(&config, None);
         assert_eq!(user, "root");
+    }
+
+    #[tokio::test]
+    async fn maintenance_loop_runs_startup_and_periodic_without_crashing() {
+        let memory = Arc::new(CountingMemory::default());
+        let memory_dyn: Arc<dyn Memory> = Arc::<CountingMemory>::clone(&memory);
+        let shutdown = CancellationToken::new();
+
+        let retention = MemoryRetentionConfig {
+            enabled: true,
+            archive_after_days: 1,
+            delete_archive_after_days: 2,
+            compress_after_days: 1,
+            compression_min_cluster_size: 3,
+            max_rows_per_run: 10,
+        };
+
+        let handle = spawn_memory_maintenance_loop_with_interval(
+            memory_dyn,
+            &retention,
+            shutdown.clone(),
+            Duration::from_millis(20),
+        )
+        .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        shutdown.cancel();
+        handle.await.unwrap();
+
+        assert!(memory.maintenance_calls() >= 2);
+    }
+
+    #[test]
+    fn maintenance_loop_not_spawned_when_disabled() {
+        let memory = Arc::new(CountingMemory::default());
+        let memory_dyn: Arc<dyn Memory> = Arc::<CountingMemory>::clone(&memory);
+        let shutdown = CancellationToken::new();
+
+        let retention = MemoryRetentionConfig {
+            enabled: false,
+            archive_after_days: 1,
+            delete_archive_after_days: 2,
+            compress_after_days: 1,
+            compression_min_cluster_size: 3,
+            max_rows_per_run: 10,
+        };
+
+        let handle = spawn_memory_maintenance_loop_with_interval(
+            memory_dyn,
+            &retention,
+            shutdown,
+            Duration::from_secs(1),
+        );
+        assert!(handle.is_none());
     }
 }

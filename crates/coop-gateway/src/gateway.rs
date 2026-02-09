@@ -6,6 +6,7 @@ use coop_core::{
     InboundMessage, Message, Provider, SessionKey, SessionKind, ToolContext, ToolDef, ToolExecutor,
     TrustLevel, TurnConfig, TurnEvent, TurnResult, TypingNotifier, Usage,
 };
+use coop_memory::{Memory, NewObservation, min_trust_for_store, trust_to_store};
 use futures::StreamExt;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -17,6 +18,7 @@ use tracing::{Instrument, debug, error, info, info_span, warn};
 use uuid::Uuid;
 
 use crate::config::Config;
+use crate::memory_prompt_index;
 use crate::session_store::DiskSessionStore;
 
 pub(crate) struct Gateway {
@@ -26,6 +28,7 @@ pub(crate) struct Gateway {
     skills: Vec<SkillEntry>,
     provider: Arc<dyn Provider>,
     executor: Arc<dyn ToolExecutor>,
+    memory: Option<Arc<dyn Memory>>,
     typing_notifier: Option<Arc<dyn TypingNotifier>>,
     sessions: Mutex<HashMap<SessionKey, Vec<Message>>>,
     session_store: DiskSessionStore,
@@ -123,6 +126,7 @@ impl Gateway {
         provider: Arc<dyn Provider>,
         executor: Arc<dyn ToolExecutor>,
         typing_notifier: Option<Arc<dyn TypingNotifier>>,
+        memory: Option<Arc<dyn Memory>>,
     ) -> Result<Self> {
         let file_configs = default_file_configs();
         let workspace_index = WorkspaceIndex::scan(&workspace, &file_configs)?;
@@ -140,6 +144,7 @@ impl Gateway {
             skills,
             provider,
             executor,
+            memory,
             typing_notifier,
             sessions: Mutex::new(HashMap::new()),
             session_store,
@@ -147,38 +152,70 @@ impl Gateway {
     }
 
     /// Build a trust-gated system prompt for this turn.
-    fn build_prompt(
+    async fn build_prompt(
         &self,
         trust: TrustLevel,
         user_name: Option<&str>,
         channel: Option<&str>,
     ) -> Result<String> {
         let file_configs = default_file_configs();
-        let mut index = self
-            .workspace_index
-            .lock()
-            .expect("workspace index mutex poisoned");
-        let refreshed = index
-            .refresh(&self.workspace, &file_configs)
-            .unwrap_or(false);
-        if refreshed {
-            debug!("workspace index refreshed");
+        let mut system_prompt = {
+            let mut index = self
+                .workspace_index
+                .lock()
+                .expect("workspace index mutex poisoned");
+            let refreshed = index
+                .refresh(&self.workspace, &file_configs)
+                .unwrap_or(false);
+            if refreshed {
+                debug!("workspace index refreshed");
+            }
+
+            let mut builder =
+                PromptBuilder::new(self.workspace.clone(), self.config.agent.id.clone())
+                    .trust(trust)
+                    .model(&self.config.agent.model)
+                    .skills(self.skills.clone());
+            if let Some(name) = user_name {
+                builder = builder.user(name);
+            }
+            if let Some(ch) = channel {
+                builder = builder.channel(ch);
+            }
+            let prompt = builder.build(&index)?;
+            drop(index);
+            prompt.to_flat_string()
+        };
+
+        if let Some(memory) = &self.memory {
+            match memory_prompt_index::build_prompt_index(
+                memory.as_ref(),
+                trust,
+                &self.config.memory.prompt_index,
+            )
+            .await
+            {
+                Ok(Some(memory_index)) => {
+                    info!(
+                        trust = ?trust,
+                        index_len = memory_index.len(),
+                        "memory prompt index injected"
+                    );
+                    system_prompt.push_str("\n\n");
+                    system_prompt.push_str(&memory_index);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    warn!(
+                        error = %error,
+                        trust = ?trust,
+                        "memory prompt index generation failed, continuing without index"
+                    );
+                }
+            }
         }
 
-        let mut builder = PromptBuilder::new(self.workspace.clone(), self.config.agent.id.clone())
-            .trust(trust)
-            .model(&self.config.agent.model)
-            .skills(self.skills.clone());
-        if let Some(name) = user_name {
-            builder = builder.user(name);
-        }
-        if let Some(ch) = channel {
-            builder = builder.channel(ch);
-        }
-        let prompt = builder.build(&index)?;
-        drop(index);
-
-        Ok(prompt.to_flat_string())
+        Ok(system_prompt)
     }
 
     pub(crate) fn default_session_key(&self) -> SessionKey {
@@ -220,6 +257,75 @@ impl Gateway {
         }
     }
 
+    fn capture_tool_observation(
+        &self,
+        session_key: &SessionKey,
+        trust: TrustLevel,
+        tool_name: &str,
+        arguments: &serde_json::Value,
+        output: &coop_core::ToolOutput,
+    ) {
+        let Some(memory) = self.memory.as_ref().map(Arc::clone) else {
+            return;
+        };
+
+        if tool_name.starts_with("memory_") {
+            return;
+        }
+
+        let args = serde_json::to_string(arguments).unwrap_or_default();
+        let mut output_text = output.content.clone();
+        if output_text.len() > 1200 {
+            output_text.truncate(1200);
+            output_text.push_str("... [truncated]");
+        }
+
+        let mut related_files = Vec::new();
+        for key in ["path", "file", "target", "from", "to"] {
+            if let Some(path) = arguments.get(key).and_then(serde_json::Value::as_str) {
+                related_files.push(path.to_owned());
+            }
+        }
+
+        let store = trust_to_store(trust).to_owned();
+        let min_trust = min_trust_for_store(&store);
+
+        let tool_name_owned = tool_name.to_owned();
+        let obs = NewObservation {
+            session_key: Some(session_key.to_string()),
+            store,
+            obs_type: "technical".to_owned(),
+            title: format!("Tool run: {tool_name}"),
+            narrative: format!("arguments={args}\noutput={output_text}"),
+            facts: vec![
+                format!("tool={tool_name}"),
+                format!("error={}", output.is_error),
+            ],
+            tags: vec!["tool".to_owned(), tool_name.to_owned()],
+            source: "auto".to_owned(),
+            related_files,
+            related_people: Vec::new(),
+            token_count: None,
+            expires_at: None,
+            min_trust,
+        };
+
+        tokio::spawn(async move {
+            match memory.write(obs).await {
+                Ok(outcome) => {
+                    debug!(?outcome, tool = %tool_name_owned, "auto-captured tool observation");
+                }
+                Err(err) => {
+                    warn!(
+                        error = %err,
+                        tool = %tool_name_owned,
+                        "failed to auto-capture tool observation"
+                    );
+                }
+            }
+        });
+    }
+
     #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
     pub(crate) async fn run_turn_with_trust(
         &self,
@@ -249,7 +355,7 @@ impl Gateway {
                 None
             };
 
-            let system_prompt = self.build_prompt(trust, user_name, channel)?;
+            let system_prompt = self.build_prompt(trust, user_name, channel).await?;
             let session_len_before = self.messages(session_key).len();
             self.append_message(session_key, Message::user().with_text(user_input));
 
@@ -384,6 +490,14 @@ impl Gateway {
                             ),
                         })
                         .await;
+
+                    self.capture_tool_observation(
+                        session_key,
+                        trust,
+                        &req.name,
+                        &req.arguments,
+                        &output,
+                    );
                 }
 
                 self.append_message(session_key, result_msg.clone());
@@ -464,11 +578,13 @@ impl Gateway {
     }
 
     /// Returns true if a session has no messages (checks disk too).
+    #[allow(dead_code)]
     pub(crate) fn session_is_empty(&self, session_key: &SessionKey) -> bool {
         self.messages(session_key).is_empty()
     }
 
     /// Seed a session with formatted Signal chat history for context.
+    #[allow(dead_code)]
     pub(crate) fn seed_signal_history(&self, session_key: &SessionKey, history: &[InboundMessage]) {
         if history.is_empty() {
             return;
@@ -894,6 +1010,7 @@ agent:
                 provider,
                 executor,
                 None,
+                None,
             )
             .unwrap(),
         );
@@ -951,6 +1068,7 @@ agent:
                 workspace.path().to_path_buf(),
                 provider,
                 executor,
+                None,
                 None,
             )
             .unwrap(),
@@ -1014,6 +1132,7 @@ agent:
                 provider,
                 executor,
                 None,
+                None,
             )
             .unwrap(),
         );
@@ -1065,6 +1184,7 @@ agent:
             provider,
             executor,
             Some(typing_notifier),
+            None,
         )
         .unwrap();
 
