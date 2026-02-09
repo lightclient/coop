@@ -84,12 +84,14 @@ mod tests {
             summary: "<summary>test</summary>".into(),
             tokens_at_compaction: 100_000,
             created_at: chrono::Utc::now(),
+            messages_at_compaction: Some(42),
         };
 
         store.save(&key, &state).unwrap();
         let loaded = store.load(&key).unwrap().unwrap();
         assert_eq!(loaded.summary, state.summary);
         assert_eq!(loaded.tokens_at_compaction, state.tokens_at_compaction);
+        assert_eq!(loaded.messages_at_compaction, Some(42));
     }
 
     #[test]
@@ -111,6 +113,7 @@ mod tests {
             summary: "test".into(),
             tokens_at_compaction: 100_000,
             created_at: chrono::Utc::now(),
+            messages_at_compaction: Some(10),
         };
 
         store.save(&key, &state).unwrap();

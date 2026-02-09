@@ -631,7 +631,7 @@ impl Gateway {
                 match compaction::compact(&all_messages, self.provider.as_ref(), &system_prompt)
                     .await
                 {
-                    Ok(state) => {
+                    Ok(mut state) => {
                         info!(
                             tokens_before = total_usage.input_tokens.unwrap_or(0)
                                 + total_usage.cache_read_tokens.unwrap_or(0)
@@ -640,6 +640,7 @@ impl Gateway {
                             summary_len = state.summary.len(),
                             "session compacted"
                         );
+                        state.messages_at_compaction = Some(msg_count);
                         self.set_compaction(session_key, state, msg_count);
                     }
                     Err(e) => {
@@ -735,7 +736,11 @@ impl Gateway {
 
         match self.compaction_store.load(session_key) {
             Ok(Some(state)) => {
-                let msg_count = self.messages(session_key).len();
+                // Use the persisted message count if available; otherwise
+                // fall back to current session length (legacy state files).
+                let msg_count = state
+                    .messages_at_compaction
+                    .unwrap_or_else(|| self.messages(session_key).len());
                 let entry = (state, msg_count);
                 self.compaction_cache
                     .lock()

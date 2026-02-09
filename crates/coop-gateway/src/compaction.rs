@@ -32,6 +32,11 @@ pub(crate) struct CompactionState {
     pub tokens_at_compaction: u32,
     /// Timestamp.
     pub created_at: chrono::DateTime<chrono::Utc>,
+    /// Number of messages in the session when compaction was performed.
+    /// Used to determine which messages are "new" after compaction.
+    /// If `None` (old persisted state), falls back to current session length.
+    #[serde(default)]
+    pub messages_at_compaction: Option<usize>,
 }
 
 /// Returns true if total usage exceeds the compaction threshold.
@@ -135,6 +140,7 @@ pub(crate) async fn compact(
             summary,
             tokens_at_compaction: total_tokens,
             created_at: chrono::Utc::now(),
+            messages_at_compaction: None, // set by caller
         })
     }
     .instrument(span)
@@ -228,6 +234,7 @@ mod tests {
             summary: "<summary>task summary</summary>".into(),
             tokens_at_compaction: 100_000,
             created_at: chrono::Utc::now(),
+            messages_at_compaction: Some(2),
         };
 
         // All messages existed before compaction
@@ -249,6 +256,7 @@ mod tests {
             summary: "<summary>task summary</summary>".into(),
             tokens_at_compaction: 100_000,
             created_at: chrono::Utc::now(),
+            messages_at_compaction: Some(2),
         };
 
         // 2 messages existed before compaction, 2 added after
