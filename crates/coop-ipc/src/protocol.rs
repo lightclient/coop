@@ -10,6 +10,7 @@ pub enum ClientMessage {
     Hello { version: u32 },
     Send { session: String, content: String },
     Clear { session: String },
+    Stop { session: String },
     ListSessions,
     Subscribe { session: String },
 }

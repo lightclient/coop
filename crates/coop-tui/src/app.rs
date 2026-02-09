@@ -477,6 +477,7 @@ impl App {
             "\
 Available commands:
   /new, /clear, /reset  — Start a new session (clears history)
+  /stop                 — Stop the current agent turn
   /status               — Show session info (model, tokens, context)
   /verbose, /v          — Toggle tool call output
   /help, /?             — Show this help

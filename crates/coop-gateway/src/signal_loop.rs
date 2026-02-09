@@ -3,6 +3,7 @@ use coop_channels::{SignalChannel, SignalTarget};
 use coop_core::{Channel, InboundKind, InboundMessage, OutboundMessage, TurnEvent};
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tracing::warn;
 
 use crate::router::MessageRouter;
@@ -14,6 +15,9 @@ pub(crate) async fn run_signal_loop(
     mut signal_channel: SignalChannel,
     router: Arc<MessageRouter>,
 ) -> Result<()> {
+    // Track the active turn task so we can await it before starting another.
+    let mut active_turn: Option<JoinHandle<Result<()>>> = None;
+
     loop {
         let inbound = Channel::recv(&mut signal_channel).await?;
         if !should_dispatch_signal_message(&inbound) {
@@ -25,7 +29,23 @@ pub(crate) async fn run_signal_loop(
             continue;
         };
 
+        // Commands are handled immediately, even while a turn is running.
+        // The router dispatches commands synchronously without blocking on
+        // the agent loop.
+        if inbound.kind == InboundKind::Command {
+            trace_signal_inbound("signal command dispatched", &inbound);
+            dispatch_command(&signal_channel, &router, &inbound, &target).await?;
+            continue;
+        }
+
         trace_signal_inbound("signal inbound dispatched", &inbound);
+
+        // Wait for any previous turn to finish before starting a new one.
+        if let Some(task) = active_turn.take()
+            && let Err(error) = task.await
+        {
+            warn!(error = %error, "previous signal turn task failed");
+        }
 
         // Bootstrap: seed session with recent Signal history if this is a new session
         let decision = router.route(&inbound);
@@ -46,7 +66,94 @@ pub(crate) async fn run_signal_loop(
             }
         }
 
-        dispatch_signal_turn(&mut signal_channel, router.as_ref(), &inbound, &target).await?;
+        // Spawn the turn as a background task so the main loop stays free
+        // to process commands (e.g. /stop, /status).
+        let router_clone = Arc::clone(&router);
+        let inbound_clone = inbound.clone();
+        let target_clone = target.clone();
+        let action_tx = signal_channel.action_sender();
+        active_turn = Some(tokio::spawn(async move {
+            dispatch_signal_turn_background(
+                &action_tx,
+                router_clone.as_ref(),
+                &inbound_clone,
+                &target_clone,
+            )
+            .await
+        }));
+    }
+}
+
+/// Dispatch a command immediately, sending the response back to Signal.
+async fn dispatch_command(
+    signal_channel: &SignalChannel,
+    router: &MessageRouter,
+    inbound: &InboundMessage,
+    target: &str,
+) -> Result<()> {
+    let (event_tx, mut event_rx) = mpsc::channel(64);
+    let router = router.clone();
+    let message = inbound.clone();
+
+    // Commands are handled synchronously in dispatch() — they don't
+    // go through the agent turn loop, so this completes immediately.
+    let dispatch_task = tokio::spawn(async move { router.dispatch(&message, event_tx).await });
+
+    let mut text = String::new();
+    while let Some(event) = event_rx.recv().await {
+        match event {
+            TurnEvent::TextDelta(delta) => text.push_str(&delta),
+            TurnEvent::Done(_) => break,
+            _ => {}
+        }
+    }
+
+    flush_text(signal_channel, target, &mut text).await?;
+
+    match dispatch_task.await {
+        Ok(result) => result.map(|_| ()),
+        Err(error) => anyhow::bail!("router task failed: {error}"),
+    }
+}
+
+/// Dispatch a turn in the background, sending responses via the action_tx
+/// channel instead of requiring `&mut SignalChannel`.
+async fn dispatch_signal_turn_background(
+    action_tx: &mpsc::Sender<coop_channels::SignalAction>,
+    router: &MessageRouter,
+    inbound: &InboundMessage,
+    target: &str,
+) -> Result<()> {
+    let (event_tx, mut event_rx) = mpsc::channel(64);
+    let router = router.clone();
+    let message = inbound.clone();
+    let dispatch_task = tokio::spawn(async move { router.dispatch(&message, event_tx).await });
+
+    let mut text = String::new();
+
+    while let Some(event) = event_rx.recv().await {
+        match event {
+            TurnEvent::TextDelta(delta) => {
+                text.push_str(&delta);
+            }
+            TurnEvent::ToolStart { .. } => {
+                flush_text_via_action(action_tx, target, &mut text).await?;
+            }
+            TurnEvent::Error(message) => {
+                text = message;
+            }
+            TurnEvent::Done(_) => {
+                break;
+            }
+            TurnEvent::AssistantMessage(_) | TurnEvent::ToolResult { .. } => {}
+        }
+    }
+
+    flush_text_via_action(action_tx, target, &mut text).await?;
+
+    match dispatch_task.await {
+        Ok(result) => result.map(|_| ()),
+        Err(error) => anyhow::bail!("router task failed: {error}"),
     }
 }
 
@@ -73,6 +180,7 @@ pub(crate) async fn handle_signal_inbound_once<C: Channel>(
 
 /// Dispatch a single inbound message: run the agent turn and stream
 /// text/tool events to the channel.
+#[cfg(test)]
 async fn dispatch_signal_turn<C: Channel>(
     signal_channel: &mut C,
     router: &MessageRouter,
@@ -131,6 +239,29 @@ async fn flush_text<C: Channel>(channel: &C, target: &str, text: &mut String) ->
             },
         )
         .await?;
+    }
+    Ok(())
+}
+
+/// Send accumulated text via the action channel (for background tasks that
+/// don't hold `&mut SignalChannel`).
+async fn flush_text_via_action(
+    action_tx: &mpsc::Sender<coop_channels::SignalAction>,
+    target: &str,
+    text: &mut String,
+) -> Result<()> {
+    if text.trim().is_empty() {
+        text.clear();
+    } else {
+        let content = std::mem::take(text);
+        action_tx
+            .send(coop_channels::SignalAction::SendText(OutboundMessage {
+                channel: "signal".to_owned(),
+                target: target.to_owned(),
+                content,
+            }))
+            .await
+            .map_err(|_send_err| anyhow::anyhow!("signal action channel closed"))?;
     }
     Ok(())
 }

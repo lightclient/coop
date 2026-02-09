@@ -125,6 +125,13 @@ impl MessageRouter {
                 self.gateway.clear_session(&decision.session_key);
                 Some("Session cleared.".to_owned())
             }
+            "/stop" => {
+                if self.gateway.cancel_active_turn(&decision.session_key) {
+                    Some("Stopping agent…".to_owned())
+                } else {
+                    Some("No active turn to stop.".to_owned())
+                }
+            }
             "/status" => {
                 let count = self.gateway.session_message_count(&decision.session_key);
                 let usage = self.gateway.session_usage(&decision.session_key);
@@ -135,8 +142,13 @@ impl MessageRouter {
                 } else {
                     0.0
                 };
+                let active = if self.gateway.has_active_turn(&decision.session_key) {
+                    " (running)"
+                } else {
+                    ""
+                };
                 let status = format!(
-                    "Session: {}\nAgent: {}\nModel: {}\nMessages: {}\nContext: {} / {} tokens ({:.1}%)\nTotal tokens used: {} in / {} out",
+                    "Session: {}{active}\nAgent: {}\nModel: {}\nMessages: {}\nContext: {} / {} tokens ({:.1}%)\nTotal tokens used: {} in / {} out",
                     decision.session_key,
                     self.gateway.agent_id(),
                     self.gateway.model_name(),
@@ -152,6 +164,7 @@ impl MessageRouter {
             "/help" | "/?" => Some(
                 "Available commands:\n\
                      /new, /clear  — Start a new session (clears history)\n\
+                     /stop         — Stop the current agent turn\n\
                      /status       — Show session info\n\
                      /help, /?     — Show this help"
                     .to_owned(),
@@ -1000,5 +1013,42 @@ users:
         let (_decision, text) = dispatch_and_collect_text(&router, &msg).await;
 
         assert!(text.contains("/new"), "trimmed input should match /help");
+    }
+
+    #[tokio::test]
+    async fn slash_stop_with_no_active_turn() {
+        let config = test_config();
+        let (router, _gw) = make_router_and_gateway(&config);
+        let msg = inbound_command("signal", "alice-uuid", "/stop");
+        let (_decision, text) = dispatch_and_collect_text(&router, &msg).await;
+
+        assert!(
+            text.contains("No active turn"),
+            "should indicate no turn is running: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn slash_help_includes_stop() {
+        let config = test_config();
+        let (router, _gw) = make_router_and_gateway(&config);
+        let msg = inbound_command("signal", "alice-uuid", "/help");
+        let (_decision, text) = dispatch_and_collect_text(&router, &msg).await;
+
+        assert!(text.contains("/stop"), "help should list /stop command");
+    }
+
+    #[tokio::test]
+    async fn slash_status_shows_running_state() {
+        let config = test_config();
+        let (router, _gw) = make_router_and_gateway(&config);
+        let msg = inbound_command("signal", "alice-uuid", "/status");
+        let (_decision, text) = dispatch_and_collect_text(&router, &msg).await;
+
+        // With no active turn, status should not show "(running)"
+        assert!(
+            !text.contains("(running)"),
+            "should not show running when idle: {text}"
+        );
     }
 }
