@@ -19,6 +19,8 @@ pub enum InputAction {
     Help,
     /// User wants to see session status.
     Status,
+    /// User wants to stop the current agent turn.
+    Stop,
 }
 
 /// Handle a key event, updating app state and returning any action.
@@ -57,6 +59,7 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent) -> InputAction {
                 "/verbose" | "/v" => InputAction::ToggleVerbose,
                 "/help" | "/?" => InputAction::Help,
                 "/status" => InputAction::Status,
+                "/stop" => InputAction::Stop,
                 _ => InputAction::Submit(trimmed),
             }
         }

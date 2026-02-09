@@ -38,6 +38,8 @@ pub(crate) struct Gateway {
     compaction_cache: Mutex<HashMap<SessionKey, (CompactionState, usize)>>,
     /// Per-session cumulative usage and last-turn input tokens (context size).
     session_usage: Mutex<HashMap<SessionKey, SessionUsage>>,
+    /// Per-session cancellation tokens for in-progress turns.
+    active_turns: Mutex<HashMap<SessionKey, CancellationToken>>,
 }
 
 /// Tracks cumulative token usage and context size for a session.
@@ -166,6 +168,7 @@ impl Gateway {
             compaction_store,
             compaction_cache: Mutex::new(HashMap::new()),
             session_usage: Mutex::new(HashMap::new()),
+            active_turns: Mutex::new(HashMap::new()),
         })
     }
 
@@ -364,7 +367,14 @@ impl Gateway {
             channel = ?channel,
         );
 
-        async {
+        // Register a cancellation token for this turn so `/stop` can cancel it.
+        let turn_cancel = CancellationToken::new();
+        self.active_turns
+            .lock()
+            .expect("active_turns mutex poisoned")
+            .insert(session_key.clone(), turn_cancel.clone());
+
+        let result = async {
             let _typing_guard = if let Some(notifier) = &self.typing_notifier {
                 emit_typing_notifier_event(session_key, true);
                 notifier.set_typing(session_key, true).await;
@@ -386,6 +396,11 @@ impl Gateway {
             let mut hit_limit = false;
 
             for iteration in 0..turn_config.max_iterations {
+                if turn_cancel.is_cancelled() {
+                    info!("turn cancelled before iteration {iteration}");
+                    break;
+                }
+
                 let iter_span = info_span!(
                     "turn_iteration",
                     iteration,
@@ -464,6 +479,11 @@ impl Gateway {
                 let mut result_msg = Message::user();
 
                 for req in response.tool_requests() {
+                    if turn_cancel.is_cancelled() {
+                        info!("turn cancelled before tool execution: {}", req.name);
+                        break;
+                    }
+
                     let _ = event_tx
                         .send(TurnEvent::ToolStart {
                             id: req.id.clone(),
@@ -527,6 +547,11 @@ impl Gateway {
                     );
                 }
 
+                if turn_cancel.is_cancelled() {
+                    info!("turn cancelled after tool execution");
+                    break;
+                }
+
                 self.append_message(session_key, result_msg.clone());
                 new_messages.push(result_msg);
 
@@ -535,10 +560,12 @@ impl Gateway {
                 }
             }
 
+            let cancelled = turn_cancel.is_cancelled();
+
             // If we hit the iteration limit while the model still wanted to use
             // tools, do one final provider call with no tools so the model is
             // forced to produce a text summary for the user.
-            if hit_limit {
+            if hit_limit && !cancelled {
                 let final_span = info_span!("turn_limit_completion");
                 let final_result: Result<()> = async {
                     info!("forcing final completion (iteration limit reached)");
@@ -580,17 +607,21 @@ impl Gateway {
                 }
             }
 
-            info!(
-                input_tokens = total_usage.input_tokens,
-                output_tokens = total_usage.output_tokens,
-                cache_read_tokens = total_usage.cache_read_tokens,
-                cache_write_tokens = total_usage.cache_write_tokens,
-                hit_limit,
-                "turn complete"
-            );
+            if cancelled {
+                info!("turn stopped by user");
+            } else {
+                info!(
+                    input_tokens = total_usage.input_tokens,
+                    output_tokens = total_usage.output_tokens,
+                    cache_read_tokens = total_usage.cache_read_tokens,
+                    cache_write_tokens = total_usage.cache_write_tokens,
+                    hit_limit,
+                    "turn complete"
+                );
+            }
 
             // Check if compaction is needed for next turn
-            if compaction::should_compact(&total_usage) {
+            if !cancelled && compaction::should_compact(&total_usage) {
                 let all_messages = self.messages(session_key);
                 let msg_count = all_messages.len();
                 match compaction::compact(&all_messages, self.provider.as_ref(), &system_prompt)
@@ -630,7 +661,15 @@ impl Gateway {
             Ok(())
         }
         .instrument(span)
-        .await
+        .await;
+
+        // Deregister the cancellation token for this session.
+        self.active_turns
+            .lock()
+            .expect("active_turns mutex poisoned")
+            .remove(session_key);
+
+        result
     }
 
     pub(crate) fn clear_session(&self, session_key: &SessionKey) {
@@ -652,6 +691,30 @@ impl Gateway {
             .lock()
             .expect("session_usage mutex poisoned")
             .remove(session_key);
+    }
+
+    /// Cancel the active turn for a session, if one is running.
+    /// Returns `true` if a turn was cancelled.
+    pub(crate) fn cancel_active_turn(&self, session_key: &SessionKey) -> bool {
+        let tokens = self
+            .active_turns
+            .lock()
+            .expect("active_turns mutex poisoned");
+        if let Some(token) = tokens.get(session_key) {
+            token.cancel();
+            info!(session = %session_key, "active turn cancelled via /stop");
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Returns `true` if a turn is currently running for this session.
+    pub(crate) fn has_active_turn(&self, session_key: &SessionKey) -> bool {
+        self.active_turns
+            .lock()
+            .expect("active_turns mutex poisoned")
+            .contains_key(session_key)
     }
 
     fn get_compaction(&self, session_key: &SessionKey) -> Option<(CompactionState, usize)> {
@@ -1535,6 +1598,146 @@ agent:
         ) -> Result<ProviderStream> {
             anyhow::bail!("not supported")
         }
+    }
+
+    /// Provider that sleeps before returning a tool request, allowing cancellation.
+    #[derive(Debug)]
+    struct SlowToolProvider {
+        model: ModelInfo,
+        delay: Duration,
+    }
+
+    impl SlowToolProvider {
+        fn new(delay: Duration) -> Self {
+            Self {
+                model: ModelInfo {
+                    name: "slow-tool".into(),
+                    context_limit: 128_000,
+                },
+                delay,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Provider for SlowToolProvider {
+        fn name(&self) -> &'static str {
+            "slow-tool"
+        }
+
+        fn model_info(&self) -> &ModelInfo {
+            &self.model
+        }
+
+        async fn complete(
+            &self,
+            _system: &str,
+            _messages: &[Message],
+            _tools: &[ToolDef],
+        ) -> Result<(Message, Usage)> {
+            tokio::time::sleep(self.delay).await;
+            Ok((
+                Message::assistant().with_tool_request(
+                    "tool_slow",
+                    "bash",
+                    serde_json::json!({"command": "echo hi"}),
+                ),
+                Usage {
+                    input_tokens: Some(100),
+                    output_tokens: Some(50),
+                    ..Default::default()
+                },
+            ))
+        }
+
+        async fn stream(
+            &self,
+            _system: &str,
+            _messages: &[Message],
+            _tools: &[ToolDef],
+        ) -> Result<ProviderStream> {
+            anyhow::bail!("not supported")
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_active_turn_stops_iteration() {
+        let workspace = test_workspace();
+        let provider: Arc<dyn Provider> =
+            Arc::new(SlowToolProvider::new(Duration::from_millis(50)));
+        let executor = Arc::new(DefaultExecutor::new());
+        let gateway = Arc::new(
+            Gateway::new(
+                test_config(),
+                workspace.path().to_path_buf(),
+                provider,
+                executor,
+                None,
+                None,
+            )
+            .unwrap(),
+        );
+
+        let session_key = gateway.default_session_key();
+        let (event_tx, mut event_rx) = mpsc::channel(256);
+
+        let gw = Arc::clone(&gateway);
+        let sk = session_key.clone();
+        let turn_task = tokio::spawn(async move {
+            gw.run_turn_with_trust(
+                &sk,
+                "hello",
+                TrustLevel::Full,
+                Some("alice"),
+                None,
+                event_tx,
+            )
+            .await
+        });
+
+        // Wait for the first tool to start executing
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(gateway.has_active_turn(&session_key));
+
+        // Cancel
+        let cancelled = gateway.cancel_active_turn(&session_key);
+        assert!(cancelled);
+
+        // Wait for the turn to finish
+        let result = turn_task.await.unwrap();
+        assert!(result.is_ok());
+
+        // After turn finishes, the token should be deregistered
+        assert!(!gateway.has_active_turn(&session_key));
+
+        // Collect events — we should see a Done
+        let mut saw_done = false;
+        while let Ok(event) = event_rx.try_recv() {
+            if matches!(event, TurnEvent::Done(_)) {
+                saw_done = true;
+            }
+        }
+        assert!(saw_done, "should emit Done after cancellation");
+    }
+
+    #[tokio::test]
+    async fn cancel_nonexistent_turn_returns_false() {
+        let workspace = test_workspace();
+        let provider: Arc<dyn Provider> = Arc::new(FakeProvider::new("hello"));
+        let executor = Arc::new(DefaultExecutor::new());
+        let gateway = Gateway::new(
+            test_config(),
+            workspace.path().to_path_buf(),
+            provider,
+            executor,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let session_key = gateway.default_session_key();
+        assert!(!gateway.cancel_active_turn(&session_key));
+        assert!(!gateway.has_active_turn(&session_key));
     }
 
     #[tokio::test]

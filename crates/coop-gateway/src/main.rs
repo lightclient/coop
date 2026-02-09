@@ -520,6 +520,19 @@ async fn handle_client(
                         .await?;
                 }
             },
+            ClientMessage::Stop { session } => match gateway.resolve_session(&session) {
+                Some(key) => {
+                    gateway.cancel_active_turn(&key);
+                }
+                None => {
+                    connection
+                        .send(ServerMessage::Error {
+                            session,
+                            message: "unknown session".to_owned(),
+                        })
+                        .await?;
+                }
+            },
             ClientMessage::Send { session, content } => {
                 handle_send(&mut connection, Arc::clone(&router), session, content).await?;
             }
@@ -704,6 +717,13 @@ async fn cmd_chat(config_path: Option<&str>, user_flag: Option<&str>) -> Result<
                             gateway.clear_session(&session_key);
                         }
                     }
+                    InputAction::Stop => {
+                        if app.is_loading {
+                            gateway.cancel_active_turn(&session_key);
+                            app.push_message(DisplayMessage::system("Stopping agent…"));
+                            update_chat_messages(&mut tui, &app, CHAT_IDX);
+                        }
+                    }
                     InputAction::ToggleVerbose => {
                         app.toggle_verbose();
                         update_chat_messages(&mut tui, &app, CHAT_IDX);
@@ -868,6 +888,21 @@ async fn cmd_attach(config_path: Option<&str>, session: &str) -> Result<()> {
                                 .await
                             {
                                 tracing::warn!(error = %error, "failed to send clear");
+                            }
+                        }
+                    }
+                    InputAction::Stop => {
+                        if app.is_loading {
+                            app.push_message(DisplayMessage::system("Stopping agent…"));
+                            update_chat_messages(&mut tui, &app, CHAT_IDX);
+
+                            if let Err(error) = writer
+                                .send(ClientMessage::Stop {
+                                    session: session_name.clone(),
+                                })
+                                .await
+                            {
+                                tracing::warn!(error = %error, "failed to send stop");
                             }
                         }
                     }
