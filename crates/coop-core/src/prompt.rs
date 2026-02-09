@@ -517,6 +517,7 @@ pub struct PromptBuilder {
     user: Option<String>,
     token_budget: usize,
     file_configs: Vec<PromptFileConfig>,
+    user_file_configs: Vec<PromptFileConfig>,
     skills: Vec<SkillEntry>,
 }
 
@@ -535,6 +536,7 @@ impl PromptBuilder {
             user: None,
             token_budget: Self::DEFAULT_BUDGET,
             file_configs: default_file_configs(),
+            user_file_configs: Vec::new(),
             skills: Vec::new(),
         }
     }
@@ -587,6 +589,12 @@ impl PromptBuilder {
         self
     }
 
+    #[must_use]
+    pub fn user_file_configs(mut self, configs: Vec<PromptFileConfig>) -> Self {
+        self.user_file_configs = configs;
+        self
+    }
+
     /// Build the prompt, using a pre-scanned workspace index.
     pub fn build(&self, index: &WorkspaceIndex) -> Result<BuiltPrompt> {
         let _span = info_span!(
@@ -600,15 +608,20 @@ impl PromptBuilder {
         let runtime_reserve = 500;
         let file_budget = self.token_budget.saturating_sub(runtime_reserve);
 
-        let (mut layers, mut used_tokens, overflow) = self.build_file_layers(index, file_budget)?;
+        let (mut layers, mut used_tokens, mut overflow) =
+            self.build_file_layers(index, file_budget)?;
 
-        // Per-user memory layer (after shared files, before runtime).
-        if let Some(user) = &self.user {
+        // Per-user file layers (after shared files, before runtime).
+        if let Some(user) = &self.user
+            && !self.user_file_configs.is_empty()
+        {
             let remaining = file_budget.saturating_sub(used_tokens);
-            if let Some(layer) = self.build_user_memory_layer(user, remaining)? {
-                used_tokens += layer.tokens;
-                layers.push(layer);
-            }
+            let user_dir = self.workspace.join(format!("users/{user}"));
+            let (extra_layers, extra_tokens, extra_overflow) =
+                self.build_scoped_file_layers(&user_dir, &self.user_file_configs, remaining)?;
+            used_tokens += extra_tokens;
+            layers.extend(extra_layers);
+            overflow.extend(extra_overflow);
         }
 
         // Channel context layer (after user memory, before runtime).
@@ -713,7 +726,7 @@ impl PromptBuilder {
                 continue;
             }
 
-            let header = self.layer_header(&cfg.path);
+            let header = Self::layer_header(&cfg.path);
 
             if indexed.entry.tokens <= remaining {
                 let content = std::fs::read_to_string(self.workspace.join(&cfg.path))
@@ -763,6 +776,119 @@ impl PromptBuilder {
         Ok((layers, used_tokens, overflow))
     }
 
+    /// Process files from an arbitrary root directory (used for per-user files).
+    fn build_scoped_file_layers(
+        &self,
+        root: &Path,
+        configs: &[PromptFileConfig],
+        budget: usize,
+    ) -> Result<(Vec<PromptLayer>, usize, Vec<MemoryIndexEntry>)> {
+        let mut layers = Vec::new();
+        let mut used_tokens: usize = 0;
+        let mut overflow = Vec::new();
+
+        for cfg in configs {
+            if self.trust > cfg.min_trust {
+                debug!(
+                    file = %cfg.path,
+                    file_trust = ?cfg.min_trust,
+                    session_trust = ?self.trust,
+                    scope = "user",
+                    "user file excluded by trust gate"
+                );
+                continue;
+            }
+
+            let full_path = root.join(&cfg.path);
+            let content = match std::fs::read_to_string(&full_path) {
+                Ok(c) => c,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    trace!(file = %cfg.path, scope = "user", "user file not found");
+                    continue;
+                }
+                Err(e) => {
+                    return Err(e)
+                        .with_context(|| format!("failed to read {}", full_path.display()));
+                }
+            };
+
+            if content.trim().is_empty() {
+                trace!(file = %cfg.path, scope = "user", "user file empty, skipping");
+                continue;
+            }
+
+            let counted = Counted::new(content.clone());
+            let remaining = budget.saturating_sub(used_tokens);
+
+            if remaining == 0 {
+                debug!(
+                    file = %cfg.path,
+                    tokens = counted.tokens,
+                    scope = "user",
+                    "user file overflowed to menu (no budget remaining)"
+                );
+                overflow.push(MemoryIndexEntry {
+                    path: format!("user:{}", cfg.path),
+                    tokens: counted.tokens,
+                    description: cfg.description.clone(),
+                    min_trust: cfg.min_trust,
+                });
+                continue;
+            }
+
+            let header = format!("## {} (user)", cfg.path);
+
+            if counted.tokens <= remaining {
+                used_tokens += counted.tokens;
+                debug!(
+                    file = %cfg.path,
+                    tokens = counted.tokens,
+                    used_tokens,
+                    scope = "user",
+                    "user file included in prompt"
+                );
+                layers.push(PromptLayer {
+                    name: "user_file",
+                    content: format!("{header}\n{content}"),
+                    tokens: counted.tokens,
+                    cache: cfg.cache,
+                });
+            } else if remaining >= 200 {
+                let truncated = truncate_to_budget(&content, &cfg.path, remaining);
+                used_tokens += truncated.tokens;
+                debug!(
+                    file = %cfg.path,
+                    original_tokens = counted.tokens,
+                    truncated_tokens = truncated.tokens,
+                    scope = "user",
+                    "user file truncated to fit budget"
+                );
+                layers.push(PromptLayer {
+                    name: "user_file",
+                    content: format!("{header}\n{}", truncated.content),
+                    tokens: truncated.tokens,
+                    cache: cfg.cache,
+                });
+            } else {
+                debug!(
+                    file = %cfg.path,
+                    tokens = counted.tokens,
+                    remaining,
+                    scope = "user",
+                    "user file overflowed to menu (insufficient budget)"
+                );
+                overflow.push(MemoryIndexEntry {
+                    path: format!("user:{}", cfg.path),
+                    tokens: counted.tokens,
+                    description: cfg.description.clone(),
+                    min_trust: cfg.min_trust,
+                });
+            }
+        }
+
+        Ok((layers, used_tokens, overflow))
+    }
+
     fn render_skills(skills: &[SkillEntry]) -> Counted {
         let mut lines = vec![
             "## Skills".to_owned(),
@@ -778,55 +904,6 @@ impl PromptBuilder {
             ));
         }
         Counted::new(lines.join("\n"))
-    }
-
-    /// Try to load `users/{user}/MEMORY.md` as a per-user memory layer.
-    fn build_user_memory_layer(
-        &self,
-        user: &str,
-        remaining_budget: usize,
-    ) -> Result<Option<PromptLayer>> {
-        let rel_path = format!("users/{user}/MEMORY.md");
-        let full_path = self.workspace.join(&rel_path);
-
-        let content = match std::fs::read_to_string(&full_path) {
-            Ok(c) => c,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                trace!(user, path = %rel_path, "no per-user memory file");
-                return Ok(None);
-            }
-            Err(e) => return Err(e).with_context(|| format!("failed to read {rel_path}")),
-        };
-
-        if content.trim().is_empty() {
-            return Ok(None);
-        }
-
-        let header = format!("## {user}'s memory\n");
-        let counted = Counted::new(format!("{header}{content}"));
-
-        if remaining_budget < 200 || counted.tokens > remaining_budget {
-            debug!(
-                user,
-                tokens = counted.tokens,
-                remaining_budget,
-                "per-user memory overflowed budget"
-            );
-            return Ok(None);
-        }
-
-        debug!(
-            user,
-            tokens = counted.tokens,
-            "per-user memory included in prompt"
-        );
-
-        Ok(Some(PromptLayer {
-            name: "user_memory",
-            content: counted.content,
-            tokens: counted.tokens,
-            cache: CacheHint::Session,
-        }))
     }
 
     /// Build a channel-specific formatting context layer.
@@ -951,15 +1028,8 @@ impl PromptBuilder {
         Counted::new(lines.join("\n"))
     }
 
-    /// Build the markdown header for a file layer.
-    /// When a user is set, MEMORY.md is labeled as shared to distinguish it
-    /// from the per-user memory layer.
-    fn layer_header(&self, path: &str) -> String {
-        if path == "MEMORY.md" && self.user.is_some() {
-            "## MEMORY.md (shared)".to_owned()
-        } else {
-            format!("## {path}")
-        }
+    fn layer_header(path: &str) -> String {
+        format!("## {path}")
     }
 
     /// Derive a stable layer name from a file path.
@@ -1319,136 +1389,129 @@ mod tests {
     }
 
     #[test]
-    fn per_user_memory_included_in_prompt() {
+    fn per_user_file_included_in_prompt() {
         let dir = setup_workspace(&[("SOUL.md", "I am an agent.")]);
         fs::create_dir_all(dir.path().join("users/alice")).unwrap();
-        fs::write(
-            dir.path().join("users/alice/MEMORY.md"),
-            "Alice likes rust.",
-        )
-        .unwrap();
+        fs::write(dir.path().join("users/alice/USER.md"), "Alice likes rust.").unwrap();
+
+        let user_configs = vec![PromptFileConfig {
+            path: "USER.md".into(),
+            min_trust: TrustLevel::Full,
+            cache: CacheHint::Session,
+            description: "Per-user info".into(),
+        }];
 
         let index = WorkspaceIndex::scan(dir.path(), &default_file_configs()).unwrap();
         let prompt = PromptBuilder::new(dir.path().to_path_buf(), "reid".into())
             .trust(TrustLevel::Full)
             .user("alice")
+            .user_file_configs(user_configs)
             .build(&index)
             .unwrap();
 
         let flat = prompt.to_flat_string();
         assert!(
-            flat.contains("alice's memory"),
-            "should have per-user memory header"
+            flat.contains("## USER.md (user)"),
+            "should have per-user file header"
         );
         assert!(
             flat.contains("Alice likes rust."),
-            "should include per-user memory content"
+            "should include per-user file content"
         );
 
         let layer_names: Vec<&str> = prompt.layers.iter().map(|l| l.name).collect();
         assert!(
-            layer_names.contains(&"user_memory"),
-            "should have user_memory layer, got: {layer_names:?}"
+            layer_names.contains(&"user_file"),
+            "should have user_file layer, got: {layer_names:?}"
         );
     }
 
     #[test]
-    fn per_user_memory_not_included_without_user() {
+    fn per_user_file_not_included_without_user() {
         let dir = setup_workspace(&[("SOUL.md", "I am an agent.")]);
         fs::create_dir_all(dir.path().join("users/alice")).unwrap();
-        fs::write(
-            dir.path().join("users/alice/MEMORY.md"),
-            "Alice likes rust.",
-        )
-        .unwrap();
+        fs::write(dir.path().join("users/alice/USER.md"), "Alice likes rust.").unwrap();
+
+        let user_configs = vec![PromptFileConfig {
+            path: "USER.md".into(),
+            min_trust: TrustLevel::Full,
+            cache: CacheHint::Session,
+            description: "Per-user info".into(),
+        }];
 
         let index = WorkspaceIndex::scan(dir.path(), &default_file_configs()).unwrap();
         let prompt = PromptBuilder::new(dir.path().to_path_buf(), "reid".into())
             .trust(TrustLevel::Full)
+            .user_file_configs(user_configs)
             .build(&index)
             .unwrap();
 
         let flat = prompt.to_flat_string();
         assert!(
             !flat.contains("Alice likes rust."),
-            "should not include per-user memory without user set"
+            "should not include per-user file without user set"
         );
     }
 
     #[test]
-    fn shared_memory_labeled_when_user_set() {
-        let dir = setup_workspace(&[
-            ("SOUL.md", "I am an agent."),
-            ("MEMORY.md", "Shared knowledge."),
-        ]);
+    fn shared_and_user_files_both_included() {
+        let dir = setup_workspace(&[("SOUL.md", "I am an agent."), ("TOOLS.md", "Shared tools.")]);
         fs::create_dir_all(dir.path().join("users/alice")).unwrap();
-        fs::write(dir.path().join("users/alice/MEMORY.md"), "Alice's stuff.").unwrap();
+        fs::write(dir.path().join("users/alice/TOOLS.md"), "Alice's tools.").unwrap();
+
+        let user_configs = vec![PromptFileConfig {
+            path: "TOOLS.md".into(),
+            min_trust: TrustLevel::Full,
+            cache: CacheHint::Session,
+            description: "Per-user tool notes".into(),
+        }];
 
         let index = WorkspaceIndex::scan(dir.path(), &default_file_configs()).unwrap();
         let prompt = PromptBuilder::new(dir.path().to_path_buf(), "reid".into())
             .trust(TrustLevel::Full)
             .user("alice")
+            .user_file_configs(user_configs)
             .build(&index)
             .unwrap();
 
         let flat = prompt.to_flat_string();
         assert!(
-            flat.contains("## MEMORY.md (shared)"),
-            "shared MEMORY.md should be labeled as shared when user is set"
+            flat.contains("Shared tools."),
+            "shared TOOLS.md content should be present"
         );
         assert!(
-            flat.contains("Shared knowledge."),
-            "shared memory content should be present"
+            flat.contains("## TOOLS.md (user)"),
+            "per-user TOOLS.md should have (user) header"
         );
         assert!(
-            flat.contains("alice's memory"),
-            "per-user memory should be present"
-        );
-        assert!(
-            flat.contains("Alice's stuff."),
-            "per-user memory content should be present"
+            flat.contains("Alice's tools."),
+            "per-user TOOLS.md content should be present"
         );
     }
 
     #[test]
-    fn shared_memory_not_labeled_without_user() {
-        let dir = setup_workspace(&[
-            ("SOUL.md", "I am an agent."),
-            ("MEMORY.md", "Shared knowledge."),
-        ]);
-
-        let index = WorkspaceIndex::scan(dir.path(), &default_file_configs()).unwrap();
-        let prompt = PromptBuilder::new(dir.path().to_path_buf(), "reid".into())
-            .trust(TrustLevel::Full)
-            .build(&index)
-            .unwrap();
-
-        let flat = prompt.to_flat_string();
-        assert!(
-            flat.contains("## MEMORY.md\n"),
-            "MEMORY.md should have plain header without user"
-        );
-        assert!(
-            !flat.contains("(shared)"),
-            "should not be labeled shared without user"
-        );
-    }
-
-    #[test]
-    fn missing_per_user_memory_is_fine() {
+    fn missing_per_user_file_is_fine() {
         let dir = setup_workspace(&[("SOUL.md", "I am an agent.")]);
 
+        let user_configs = vec![PromptFileConfig {
+            path: "USER.md".into(),
+            min_trust: TrustLevel::Full,
+            cache: CacheHint::Session,
+            description: "Per-user info".into(),
+        }];
+
         let index = WorkspaceIndex::scan(dir.path(), &default_file_configs()).unwrap();
         let prompt = PromptBuilder::new(dir.path().to_path_buf(), "reid".into())
             .trust(TrustLevel::Full)
             .user("alice")
+            .user_file_configs(user_configs)
             .build(&index)
             .unwrap();
 
         let layer_names: Vec<&str> = prompt.layers.iter().map(|l| l.name).collect();
         assert!(
-            !layer_names.contains(&"user_memory"),
-            "should not have user_memory layer when file doesn't exist"
+            !layer_names.contains(&"user_file"),
+            "should not have user_file layer when file doesn't exist"
         );
     }
 

@@ -162,6 +162,9 @@ fn diff_sections(current: &Config, new: &Config) -> Vec<&'static str> {
     if new.memory.retention != current.memory.retention {
         changed.push("memory.retention");
     }
+    if new.prompt != current.prompt {
+        changed.push("prompt");
+    }
     if new.cron != current.cron {
         changed.push("cron");
     }
@@ -259,6 +262,17 @@ mod tests {
         let b: Config = serde_yaml::from_str("agent:\n  id: a\n  model: m\n").unwrap();
         let changed = diff_sections(&a, &b);
         assert!(changed.is_empty());
+    }
+
+    #[test]
+    fn diff_sections_detects_prompt_change() {
+        let a: Config = serde_yaml::from_str("agent:\n  id: a\n  model: m\n").unwrap();
+        let b: Config = serde_yaml::from_str(
+            "agent:\n  id: a\n  model: m\nprompt:\n  shared_files:\n    - path: SOUL.md\n",
+        )
+        .unwrap();
+        let changed = diff_sections(&a, &b);
+        assert!(changed.contains(&"prompt"));
     }
 
     #[test]

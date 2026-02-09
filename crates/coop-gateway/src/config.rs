@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use arc_swap::ArcSwap;
 use coop_core::TrustLevel;
+use coop_core::prompt::{CacheHint, PromptFileConfig};
 use coop_memory::MemoryMaintenanceConfig;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -24,6 +25,8 @@ pub(crate) struct Config {
     pub channels: ChannelsConfig,
     #[serde(default)]
     pub provider: ProviderConfig,
+    #[serde(default)]
+    pub prompt: PromptConfig,
     #[serde(default)]
     pub memory: MemoryConfig,
     #[serde(default)]
@@ -70,6 +73,139 @@ pub(crate) struct SignalChannelConfig {
 pub(crate) struct ProviderConfig {
     #[serde(default = "default_provider")]
     pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct PromptConfig {
+    #[serde(default = "default_shared_files")]
+    pub shared_files: Vec<PromptFileEntry>,
+    #[serde(default = "default_user_files")]
+    pub user_files: Vec<PromptFileEntry>,
+}
+
+impl Default for PromptConfig {
+    fn default() -> Self {
+        Self {
+            shared_files: default_shared_files(),
+            user_files: default_user_files(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct PromptFileEntry {
+    pub path: String,
+    #[serde(default = "default_file_trust")]
+    pub trust: TrustLevel,
+    #[serde(default = "default_file_cache")]
+    pub cache: CacheHintConfig,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+impl PromptFileEntry {
+    pub(crate) fn to_core(&self) -> PromptFileConfig {
+        let description = self.description.clone().unwrap_or_else(|| {
+            self.path
+                .strip_suffix(".md")
+                .unwrap_or(&self.path)
+                .to_owned()
+        });
+        PromptFileConfig {
+            path: self.path.clone(),
+            min_trust: self.trust,
+            cache: self.cache.to_core(),
+            description,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum CacheHintConfig {
+    Stable,
+    Session,
+    Volatile,
+}
+
+impl CacheHintConfig {
+    fn to_core(&self) -> CacheHint {
+        match self {
+            Self::Stable => CacheHint::Stable,
+            Self::Session => CacheHint::Session,
+            Self::Volatile => CacheHint::Volatile,
+        }
+    }
+}
+
+fn default_file_trust() -> TrustLevel {
+    TrustLevel::Full
+}
+
+fn default_file_cache() -> CacheHintConfig {
+    CacheHintConfig::Session
+}
+
+fn default_shared_files() -> Vec<PromptFileEntry> {
+    vec![
+        PromptFileEntry {
+            path: "SOUL.md".into(),
+            trust: TrustLevel::Familiar,
+            cache: CacheHintConfig::Stable,
+            description: Some("Agent personality and voice".into()),
+        },
+        PromptFileEntry {
+            path: "IDENTITY.md".into(),
+            trust: TrustLevel::Familiar,
+            cache: CacheHintConfig::Session,
+            description: Some("Agent identity".into()),
+        },
+        PromptFileEntry {
+            path: "TOOLS.md".into(),
+            trust: TrustLevel::Full,
+            cache: CacheHintConfig::Session,
+            description: Some("Tool setup notes".into()),
+        },
+    ]
+}
+
+fn default_user_files() -> Vec<PromptFileEntry> {
+    vec![
+        PromptFileEntry {
+            path: "AGENTS.md".into(),
+            trust: TrustLevel::Full,
+            cache: CacheHintConfig::Stable,
+            description: Some("Behavioral instructions".into()),
+        },
+        PromptFileEntry {
+            path: "USER.md".into(),
+            trust: TrustLevel::Inner,
+            cache: CacheHintConfig::Session,
+            description: Some("Per-user info".into()),
+        },
+        PromptFileEntry {
+            path: "TOOLS.md".into(),
+            trust: TrustLevel::Full,
+            cache: CacheHintConfig::Session,
+            description: Some("Per-user tool notes".into()),
+        },
+    ]
+}
+
+impl PromptConfig {
+    pub(crate) fn shared_core_configs(&self) -> Vec<PromptFileConfig> {
+        self.shared_files
+            .iter()
+            .map(PromptFileEntry::to_core)
+            .collect()
+    }
+
+    pub(crate) fn user_core_configs(&self) -> Vec<PromptFileConfig> {
+        self.user_files
+            .iter()
+            .map(PromptFileEntry::to_core)
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -558,5 +694,134 @@ agent:
 
         let resolved = config.resolve_workspace(Path::new("/unused")).unwrap();
         assert_eq!(resolved, dir.path());
+    }
+
+    #[test]
+    fn parse_minimal_config_gets_default_prompt() {
+        let yaml = "
+agent:
+  id: test
+  model: test-model
+";
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.prompt.shared_files.len(), 3);
+        assert_eq!(config.prompt.shared_files[0].path, "SOUL.md");
+        assert_eq!(config.prompt.shared_files[1].path, "IDENTITY.md");
+        assert_eq!(config.prompt.shared_files[2].path, "TOOLS.md");
+        assert_eq!(config.prompt.user_files.len(), 3);
+        assert_eq!(config.prompt.user_files[0].path, "AGENTS.md");
+        assert_eq!(config.prompt.user_files[1].path, "USER.md");
+        assert_eq!(config.prompt.user_files[2].path, "TOOLS.md");
+    }
+
+    #[test]
+    fn parse_custom_prompt_shared_files() {
+        let yaml = "
+agent:
+  id: test
+  model: test-model
+prompt:
+  shared_files:
+    - path: SOUL.md
+      trust: familiar
+      cache: stable
+    - path: CONTEXT.md
+      description: Project context
+";
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.prompt.shared_files.len(), 2);
+        assert_eq!(config.prompt.shared_files[0].path, "SOUL.md");
+        assert_eq!(config.prompt.shared_files[0].trust, TrustLevel::Familiar);
+        assert_eq!(config.prompt.shared_files[0].cache, CacheHintConfig::Stable);
+        assert_eq!(config.prompt.shared_files[1].path, "CONTEXT.md");
+        assert_eq!(
+            config.prompt.shared_files[1].description.as_deref(),
+            Some("Project context")
+        );
+        // user_files should get defaults since not specified
+        assert_eq!(config.prompt.user_files.len(), 3);
+    }
+
+    #[test]
+    fn parse_empty_user_files() {
+        let yaml = "
+agent:
+  id: test
+  model: test-model
+prompt:
+  user_files: []
+";
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.prompt.user_files.is_empty());
+        // shared_files should get defaults
+        assert_eq!(config.prompt.shared_files.len(), 3);
+    }
+
+    #[test]
+    fn prompt_file_entry_to_core_defaults_description() {
+        let entry = PromptFileEntry {
+            path: "SOUL.md".into(),
+            trust: TrustLevel::Familiar,
+            cache: CacheHintConfig::Stable,
+            description: None,
+        };
+        let core = entry.to_core();
+        assert_eq!(core.description, "SOUL");
+        assert_eq!(core.path, "SOUL.md");
+        assert_eq!(core.min_trust, TrustLevel::Familiar);
+    }
+
+    #[test]
+    fn prompt_file_entry_to_core_uses_description() {
+        let entry = PromptFileEntry {
+            path: "SOUL.md".into(),
+            trust: TrustLevel::Full,
+            cache: CacheHintConfig::Session,
+            description: Some("Agent personality".into()),
+        };
+        let core = entry.to_core();
+        assert_eq!(core.description, "Agent personality");
+    }
+
+    #[test]
+    fn prompt_config_roundtrip() {
+        let yaml = "
+agent:
+  id: test
+  model: test-model
+prompt:
+  shared_files:
+    - path: SOUL.md
+      trust: familiar
+      cache: stable
+      description: Agent personality
+    - path: TOOLS.md
+  user_files:
+    - path: AGENTS.md
+      cache: stable
+    - path: USER.md
+      trust: inner
+";
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let serialized = serde_yaml::to_string(&config).unwrap();
+        let config2: Config = serde_yaml::from_str(&serialized).unwrap();
+        assert_eq!(config.prompt, config2.prompt);
+    }
+
+    #[test]
+    fn prompt_file_entry_defaults() {
+        let yaml = "
+agent:
+  id: test
+  model: test-model
+prompt:
+  shared_files:
+    - path: CUSTOM.md
+";
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let entry = &config.prompt.shared_files[0];
+        assert_eq!(entry.trust, TrustLevel::Full);
+        assert_eq!(entry.cache, CacheHintConfig::Session);
+        assert!(entry.description.is_none());
     }
 }

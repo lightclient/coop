@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use coop_core::TrustLevel;
-use coop_core::prompt::{PromptBuilder, WorkspaceIndex, default_file_configs};
+use coop_core::prompt::{PromptBuilder, WorkspaceIndex};
 
 use crate::config::Config;
 
@@ -225,6 +225,9 @@ pub(crate) fn validate_config(config_path: &Path, config_dir: &Path) -> CheckRep
     // 6. memory config
     check_memory(&mut report, &config, config_dir);
 
+    // 6b. prompt config
+    check_prompt(&mut report, &config);
+
     // 7-8 depend on workspace
     if let Some(ref ws) = workspace {
         check_workspace_files(&mut report, ws, &config);
@@ -385,11 +388,98 @@ fn check_memory(report: &mut CheckReport, config: &Config, config_dir: &Path) {
     }
 }
 
+fn check_prompt(report: &mut CheckReport, config: &Config) {
+    let all_entries: Vec<(&str, &crate::config::PromptFileEntry)> = config
+        .prompt
+        .shared_files
+        .iter()
+        .map(|e| ("shared", e))
+        .chain(config.prompt.user_files.iter().map(|e| ("user", e)))
+        .collect();
+
+    let mut has_error = false;
+
+    for (scope, entry) in &all_entries {
+        if entry.path.is_empty() {
+            report.push(CheckResult {
+                name: "prompt_files",
+                severity: Severity::Error,
+                passed: false,
+                message: format!("prompt.{scope}_files has an entry with empty path"),
+            });
+            has_error = true;
+        }
+        if entry.path.contains("..") || entry.path.starts_with('/') {
+            report.push(CheckResult {
+                name: "prompt_files",
+                severity: Severity::Error,
+                passed: false,
+                message: format!(
+                    "prompt.{scope}_files path '{}' must be relative (no '..' or absolute paths)",
+                    entry.path
+                ),
+            });
+            has_error = true;
+        }
+    }
+
+    // Check for duplicates within each scope.
+    let shared_paths: Vec<&str> = config
+        .prompt
+        .shared_files
+        .iter()
+        .map(|e| e.path.as_str())
+        .collect();
+    let mut seen = HashSet::new();
+    for path in &shared_paths {
+        if !seen.insert(*path) {
+            report.push(CheckResult {
+                name: "prompt_files",
+                severity: Severity::Warning,
+                passed: false,
+                message: format!("duplicate path '{path}' in prompt.shared_files"),
+            });
+        }
+    }
+
+    let user_paths: Vec<&str> = config
+        .prompt
+        .user_files
+        .iter()
+        .map(|e| e.path.as_str())
+        .collect();
+    let mut seen = HashSet::new();
+    for path in &user_paths {
+        if !seen.insert(*path) {
+            report.push(CheckResult {
+                name: "prompt_files",
+                severity: Severity::Warning,
+                passed: false,
+                message: format!("duplicate path '{path}' in prompt.user_files"),
+            });
+        }
+    }
+
+    if !has_error {
+        report.push(CheckResult {
+            name: "prompt_files",
+            severity: Severity::Info,
+            passed: true,
+            message: format!(
+                "prompt files: {} shared, {} per-user",
+                config.prompt.shared_files.len(),
+                config.prompt.user_files.len(),
+            ),
+        });
+    }
+}
+
 fn check_workspace_files(report: &mut CheckReport, ws: &Path, config: &Config) {
-    let file_configs = default_file_configs();
-    match WorkspaceIndex::scan(ws, &file_configs) {
+    let shared_configs = config.prompt.shared_core_configs();
+    let user_configs = config.prompt.user_core_configs();
+
+    match WorkspaceIndex::scan(ws, &shared_configs) {
         Ok(index) => {
-            // 6. workspace_files (Info)
             let entries = index.entries_for_trust(TrustLevel::Full);
             let file_list = if entries.is_empty() {
                 "no workspace files found".to_owned()
@@ -407,9 +497,10 @@ fn check_workspace_files(report: &mut CheckReport, ws: &Path, config: &Config) {
                 message: format!("workspace files: {file_list}"),
             });
 
-            // 7. prompt_builds
             match PromptBuilder::new(ws.to_path_buf(), config.agent.id.clone())
                 .trust(TrustLevel::Full)
+                .file_configs(shared_configs)
+                .user_file_configs(user_configs)
                 .build(&index)
             {
                 Ok(built) => {
@@ -980,5 +1071,125 @@ mod tests {
         assert_eq!(json["checks"].as_array().unwrap().len(), 2);
         assert_eq!(json["checks"][0]["name"], "test_pass");
         assert_eq!(json["checks"][1]["severity"], "warning");
+    }
+
+    #[test]
+    fn test_prompt_files_default_passes() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = write_minimal_config(dir.path());
+
+        let report = validate_config(&config_path, dir.path());
+        let prompt_check = report
+            .results
+            .iter()
+            .find(|r| r.name == "prompt_files" && r.severity == Severity::Info);
+        assert!(
+            prompt_check.is_some(),
+            "should have prompt_files info check"
+        );
+        assert!(prompt_check.unwrap().passed);
+        assert!(prompt_check.unwrap().message.contains("3 shared"));
+    }
+
+    #[test]
+    fn test_prompt_files_empty_path_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(workspace.join("SOUL.md"), "test").unwrap();
+
+        let config_path = dir.path().join("coop.yaml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "agent:\n  id: test\n  model: test-model\n  workspace: {}\nprovider:\n  name: anthropic\nprompt:\n  shared_files:\n    - path: ''\n",
+                workspace.display()
+            ),
+        )
+        .unwrap();
+
+        let report = validate_config(&config_path, dir.path());
+        let prompt_check = report
+            .results
+            .iter()
+            .find(|r| r.name == "prompt_files" && !r.passed);
+        assert!(prompt_check.is_some(), "should reject empty path");
+        assert!(prompt_check.unwrap().message.contains("empty path"));
+    }
+
+    #[test]
+    fn test_prompt_files_absolute_path_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(workspace.join("SOUL.md"), "test").unwrap();
+
+        let config_path = dir.path().join("coop.yaml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "agent:\n  id: test\n  model: test-model\n  workspace: {}\nprovider:\n  name: anthropic\nprompt:\n  shared_files:\n    - path: /etc/passwd\n",
+                workspace.display()
+            ),
+        )
+        .unwrap();
+
+        let report = validate_config(&config_path, dir.path());
+        let prompt_check = report
+            .results
+            .iter()
+            .find(|r| r.name == "prompt_files" && !r.passed);
+        assert!(prompt_check.is_some(), "should reject absolute path");
+    }
+
+    #[test]
+    fn test_prompt_files_traversal_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(workspace.join("SOUL.md"), "test").unwrap();
+
+        let config_path = dir.path().join("coop.yaml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "agent:\n  id: test\n  model: test-model\n  workspace: {}\nprovider:\n  name: anthropic\nprompt:\n  user_files:\n    - path: ../../etc/passwd\n",
+                workspace.display()
+            ),
+        )
+        .unwrap();
+
+        let report = validate_config(&config_path, dir.path());
+        let prompt_check = report
+            .results
+            .iter()
+            .find(|r| r.name == "prompt_files" && !r.passed);
+        assert!(prompt_check.is_some(), "should reject path traversal");
+    }
+
+    #[test]
+    fn test_prompt_files_duplicate_warns() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(workspace.join("SOUL.md"), "test").unwrap();
+
+        let config_path = dir.path().join("coop.yaml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "agent:\n  id: test\n  model: test-model\n  workspace: {}\nprovider:\n  name: anthropic\nprompt:\n  shared_files:\n    - path: SOUL.md\n    - path: SOUL.md\n",
+                workspace.display()
+            ),
+        )
+        .unwrap();
+
+        let report = validate_config(&config_path, dir.path());
+        let dup_check = report
+            .results
+            .iter()
+            .find(|r| r.name == "prompt_files" && r.severity == Severity::Warning && !r.passed);
+        assert!(dup_check.is_some(), "should warn about duplicate path");
+        assert!(dup_check.unwrap().message.contains("duplicate"));
     }
 }

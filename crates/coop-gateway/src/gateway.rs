@@ -1,7 +1,5 @@
 use anyhow::Result;
-use coop_core::prompt::{
-    PromptBuilder, SkillEntry, WorkspaceIndex, default_file_configs, scan_skills,
-};
+use coop_core::prompt::{PromptBuilder, SkillEntry, WorkspaceIndex, scan_skills};
 use coop_core::{
     InboundMessage, Message, Provider, Role, SessionKey, SessionKind, ToolContext, ToolDef,
     ToolExecutor, TrustLevel, TurnConfig, TurnEvent, TurnResult, TypingNotifier, Usage,
@@ -144,7 +142,7 @@ impl Gateway {
         typing_notifier: Option<Arc<dyn TypingNotifier>>,
         memory: Option<Arc<dyn Memory>>,
     ) -> Result<Self> {
-        let file_configs = default_file_configs();
+        let file_configs = config.load().prompt.shared_core_configs();
         let workspace_index = WorkspaceIndex::scan(&workspace, &file_configs)?;
         let skills = scan_skills(&workspace);
         if !skills.is_empty() {
@@ -179,23 +177,26 @@ impl Gateway {
         user_name: Option<&str>,
         channel: Option<&str>,
     ) -> Result<String> {
-        let file_configs = default_file_configs();
+        let cfg = self.config.load();
+        let shared_configs = cfg.prompt.shared_core_configs();
+        let user_configs = cfg.prompt.user_core_configs();
         let mut system_prompt = {
             let mut index = self
                 .workspace_index
                 .lock()
                 .expect("workspace index mutex poisoned");
             let refreshed = index
-                .refresh(&self.workspace, &file_configs)
+                .refresh(&self.workspace, &shared_configs)
                 .unwrap_or(false);
             if refreshed {
                 debug!("workspace index refreshed");
             }
 
-            let cfg = self.config.load();
             let mut builder = PromptBuilder::new(self.workspace.clone(), cfg.agent.id.clone())
                 .trust(trust)
                 .model(&cfg.agent.model)
+                .file_configs(shared_configs)
+                .user_file_configs(user_configs)
                 .skills(self.skills.clone());
             if let Some(name) = user_name {
                 builder = builder.user(name);
