@@ -93,6 +93,7 @@ Fast incremental builds are critical. Coop is developed through agentic loops wh
 - Traits: crates/coop-core/src/traits.rs
 - Types: crates/coop-core/src/types.rs
 - Prompt: crates/coop-core/src/prompt.rs
+- Key pool: crates/coop-agent/src/key_pool.rs
 - Test fakes: crates/coop-core/src/fakes.rs
 
 ## Development Loop
@@ -218,6 +219,14 @@ When debugging coop behavior, always start with the traces:
 5. **Verify the effect.** The trace tells you what the code *did* — still verify the user-visible outcome is correct (test output, TUI rendering, API response, etc.).
 
 The goal is trace-driven debugging: traces are the primary evidence, not println or guesswork. If a bug can't be diagnosed from the trace, that's a sign the relevant code path needs better instrumentation.
+
+## API Key Rotation
+
+Coop supports multiple API keys with automatic rotation. Keys rotate proactively when approaching rate limits (90% utilization) and reactively on 429 errors. The pool always prefers the key whose rate-limit window resets soonest.
+
+Config: `provider.api_keys` is a list of `env:VAR_NAME` references. When omitted, falls back to `ANTHROPIC_API_KEY`. Mixed pools (OAuth + regular) work — each key auto-detects its type.
+
+Implementation: `crates/coop-agent/src/key_pool.rs` (`KeyPool`, `RateLimitInfo`, header parsing, key selection). Provider integration in `crates/coop-agent/src/anthropic_provider.rs`.
 
 ## Anthropic OAuth (Claude Code Tokens)
 

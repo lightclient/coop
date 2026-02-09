@@ -78,6 +78,13 @@ channels:
 # Provider (only "anthropic" supported currently)
 provider:
   name: anthropic                   # restart-required
+  # Multiple API keys for automatic rotation on rate limits (optional).
+  # Each entry is an env: reference. Keys rotate proactively at 90%
+  # utilization and reactively on 429 errors. Omit for single-key mode.
+  # api_keys:
+  #   - env:ANTHROPIC_API_KEY
+  #   - env:ANTHROPIC_API_KEY_2
+  #   - env:ANTHROPIC_API_KEY_3
 
 # Memory system
 memory:
@@ -146,7 +153,7 @@ cron:
 - Cron users must exist in the users list
 - Cron delivery channel must be `signal`
 - Cron with user but no `deliver`: warns if user has no non-terminal match patterns (heartbeat will have no delivery targets)
-- API keys checked via environment: ANTHROPIC_API_KEY (always), plus embedding provider key if configured
+- API keys: if `provider.api_keys` is set, each entry must use `env:` prefix and the referenced env var must be set. Otherwise, `ANTHROPIC_API_KEY` must be set. Plus embedding provider key if configured
 
 ## File tools
 

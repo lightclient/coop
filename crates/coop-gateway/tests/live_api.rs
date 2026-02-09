@@ -14,7 +14,7 @@ async fn live_oauth_roundtrip() {
     };
 
     let provider =
-        coop_agent::AnthropicProvider::new(api_key, "anthropic/claude-sonnet-4-20250514")
+        coop_agent::AnthropicProvider::new(vec![api_key], "anthropic/claude-sonnet-4-20250514")
             .expect("provider creation");
     let provider: Arc<dyn coop_core::Provider> = Arc::new(provider);
 

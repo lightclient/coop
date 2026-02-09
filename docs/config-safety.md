@@ -330,7 +330,7 @@ pub struct CheckResult {
 | `required_fields` | agent.id and agent.model present and non-empty |
 | `workspace_exists` | `config.resolve_workspace()` succeeds |
 | `provider_known` | provider.name is "anthropic" (or future supported) |
-| `api_key_present` | `ANTHROPIC_API_KEY` env var is set |
+| `api_key_present` | If `provider.api_keys` is set: each entry has `env:` prefix and its env var is set. Otherwise: `ANTHROPIC_API_KEY` env var is set |
 
 ### Soft Errors (coop starts in degraded mode)
 

@@ -35,7 +35,7 @@ cargo test -p coop-core -- prompt  # Run tests matching "prompt"
 Five workspace crates under `crates/`:
 
 - **coop-core** — Domain types (`Message`, `Role`, `Content`, `SessionKey`, `TrustLevel`), trait boundaries (`Provider`, `Channel`, `Tool`, `ToolExecutor`, `SessionStore`), prompt builder with token counting, and testing fakes for all traits
-- **coop-agent** — LLM provider integration: direct Anthropic API client with OAuth support
+- **coop-agent** — LLM provider integration: direct Anthropic API client with OAuth support, multi-key rotation on rate limits
 - **coop-gateway** — Main binary entry point, CLI (Start/Chat/Version), TUI event loop, gateway message routing, YAML config parsing
 - **coop-channels** — Channel adapters (currently terminal only)
 - **coop-tui** — Terminal UI built on crossterm

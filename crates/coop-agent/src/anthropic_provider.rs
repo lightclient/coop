@@ -15,6 +15,8 @@ use tracing::{Instrument, debug, info, info_span, warn};
 use coop_core::traits::{Provider, ProviderStream};
 use coop_core::types::{Content, Message, ModelInfo, Role, ToolDef, Usage};
 
+use crate::key_pool::KeyPool;
+
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const CLAUDE_CODE_VERSION: &str = "2.1.29";
@@ -57,26 +59,22 @@ fn format_api_error(status: reqwest::StatusCode, raw_body: &str) -> String {
     }
 }
 
-/// Direct Anthropic provider with OAuth support.
+/// Direct Anthropic provider with OAuth support and key rotation.
 pub struct AnthropicProvider {
     client: Client,
-    api_key: String,
+    keys: KeyPool,
     model: RwLock<ModelInfo>,
-    is_oauth: bool,
 }
 
 impl AnthropicProvider {
-    /// Create a new Anthropic provider.
+    /// Create a new Anthropic provider with multiple API keys.
     ///
-    /// Automatically detects OAuth tokens (sk-ant-oat*) vs regular API keys.
-    pub fn new(api_key: String, model_name: &str) -> Result<Self> {
-        let is_oauth = api_key.contains("sk-ant-oat");
+    /// Each key auto-detects OAuth (sk-ant-oat*) vs regular API keys.
+    pub fn new(api_keys: Vec<String>, model_name: &str) -> Result<Self> {
+        anyhow::ensure!(!api_keys.is_empty(), "at least one API key is required");
 
-        debug!(
-            model = model_name,
-            is_oauth = is_oauth,
-            "creating anthropic provider"
-        );
+        let key_count = api_keys.len();
+        debug!(model = model_name, key_count, "creating anthropic provider");
 
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(300))
@@ -93,17 +91,22 @@ impl AnthropicProvider {
 
         Ok(Self {
             client,
-            api_key,
+            keys: KeyPool::new(api_keys),
             model: RwLock::new(model),
-            is_oauth,
         })
     }
 
-    /// Create from environment variable ANTHROPIC_API_KEY.
+    /// Create from environment variable ANTHROPIC_API_KEY (single-key, backward compat).
     pub fn from_env(model_name: &str) -> Result<Self> {
         let api_key = std::env::var("ANTHROPIC_API_KEY")
             .context("ANTHROPIC_API_KEY environment variable not set")?;
-        Self::new(api_key, model_name)
+        Self::new(vec![api_key], model_name)
+    }
+
+    /// Create from `env:VAR_NAME` key references.
+    pub fn from_key_refs(key_refs: &[String], model_name: &str) -> Result<Self> {
+        let keys = crate::key_pool::resolve_key_refs(key_refs)?;
+        Self::new(keys, model_name)
     }
 
     /// Read a snapshot of the current model info.
@@ -111,9 +114,15 @@ impl AnthropicProvider {
         self.model.read().expect("model lock poisoned").clone()
     }
 
-    /// Build request with appropriate auth headers.
-    fn build_request(&self, body: &Value, has_tools: bool) -> reqwest::RequestBuilder {
-        let url = if self.is_oauth {
+    /// Build request with appropriate auth headers for a specific key.
+    fn build_request(
+        &self,
+        body: &Value,
+        has_tools: bool,
+        api_key: &str,
+        is_oauth: bool,
+    ) -> reqwest::RequestBuilder {
+        let url = if is_oauth {
             // OAuth requires ?beta=true query parameter
             format!("{ANTHROPIC_API_URL}?beta=true")
         } else {
@@ -126,7 +135,7 @@ impl AnthropicProvider {
             .header("anthropic-version", ANTHROPIC_VERSION)
             .header("content-type", "application/json");
 
-        if self.is_oauth {
+        if is_oauth {
             // Build beta flags: always need oauth + interleaved-thinking,
             // add claude-code flag only when tools are present
             let beta = if has_tools {
@@ -136,7 +145,7 @@ impl AnthropicProvider {
             };
 
             req = req
-                .header("authorization", format!("Bearer {}", self.api_key))
+                .header("authorization", format!("Bearer {api_key}"))
                 .header("anthropic-beta", beta)
                 .header(
                     "user-agent",
@@ -144,28 +153,48 @@ impl AnthropicProvider {
                 )
                 .header("x-app", "cli");
         } else {
-            req = req.header("x-api-key", &self.api_key);
+            req = req.header("x-api-key", api_key);
         }
 
         req.json(body)
     }
 
-    /// Send a request with retry on transient errors (429, 500, 502, 503).
-    async fn send_with_retry(&self, body: &Value, has_tools: bool) -> Result<reqwest::Response> {
+    /// Send a request with retry on transient errors, rotating keys on 429 rate limits.
+    async fn send_with_retry(
+        &self,
+        body: &Value,
+        has_tools: bool,
+    ) -> Result<(reqwest::Response, usize)> {
         let mut last_err = None;
+        let key_count = self.keys.len();
 
         for attempt in 0..=MAX_RETRIES {
+            let key_index = self.keys.best_key();
+            let (api_key, is_oauth) = self.keys.get(key_index);
+
             let response = self
-                .build_request(body, has_tools)
+                .build_request(body, has_tools, api_key, is_oauth)
                 .send()
                 .await
                 .context("failed to send request to Anthropic")?;
 
             let status = response.status();
-            debug!(status = %status, attempt = attempt + 1, "http response");
+            debug!(status = %status, attempt = attempt + 1, key_index, key_count, "http response");
+
+            // Update rate-limit state from headers on every response.
+            self.keys.update_from_headers(key_index, response.headers());
 
             if status.is_success() {
-                return Ok(response);
+                if self.keys.is_near_limit(key_index) {
+                    let utilization = self.keys.utilization(key_index);
+                    info!(
+                        key_index,
+                        key_count,
+                        utilization = utilization,
+                        "key approaching rate limit, will rotate on next request"
+                    );
+                }
+                return Ok((response, key_index));
             }
 
             let is_retryable = matches!(status.as_u16(), 429 | 500 | 502 | 503);
@@ -175,9 +204,38 @@ impl AnthropicProvider {
                 anyhow::bail!("{}", format_api_error(status, &error_text));
             }
 
+            // Save retry-after before consuming the response body.
+            let retry_after_val = parse_retry_after(response.headers());
             let error_text = response.text().await.unwrap_or_default();
+
+            // Check if this is a rate_limit_error (not overloaded).
+            let is_rate_limit = status.as_u16() == 429 && error_text.contains("rate_limit_error");
+
+            if is_rate_limit {
+                let retry_after = retry_after_val.unwrap_or(60);
+                self.keys.mark_rate_limited(key_index, retry_after);
+
+                let next_key = self.keys.best_key();
+                if next_key != key_index && !self.keys.on_cooldown(next_key) {
+                    info!(
+                        old_key = key_index,
+                        new_key = next_key,
+                        key_count,
+                        "rate-limited, rotated key"
+                    );
+                    continue; // retry immediately with the new key
+                }
+
+                warn!(
+                    key_index,
+                    key_count, retry_after, "all keys rate-limited, waiting"
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(retry_after)).await;
+                continue;
+            }
+
+            // Overloaded (429 non-rate-limit) or 5xx: exponential backoff
             let base_ms = 1000u64 * 2u64.pow(attempt);
-            // Simple jitter without rand crate
             let jitter_ms = u64::from(
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -191,6 +249,7 @@ impl AnthropicProvider {
                 max = MAX_RETRIES,
                 status = %status,
                 backoff_ms,
+                key_index,
                 "retryable Anthropic error, backing off: {error_text}"
             );
 
@@ -210,8 +269,8 @@ impl AnthropicProvider {
     ///
     /// OAuth tokens include Claude Code identity as first block.
     /// Both paths use structured arrays for prompt caching.
-    fn build_system_blocks(&self, system: &str) -> Value {
-        if self.is_oauth {
+    fn build_system_blocks(system: &str, is_oauth: bool) -> Value {
+        if is_oauth {
             json!([
                 {
                     "type": "text",
@@ -240,6 +299,7 @@ impl AnthropicProvider {
         messages: &[Message],
         tools: &[ToolDef],
         stream: bool,
+        is_oauth: bool,
     ) -> Value {
         let has_tools = !tools.is_empty();
         let model = self.model_snapshot();
@@ -252,12 +312,12 @@ impl AnthropicProvider {
         let mut body = json!({
             "model": model.name,
             "max_tokens": 8192,
-            "system": self.build_system_blocks(system),
-            "messages": Self::format_messages(messages, self.is_oauth, cache_at),
+            "system": Self::build_system_blocks(system, is_oauth),
+            "messages": Self::format_messages(messages, is_oauth, cache_at),
         });
 
         if has_tools {
-            body["tools"] = json!(Self::format_tools(tools, self.is_oauth));
+            body["tools"] = json!(Self::format_tools(tools, is_oauth));
         }
 
         if stream {
@@ -437,9 +497,19 @@ impl std::fmt::Debug for AnthropicProvider {
         let model = self.model_snapshot();
         f.debug_struct("AnthropicProvider")
             .field("model", &model.name)
-            .field("is_oauth", &self.is_oauth)
+            .field("key_count", &self.keys.len())
             .finish_non_exhaustive()
     }
+}
+
+/// Parse `retry-after` header value (seconds).
+fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    headers
+        .get("retry-after")?
+        .to_str()
+        .ok()?
+        .parse::<u64>()
+        .ok()
 }
 
 #[async_trait]
@@ -468,26 +538,31 @@ impl Provider for AnthropicProvider {
         tools: &[ToolDef],
     ) -> Result<(Message, Usage)> {
         let model_name = self.model_snapshot().name;
+        let key_count = self.keys.len();
         let span = info_span!(
             "anthropic_request",
             model = %model_name,
             method = "complete",
             message_count = messages.len(),
             tool_count = tools.len(),
+            key_count,
         );
 
         async {
             let has_tools = !tools.is_empty();
-            let body = self.build_body(system, messages, tools, false);
+            // Use the best key's OAuth status for body building.
+            let best = self.keys.best_key();
+            let (_, is_oauth) = self.keys.get(best);
+            let body = self.build_body(system, messages, tools, false, is_oauth);
 
-            let response = self.send_with_retry(&body, has_tools).await?;
+            let (response, _key_index) = self.send_with_retry(&body, has_tools).await?;
 
             let api_response: AnthropicResponse = response
                 .json()
                 .await
                 .context("failed to parse Anthropic response")?;
 
-            let message = Self::parse_response(&api_response, self.is_oauth);
+            let message = Self::parse_response(&api_response, is_oauth);
             let usage = Self::parse_usage(&api_response);
 
             info!(
@@ -514,22 +589,25 @@ impl Provider for AnthropicProvider {
         tools: &[ToolDef],
     ) -> Result<ProviderStream> {
         let model_name = self.model_snapshot().name;
+        let key_count = self.keys.len();
         let span = info_span!(
             "anthropic_request",
             model = %model_name,
             method = "stream",
             message_count = messages.len(),
             tool_count = tools.len(),
+            key_count,
         );
         let _enter = span.enter();
 
         let has_tools = !tools.is_empty();
-        let body = self.build_body(system, messages, tools, true);
+        let best = self.keys.best_key();
+        let (_, is_oauth) = self.keys.get(best);
+        let body = self.build_body(system, messages, tools, true, is_oauth);
 
-        let response = self.send_with_retry(&body, has_tools).await?;
+        let (response, _key_index) = self.send_with_retry(&body, has_tools).await?;
 
         let byte_stream = response.bytes_stream();
-        let is_oauth = self.is_oauth;
 
         let stream = futures::stream::unfold(
             SseState::new(byte_stream, is_oauth),
@@ -1007,10 +1085,7 @@ mod tests {
 
     #[test]
     fn build_system_blocks_non_oauth_has_cache_control() {
-        let provider =
-            AnthropicProvider::new("sk-ant-api-test".into(), "claude-sonnet-4-20250514").unwrap();
-
-        let blocks = provider.build_system_blocks("You are a test agent.");
+        let blocks = AnthropicProvider::build_system_blocks("You are a test agent.", false);
 
         let arr = blocks.as_array().expect("should be an array");
         assert_eq!(arr.len(), 1);
@@ -1119,7 +1194,8 @@ mod tests {
     #[test]
     fn set_model_updates_model_info() {
         let provider =
-            AnthropicProvider::new("sk-ant-api-test".into(), "claude-sonnet-4-20250514").unwrap();
+            AnthropicProvider::new(vec!["sk-ant-api-test".into()], "claude-sonnet-4-20250514")
+                .unwrap();
         assert_eq!(provider.model_info().name, "claude-sonnet-4-20250514");
 
         provider.set_model("claude-haiku-3-20250514");
@@ -1129,7 +1205,8 @@ mod tests {
     #[test]
     fn set_model_strips_anthropic_prefix() {
         let provider =
-            AnthropicProvider::new("sk-ant-api-test".into(), "claude-sonnet-4-20250514").unwrap();
+            AnthropicProvider::new(vec!["sk-ant-api-test".into()], "claude-sonnet-4-20250514")
+                .unwrap();
 
         provider.set_model("anthropic/claude-haiku-3-20250514");
         assert_eq!(provider.model_info().name, "claude-haiku-3-20250514");
@@ -1138,7 +1215,8 @@ mod tests {
     #[test]
     fn set_model_noop_when_same() {
         let provider =
-            AnthropicProvider::new("sk-ant-api-test".into(), "claude-sonnet-4-20250514").unwrap();
+            AnthropicProvider::new(vec!["sk-ant-api-test".into()], "claude-sonnet-4-20250514")
+                .unwrap();
 
         // Same model — should be a no-op (no panic, no change).
         provider.set_model("claude-sonnet-4-20250514");
@@ -1148,14 +1226,15 @@ mod tests {
     #[test]
     fn set_model_affects_build_body() {
         let provider =
-            AnthropicProvider::new("sk-ant-api-test".into(), "claude-sonnet-4-20250514").unwrap();
+            AnthropicProvider::new(vec!["sk-ant-api-test".into()], "claude-sonnet-4-20250514")
+                .unwrap();
 
         let messages = vec![Message::user().with_text("hello")];
-        let body = provider.build_body("system", &messages, &[], false);
+        let body = provider.build_body("system", &messages, &[], false, false);
         assert_eq!(body["model"], "claude-sonnet-4-20250514");
 
         provider.set_model("claude-haiku-3-20250514");
-        let body = provider.build_body("system", &messages, &[], false);
+        let body = provider.build_body("system", &messages, &[], false, false);
         assert_eq!(body["model"], "claude-haiku-3-20250514");
     }
 }

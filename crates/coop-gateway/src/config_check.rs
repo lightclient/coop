@@ -210,17 +210,60 @@ pub(crate) fn validate_config(config_path: &Path, config_dir: &Path) -> CheckRep
     });
 
     // 5. api_key_present
-    let api_key_ok = std::env::var("ANTHROPIC_API_KEY").is_ok();
-    report.push(CheckResult {
-        name: "api_key_present",
-        severity: Severity::Error,
-        passed: api_key_ok,
-        message: if api_key_ok {
-            "API key: present".to_owned()
-        } else {
-            "ANTHROPIC_API_KEY environment variable not set".to_owned()
-        },
-    });
+    if config.provider.api_keys.is_empty() {
+        let api_key_ok = std::env::var("ANTHROPIC_API_KEY").is_ok();
+        report.push(CheckResult {
+            name: "api_key_present",
+            severity: Severity::Error,
+            passed: api_key_ok,
+            message: if api_key_ok {
+                "API key: present".to_owned()
+            } else {
+                "ANTHROPIC_API_KEY environment variable not set".to_owned()
+            },
+        });
+    } else {
+        let mut all_ok = true;
+
+        for entry in &config.provider.api_keys {
+            if let Some(var_name) = entry.strip_prefix("env:") {
+                let is_set = std::env::var(var_name).is_ok();
+                if !is_set {
+                    report.push(CheckResult {
+                        name: "api_key_present",
+                        severity: Severity::Error,
+                        passed: false,
+                        message: format!(
+                            "{var_name} environment variable not set (from api_keys entry '{entry}')"
+                        ),
+                    });
+                    all_ok = false;
+                }
+            } else {
+                report.push(CheckResult {
+                    name: "api_key_present",
+                    severity: Severity::Error,
+                    passed: false,
+                    message: format!(
+                        "api_keys entry '{entry}' must use 'env:' prefix (e.g. env:ANTHROPIC_API_KEY)"
+                    ),
+                });
+                all_ok = false;
+            }
+        }
+
+        if all_ok {
+            report.push(CheckResult {
+                name: "api_key_present",
+                severity: Severity::Info,
+                passed: true,
+                message: format!(
+                    "API keys: {} configured (rotation enabled)",
+                    config.provider.api_keys.len()
+                ),
+            });
+        }
+    }
 
     // 6. memory config
     check_memory(&mut report, &config, config_dir);
@@ -1191,5 +1234,87 @@ mod tests {
             .find(|r| r.name == "prompt_files" && r.severity == Severity::Warning && !r.passed);
         assert!(dup_check.is_some(), "should warn about duplicate path");
         assert!(dup_check.unwrap().message.contains("duplicate"));
+    }
+
+    #[test]
+    fn test_config_check_rejects_missing_env_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(workspace.join("SOUL.md"), "test").unwrap();
+
+        let config_path = dir.path().join("coop.yaml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "agent:\n  id: test\n  model: test-model\n  workspace: {}\nprovider:\n  name: anthropic\n  api_keys:\n    - ANTHROPIC_API_KEY\n",
+                workspace.display()
+            ),
+        )
+        .unwrap();
+
+        let report = validate_config(&config_path, dir.path());
+        let check = report
+            .results
+            .iter()
+            .find(|r| r.name == "api_key_present" && !r.passed);
+        assert!(check.is_some(), "should reject entry without env: prefix");
+        assert!(check.unwrap().message.contains("env:"));
+    }
+
+    #[test]
+    fn test_config_check_reports_all_missing_env_vars() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(workspace.join("SOUL.md"), "test").unwrap();
+
+        let config_path = dir.path().join("coop.yaml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "agent:\n  id: test\n  model: test-model\n  workspace: {}\nprovider:\n  name: anthropic\n  api_keys:\n    - env:COOP_TEST_MISSING_KEY_A\n    - env:COOP_TEST_MISSING_KEY_B\n",
+                workspace.display()
+            ),
+        )
+        .unwrap();
+
+        let report = validate_config(&config_path, dir.path());
+        let missing: Vec<_> = report
+            .results
+            .iter()
+            .filter(|r| r.name == "api_key_present" && !r.passed)
+            .collect();
+        assert_eq!(missing.len(), 2, "should report both missing env vars");
+        assert!(missing[0].message.contains("COOP_TEST_MISSING_KEY_A"));
+        assert!(missing[1].message.contains("COOP_TEST_MISSING_KEY_B"));
+    }
+
+    #[test]
+    fn test_config_check_api_keys_with_home_env() {
+        // HOME is always set — use it to test the "all env vars set" path.
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(workspace.join("SOUL.md"), "test").unwrap();
+
+        let config_path = dir.path().join("coop.yaml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "agent:\n  id: test\n  model: test-model\n  workspace: {}\nprovider:\n  name: anthropic\n  api_keys:\n    - env:HOME\n",
+                workspace.display()
+            ),
+        )
+        .unwrap();
+
+        let report = validate_config(&config_path, dir.path());
+        let check = report
+            .results
+            .iter()
+            .find(|r| r.name == "api_key_present" && r.passed);
+        assert!(check.is_some(), "should pass when env var is set");
+        assert!(check.unwrap().message.contains("1 configured"));
+        assert!(check.unwrap().message.contains("rotation enabled"));
     }
 }

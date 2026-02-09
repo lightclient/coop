@@ -125,6 +125,16 @@ fn resolve_tui_user(config: &Config, user_flag: Option<&str>) -> String {
     }
 }
 
+/// Create an `AnthropicProvider` from config, using `api_keys` if set or
+/// falling back to `ANTHROPIC_API_KEY`.
+fn create_provider(config: &Config) -> Result<AnthropicProvider> {
+    if config.provider.api_keys.is_empty() {
+        AnthropicProvider::from_env(&config.agent.model)
+    } else {
+        AnthropicProvider::from_key_refs(&config.provider.api_keys, &config.agent.model)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // cmd_check — validate config without starting
 // ---------------------------------------------------------------------------
@@ -317,10 +327,8 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
         config.provider.name
     );
 
-    let provider: Arc<dyn Provider> = Arc::new(
-        AnthropicProvider::from_env(&config.agent.model)
-            .context("failed to initialize Anthropic provider")?,
-    );
+    let provider: Arc<dyn Provider> =
+        Arc::new(create_provider(&config).context("failed to initialize Anthropic provider")?);
 
     #[cfg(feature = "signal")]
     let mut signal_channel: Option<SignalChannel> = None;
@@ -664,10 +672,8 @@ async fn cmd_chat(config_path: Option<&str>, user_flag: Option<&str>) -> Result<
         config.provider.name
     );
 
-    let provider: Arc<dyn Provider> = Arc::new(
-        AnthropicProvider::from_env(&config.agent.model)
-            .context("failed to initialize Anthropic provider")?,
-    );
+    let provider: Arc<dyn Provider> =
+        Arc::new(create_provider(&config).context("failed to initialize Anthropic provider")?);
 
     let memory = init_memory_store(&config, &config_dir, Arc::clone(&provider))?;
 
@@ -1016,10 +1022,8 @@ async fn cmd_memory(config_path: Option<&str>, command: MemoryCommands) -> Resul
         .unwrap_or(&PathBuf::from("."))
         .to_path_buf();
 
-    let provider: Arc<dyn Provider> = Arc::new(
-        AnthropicProvider::from_env(&config.agent.model)
-            .context("failed to initialize Anthropic provider")?,
-    );
+    let provider: Arc<dyn Provider> =
+        Arc::new(create_provider(&config).context("failed to initialize Anthropic provider")?);
 
     let memory = init_memory_store(&config, &config_dir, provider)?;
 

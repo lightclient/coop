@@ -73,6 +73,11 @@ pub(crate) struct SignalChannelConfig {
 pub(crate) struct ProviderConfig {
     #[serde(default = "default_provider")]
     pub name: String,
+    /// Key references with `env:` prefix (e.g. `env:ANTHROPIC_API_KEY`).
+    /// Enables rotation on rate limits. When empty/omitted, falls back
+    /// to ANTHROPIC_API_KEY env var.
+    #[serde(default)]
+    pub api_keys: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -823,5 +828,36 @@ prompt:
         assert_eq!(entry.trust, TrustLevel::Full);
         assert_eq!(entry.cache, CacheHintConfig::Session);
         assert!(entry.description.is_none());
+    }
+
+    #[test]
+    fn parse_config_with_api_keys() {
+        let yaml = "
+agent:
+  id: test
+  model: test-model
+provider:
+  name: anthropic
+  api_keys:
+    - env:ANTHROPIC_API_KEY
+    - env:ANTHROPIC_API_KEY_2
+";
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.provider.api_keys.len(), 2);
+        assert_eq!(config.provider.api_keys[0], "env:ANTHROPIC_API_KEY");
+        assert_eq!(config.provider.api_keys[1], "env:ANTHROPIC_API_KEY_2");
+    }
+
+    #[test]
+    fn parse_config_without_api_keys() {
+        let yaml = "
+agent:
+  id: test
+  model: test-model
+provider:
+  name: anthropic
+";
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.provider.api_keys.is_empty());
     }
 }

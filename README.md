@@ -38,6 +38,25 @@ cargo run --bin coop -- start
 cargo run --bin coop -- chat
 ```
 
+### API key rotation
+
+For higher throughput, configure multiple API keys. Coop automatically rotates between them based on Anthropic's rate-limit headers — proactively when a key approaches 90% utilization, and reactively on 429 errors.
+
+```yaml
+provider:
+  name: anthropic
+  api_keys:
+    - env:ANTHROPIC_API_KEY
+    - env:ANTHROPIC_API_KEY_2
+    - env:ANTHROPIC_API_KEY_3
+```
+
+Each entry uses an `env:` prefix referencing an environment variable. Keys are never stored in config files. Mixed pools of regular API keys and OAuth tokens work — each key auto-detects its auth type.
+
+When `api_keys` is omitted (the default), Coop falls back to the single `ANTHROPIC_API_KEY` env var. A single-key pool behaves identically to today.
+
+Key selection prefers the key whose rate-limit window resets soonest among keys below 90% utilization. If all keys are hot, the one with the lowest utilization is picked. The system never refuses to make a request — 90% is a soft preference, not a hard block.
+
 ## Memory
 
 Coop has a built-in structured memory system backed by SQLite. The agent can search, write, and browse observations across trust-gated stores. Memory works out of the box with zero config — add a `memory:` section to your `coop.yaml` to customise it.
