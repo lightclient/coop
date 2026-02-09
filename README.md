@@ -172,6 +172,56 @@ COOP_TRACE_FILE=traces.jsonl cargo run --bin coop -- start
 
 Memory emits structured trace events for: embedding requests/responses, reconciliation decisions, prompt index build/injection, and maintenance stages. Search the JSONL file with `grep` or `jq`. See [Memory Design](docs/memory-design.md) for the full trace event catalogue.
 
+## Cron & Heartbeats
+
+Coop supports scheduled tasks via cron expressions. The scheduler runs inside the gateway daemon and fires messages to the agent on schedule.
+
+### Delivery routing
+
+When a cron entry has a `user` field, the agent's response is automatically delivered to all non-terminal channels the user is bound to (from their `match` patterns). An explicit `deliver` field overrides this with a specific target.
+
+```yaml
+cron:
+  # Auto-delivers to alice's Signal (from her match patterns)
+  - name: heartbeat
+    cron: "*/30 * * * *"
+    user: alice
+    message: check HEARTBEAT.md
+
+  # Explicit delivery to a specific target
+  - name: morning-briefing
+    cron: "0 8 * * *"
+    user: alice
+    deliver:
+      channel: signal
+      target: alice-uuid
+    message: Morning briefing
+
+  # Silent — no user, no delivery
+  - name: cleanup
+    cron: "0 3 * * *"
+    message: run cleanup
+```
+
+### HEARTBEAT_OK suppression
+
+If the agent responds with `HEARTBEAT_OK` (or only that token wrapped in markdown/whitespace), delivery is suppressed — nothing is sent. This lets the agent signal "nothing to report" without spamming the user. Real content alongside the token is delivered with the token stripped.
+
+As a cost optimization, if the workspace `HEARTBEAT.md` file contains only headers, empty checklist items, or whitespace, the LLM call is skipped entirely.
+
+### Workspace file
+
+`HEARTBEAT.md` in the workspace directory is the conventional place for periodic check tasks:
+
+```markdown
+# Heartbeat Tasks
+
+- [ ] Check server status at https://example.test/health
+- [ ] Review overnight error logs
+```
+
+The agent reads this file when prompted by a heartbeat cron and acts on any actionable items.
+
 ## Architecture
 
 Five workspace crates:
@@ -198,7 +248,7 @@ Agent personality and context live in workspace files (default: `./workspaces/de
 | `IDENTITY.md` | Agent identity | familiar |
 | `USER.md` | Per-user info | inner |
 | `MEMORY.md` | Long-term curated memory | full |
-| `HEARTBEAT.md` | Periodic check tasks | full |
+| `HEARTBEAT.md` | Periodic check tasks (empty file skips LLM call) | full |
 
 All files are optional. Trust level controls which files are visible in a given session — see [System Prompt Design](docs/system-prompt-design.md).
 

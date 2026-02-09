@@ -110,14 +110,29 @@ memory:
 
 # Scheduled tasks
 cron:
-  - name: heartbeat                 # unique name
+  # Heartbeat: auto-delivers to all channels the user is bound to.
+  # If user has signal match patterns, response goes to Signal.
+  # If the agent responds with HEARTBEAT_OK (nothing to report),
+  # delivery is suppressed. Empty HEARTBEAT.md skips the LLM call entirely.
+  - name: heartbeat
     cron: "*/30 * * * *"            # standard cron expression
     user: alice                     # run as this user (optional, must exist in users)
     message: check HEARTBEAT.md     # message sent to the agent
-    # Optional: deliver response to a channel
-    # deliver:
-    #   channel: signal
-    #   target: alice-uuid          # or "group:<hex>" for group chats
+
+  # Explicit delivery override: sends response to a specific target
+  # instead of auto-resolving from user match patterns.
+  - name: morning-briefing
+    cron: "0 8 * * *"
+    user: alice
+    deliver:
+      channel: signal
+      target: alice-uuid            # or "group:<hex>" for group chats
+    message: Morning briefing
+
+  # No delivery, no user — silent internal work.
+  - name: cleanup
+    cron: "0 3 * * *"
+    message: run cleanup
 ```
 
 ### Validation constraints
@@ -130,6 +145,7 @@ cron:
 - Embedding dimensions: 1..=8192
 - Cron users must exist in the users list
 - Cron delivery channel must be `signal`
+- Cron with user but no `deliver`: warns if user has no non-terminal match patterns (heartbeat will have no delivery targets)
 - API keys checked via environment: ANTHROPIC_API_KEY (always), plus embedding provider key if configured
 
 ## File tools

@@ -2,6 +2,7 @@ use anyhow::Result;
 use chrono::Utc;
 use coop_core::{InboundKind, InboundMessage, OutboundMessage};
 use cron::Schedule;
+use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -9,14 +10,15 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, error, info, info_span, warn};
 
-use crate::config::{CronConfig, CronDelivery};
+use crate::config::{Config, CronConfig, SharedConfig};
+use crate::heartbeat::{HeartbeatResult, is_heartbeat_content_empty, strip_heartbeat_token};
 use crate::router::MessageRouter;
 
 /// Sender for delivering cron output to channels.
 ///
 /// Wraps an `mpsc::Sender<OutboundMessage>`. In production, a bridge task
 /// forwards outbound messages to the appropriate channel (e.g. Signal).
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct DeliverySender {
     tx: mpsc::Sender<OutboundMessage>,
 }
@@ -76,7 +78,7 @@ pub(crate) fn parse_cron(expr: &str) -> Result<Schedule> {
 const CONFIG_POLL_INTERVAL: Duration = Duration::from_secs(10);
 
 pub(crate) async fn run_scheduler(
-    config: crate::config::SharedConfig,
+    config: SharedConfig,
     router: Arc<MessageRouter>,
     deliver_tx: Option<DeliverySender>,
     shutdown: CancellationToken,
@@ -150,8 +152,9 @@ pub(crate) async fn run_scheduler(
                     let cfg = cfg.clone();
                     let router = Arc::clone(&router);
                     let deliver_tx = deliver_tx.clone();
+                    let sched_config = Arc::clone(&config);
                     tokio::spawn(async move {
-                        fire_cron(&cfg, &router, deliver_tx.as_ref()).await;
+                        fire_cron(&cfg, &router, deliver_tx.as_ref(), &sched_config).await;
                     });
                 }
             }
@@ -210,7 +213,47 @@ fn parse_and_validate(
     parsed
 }
 
-async fn fire_cron(cfg: &CronConfig, router: &MessageRouter, deliver_tx: Option<&DeliverySender>) {
+/// Resolve delivery targets for a cron entry.
+///
+/// If the cron entry has an explicit `deliver` field, return that single target.
+/// If it has a `user` field but no `deliver`, look up the user's match patterns
+/// and return all non-terminal channels.
+/// Otherwise, return an empty list.
+pub(crate) fn resolve_cron_delivery_targets(
+    config: &Config,
+    cfg: &CronConfig,
+) -> Vec<(String, String)> {
+    if let Some(ref delivery) = cfg.deliver {
+        return vec![(delivery.channel.clone(), delivery.target.clone())];
+    }
+
+    let Some(ref user_name) = cfg.user else {
+        return Vec::new();
+    };
+
+    let Some(user) = config.users.iter().find(|u| u.name == *user_name) else {
+        return Vec::new();
+    };
+
+    user.r#match
+        .iter()
+        .filter_map(|pattern| {
+            let (channel, target) = pattern.split_once(':')?;
+            if channel == "terminal" {
+                None
+            } else {
+                Some((channel.to_owned(), target.to_owned()))
+            }
+        })
+        .collect()
+}
+
+async fn fire_cron(
+    cfg: &CronConfig,
+    router: &MessageRouter,
+    deliver_tx: Option<&DeliverySender>,
+    shared_config: &SharedConfig,
+) {
     let span = info_span!(
         "cron_fired",
         cron.name = %cfg.name,
@@ -225,18 +268,27 @@ async fn fire_cron(cfg: &CronConfig, router: &MessageRouter, deliver_tx: Option<
             "cron firing"
         );
 
+        let config_snapshot = shared_config.load();
+        let delivery_targets = resolve_cron_delivery_targets(&config_snapshot, cfg);
+
+        // Skip LLM call for empty HEARTBEAT.md
+        if should_skip_heartbeat(&config_snapshot, &cfg.message) {
+            debug!(cron.name = %cfg.name, "heartbeat skipped: empty heartbeat file");
+            return;
+        }
+
         let sender = match &cfg.user {
             Some(user) => format!("cron:{}:{}", cfg.name, user),
             None => format!("cron:{}", cfg.name),
         };
 
-        let content = if let Some(ref delivery) = cfg.deliver {
-            format!(
-                "[Your response will be delivered to {} via {}.]\n\n{}",
-                delivery.target, delivery.channel, cfg.message
-            )
-        } else {
+        let content = if delivery_targets.is_empty() {
             cfg.message.clone()
+        } else {
+            format!(
+                "[Your response will be delivered to the user. Reply HEARTBEAT_OK if nothing needs attention.]\n\n{}",
+                cfg.message
+            )
         };
 
         let inbound = InboundMessage {
@@ -260,11 +312,18 @@ async fn fire_cron(cfg: &CronConfig, router: &MessageRouter, deliver_tx: Option<
                     "cron completed"
                 );
 
-                if let Some(ref delivery) = cfg.deliver {
-                    if response.trim().is_empty() {
-                        debug!(cron.name = %cfg.name, "cron produced empty response, skipping delivery");
-                    } else {
-                        deliver_response(delivery, &response, deliver_tx).await;
+                if delivery_targets.is_empty() {
+                    return;
+                }
+
+                match strip_heartbeat_token(&response) {
+                    HeartbeatResult::Suppress => {
+                        info!(cron.name = %cfg.name, "heartbeat suppressed: HEARTBEAT_OK token detected");
+                    }
+                    HeartbeatResult::Deliver(content) => {
+                        for (channel, target) in &delivery_targets {
+                            deliver_to_target(channel, target, &content, deliver_tx).await;
+                        }
                     }
                 }
             }
@@ -277,29 +336,67 @@ async fn fire_cron(cfg: &CronConfig, router: &MessageRouter, deliver_tx: Option<
     .await;
 }
 
-async fn deliver_response(
-    delivery: &CronDelivery,
-    response: &str,
+/// Check if the cron message references HEARTBEAT.md and if that file is empty.
+fn should_skip_heartbeat(config: &Config, message: &str) -> bool {
+    if !message.contains("HEARTBEAT.md") {
+        return false;
+    }
+
+    // Resolve workspace path the same way Config::resolve_workspace does,
+    // but we don't have config_dir here. Use a best-effort approach: if the
+    // workspace path is absolute, use it directly. Otherwise we can't reliably
+    // resolve it, so don't skip.
+    let workspace_str = &config.agent.workspace;
+    let workspace = std::path::PathBuf::from(workspace_str);
+    if !workspace.is_absolute() {
+        // Try CWD-relative as fallback (the gateway typically sets CWD).
+        let cwd_relative = std::env::current_dir().ok().map(|cwd| cwd.join(&workspace));
+        if let Some(ref path) = cwd_relative {
+            return check_heartbeat_file(path);
+        }
+        return false;
+    }
+
+    check_heartbeat_file(&workspace)
+}
+
+fn check_heartbeat_file(workspace: &Path) -> bool {
+    let heartbeat_path = workspace.join("HEARTBEAT.md");
+    match std::fs::read_to_string(&heartbeat_path) {
+        Ok(content) => {
+            if is_heartbeat_content_empty(&content) {
+                return true;
+            }
+            false
+        }
+        Err(_) => false, // File doesn't exist → proceed normally
+    }
+}
+
+async fn deliver_to_target(
+    channel: &str,
+    target: &str,
+    content: &str,
     deliver_tx: Option<&DeliverySender>,
 ) {
     let Some(tx) = deliver_tx else {
         warn!(
-            channel = %delivery.channel,
-            target = %delivery.target,
-            "cron delivery configured but no delivery sender available"
+            channel = %channel,
+            target = %target,
+            "delivery target resolved but no delivery sender available"
         );
         return;
     };
 
     let span = info_span!(
         "cron_deliver",
-        channel = %delivery.channel,
-        target = %delivery.target,
-        content_len = response.len(),
+        channel = %channel,
+        target = %target,
+        content_len = content.len(),
     );
 
     async {
-        match tx.send(&delivery.channel, &delivery.target, response).await {
+        match tx.send(channel, target, content).await {
             Ok(()) => {
                 info!("cron delivery sent");
             }
@@ -521,7 +618,8 @@ mod tests {
             trust: TrustLevel::Full,
             r#match: vec![],
         }];
-        let (router, gateway) = make_router_and_gateway(Some(&alice));
+        let (shared, router, gateway) =
+            make_shared_config_and_router(Some(&alice), &[], "cron response ok");
 
         let cfg = CronConfig {
             name: "heartbeat".to_owned(),
@@ -531,7 +629,7 @@ mod tests {
             deliver: None,
         };
 
-        fire_cron(&cfg, &router, None).await;
+        fire_cron(&cfg, &router, None, &shared).await;
 
         let sessions = gateway.list_sessions();
         let cron_session = sessions
@@ -545,7 +643,8 @@ mod tests {
 
     #[tokio::test]
     async fn fire_cron_without_user_dispatches_through_router() {
-        let (router, gateway) = make_router_and_gateway(None);
+        let (shared, router, gateway) =
+            make_shared_config_and_router(None, &[], "cron response ok");
 
         let cfg = CronConfig {
             name: "cleanup".to_owned(),
@@ -555,7 +654,7 @@ mod tests {
             deliver: None,
         };
 
-        fire_cron(&cfg, &router, None).await;
+        fire_cron(&cfg, &router, None, &shared).await;
 
         let sessions = gateway.list_sessions();
         let cron_session = sessions
@@ -569,7 +668,8 @@ mod tests {
 
     #[tokio::test]
     async fn fire_cron_with_delivery_sends_response() {
-        let (router, _gateway) = make_router_and_gateway(None);
+        let (shared, router, _gateway) =
+            make_shared_config_and_router(None, &[], "cron response ok");
         let (tx, mut rx) = mpsc::channel::<OutboundMessage>(8);
         let deliver_tx = DeliverySender::new(tx);
 
@@ -584,7 +684,7 @@ mod tests {
             }),
         };
 
-        fire_cron(&cfg, &router, Some(&deliver_tx)).await;
+        fire_cron(&cfg, &router, Some(&deliver_tx), &shared).await;
 
         let msg = rx.try_recv().unwrap();
         assert_eq!(msg.channel, "signal");
@@ -594,7 +694,8 @@ mod tests {
 
     #[tokio::test]
     async fn fire_cron_without_delivery_does_not_send() {
-        let (router, _gateway) = make_router_and_gateway(None);
+        let (shared, router, _gateway) =
+            make_shared_config_and_router(None, &[], "cron response ok");
         let (tx, mut rx) = mpsc::channel::<OutboundMessage>(8);
         let deliver_tx = DeliverySender::new(tx);
 
@@ -606,14 +707,14 @@ mod tests {
             deliver: None,
         };
 
-        fire_cron(&cfg, &router, Some(&deliver_tx)).await;
+        fire_cron(&cfg, &router, Some(&deliver_tx), &shared).await;
 
         assert!(rx.try_recv().is_err());
     }
 
     #[tokio::test]
     async fn fire_cron_with_delivery_skips_empty_response() {
-        let (router, _gateway) = make_router_and_gateway_with_response(None, "   ");
+        let (shared, router, _gateway) = make_shared_config_and_router(None, &[], "   ");
         let (tx, mut rx) = mpsc::channel::<OutboundMessage>(8);
         let deliver_tx = DeliverySender::new(tx);
 
@@ -628,14 +729,15 @@ mod tests {
             }),
         };
 
-        fire_cron(&cfg, &router, Some(&deliver_tx)).await;
+        fire_cron(&cfg, &router, Some(&deliver_tx), &shared).await;
 
         assert!(rx.try_recv().is_err());
     }
 
     #[tokio::test]
     async fn fire_cron_with_delivery_no_sender_does_not_panic() {
-        let (router, _gateway) = make_router_and_gateway(None);
+        let (shared, router, _gateway) =
+            make_shared_config_and_router(None, &[], "cron response ok");
 
         let cfg = CronConfig {
             name: "briefing".to_owned(),
@@ -648,22 +750,18 @@ mod tests {
             }),
         };
 
-        fire_cron(&cfg, &router, None).await;
+        fire_cron(&cfg, &router, None, &shared).await;
     }
 
     #[tokio::test]
-    async fn deliver_response_with_no_sender_does_not_panic() {
-        let delivery = CronDelivery {
-            channel: "email".to_owned(),
-            target: "alice@example.com".to_owned(),
-        };
-
-        deliver_response(&delivery, "hello", None).await;
+    async fn deliver_to_target_with_no_sender_does_not_panic() {
+        deliver_to_target("email", "alice@example.com", "hello", None).await;
     }
 
     #[tokio::test]
     async fn fire_cron_with_delivery_prepends_context() {
-        let (router, gateway) = make_router_and_gateway(None);
+        let (shared, router, gateway) =
+            make_shared_config_and_router(None, &[], "cron response ok");
         let (tx, _rx) = mpsc::channel::<OutboundMessage>(8);
         let deliver_tx = DeliverySender::new(tx);
 
@@ -678,7 +776,7 @@ mod tests {
             }),
         };
 
-        fire_cron(&cfg, &router, Some(&deliver_tx)).await;
+        fire_cron(&cfg, &router, Some(&deliver_tx), &shared).await;
 
         let sessions = gateway.list_sessions();
         let cron_session = sessions
@@ -689,7 +787,8 @@ mod tests {
 
     #[tokio::test]
     async fn fire_cron_without_delivery_has_no_prefix() {
-        let (router, _gateway) = make_router_and_gateway(None);
+        let (shared, router, _gateway) =
+            make_shared_config_and_router(None, &[], "cron response ok");
 
         let cfg = CronConfig {
             name: "heartbeat".to_owned(),
@@ -699,7 +798,7 @@ mod tests {
             deliver: None,
         };
 
-        fire_cron(&cfg, &router, None).await;
+        fire_cron(&cfg, &router, None, &shared).await;
     }
 
     #[tokio::test]
@@ -790,19 +889,334 @@ mod tests {
         );
     }
 
+    // -- New heartbeat delivery tests --
+
+    #[tokio::test]
+    async fn fire_cron_auto_delivers_to_user_channels() {
+        let users = [UserConfig {
+            name: "alice".to_owned(),
+            trust: TrustLevel::Full,
+            r#match: vec!["signal:alice-uuid".to_owned()],
+        }];
+        let (shared, router, _gateway) = make_shared_config_and_router_with_users_and_match(
+            &users,
+            &[],
+            "Server needs attention",
+        );
+        let (tx, mut rx) = mpsc::channel::<OutboundMessage>(8);
+        let deliver_tx = DeliverySender::new(tx);
+
+        let cfg = CronConfig {
+            name: "heartbeat".to_owned(),
+            cron: "*/30 * * * *".to_owned(),
+            message: "check HEARTBEAT.md".to_owned(),
+            user: Some("alice".to_owned()),
+            deliver: None,
+        };
+
+        fire_cron(&cfg, &router, Some(&deliver_tx), &shared).await;
+
+        let msg = rx.try_recv().unwrap();
+        assert_eq!(msg.channel, "signal");
+        assert_eq!(msg.target, "alice-uuid");
+        assert!(msg.content.contains("Server needs attention"));
+    }
+
+    #[tokio::test]
+    async fn fire_cron_auto_delivers_to_multiple_channels() {
+        let users = [UserConfig {
+            name: "alice".to_owned(),
+            trust: TrustLevel::Full,
+            r#match: vec![
+                "signal:alice-uuid".to_owned(),
+                "signal:group:team-chat".to_owned(),
+            ],
+        }];
+        let (shared, router, _gateway) =
+            make_shared_config_and_router_with_users_and_match(&users, &[], "Alert: disk full");
+        let (tx, mut rx) = mpsc::channel::<OutboundMessage>(8);
+        let deliver_tx = DeliverySender::new(tx);
+
+        let cfg = CronConfig {
+            name: "heartbeat".to_owned(),
+            cron: "*/30 * * * *".to_owned(),
+            message: "check HEARTBEAT.md".to_owned(),
+            user: Some("alice".to_owned()),
+            deliver: None,
+        };
+
+        fire_cron(&cfg, &router, Some(&deliver_tx), &shared).await;
+
+        let msg1 = rx.try_recv().unwrap();
+        let msg2 = rx.try_recv().unwrap();
+        let targets: Vec<_> = vec![
+            (msg1.channel.as_str(), msg1.target.as_str()),
+            (msg2.channel.as_str(), msg2.target.as_str()),
+        ];
+        assert!(targets.contains(&("signal", "alice-uuid")));
+        assert!(targets.contains(&("signal", "group:team-chat")));
+    }
+
+    #[tokio::test]
+    async fn fire_cron_skips_terminal_channels() {
+        let users = [UserConfig {
+            name: "alice".to_owned(),
+            trust: TrustLevel::Full,
+            r#match: vec![
+                "terminal:default".to_owned(),
+                "signal:alice-uuid".to_owned(),
+            ],
+        }];
+        let (shared, router, _gateway) =
+            make_shared_config_and_router_with_users_and_match(&users, &[], "Important alert");
+        let (tx, mut rx) = mpsc::channel::<OutboundMessage>(8);
+        let deliver_tx = DeliverySender::new(tx);
+
+        let cfg = CronConfig {
+            name: "heartbeat".to_owned(),
+            cron: "*/30 * * * *".to_owned(),
+            message: "check HEARTBEAT.md".to_owned(),
+            user: Some("alice".to_owned()),
+            deliver: None,
+        };
+
+        fire_cron(&cfg, &router, Some(&deliver_tx), &shared).await;
+
+        // Should only get signal delivery, not terminal
+        let msg = rx.try_recv().unwrap();
+        assert_eq!(msg.channel, "signal");
+        assert_eq!(msg.target, "alice-uuid");
+        assert!(rx.try_recv().is_err(), "should not deliver to terminal");
+    }
+
+    #[tokio::test]
+    async fn fire_cron_suppresses_heartbeat_ok() {
+        let users = [UserConfig {
+            name: "alice".to_owned(),
+            trust: TrustLevel::Full,
+            r#match: vec!["signal:alice-uuid".to_owned()],
+        }];
+        let (shared, router, _gateway) =
+            make_shared_config_and_router_with_users_and_match(&users, &[], "HEARTBEAT_OK");
+        let (tx, mut rx) = mpsc::channel::<OutboundMessage>(8);
+        let deliver_tx = DeliverySender::new(tx);
+
+        let cfg = CronConfig {
+            name: "heartbeat".to_owned(),
+            cron: "*/30 * * * *".to_owned(),
+            message: "check HEARTBEAT.md".to_owned(),
+            user: Some("alice".to_owned()),
+            deliver: None,
+        };
+
+        fire_cron(&cfg, &router, Some(&deliver_tx), &shared).await;
+
+        assert!(
+            rx.try_recv().is_err(),
+            "HEARTBEAT_OK should suppress delivery"
+        );
+    }
+
+    #[tokio::test]
+    async fn fire_cron_delivers_real_content() {
+        let users = [UserConfig {
+            name: "alice".to_owned(),
+            trust: TrustLevel::Full,
+            r#match: vec!["signal:alice-uuid".to_owned()],
+        }];
+        let (shared, router, _gateway) =
+            make_shared_config_and_router_with_users_and_match(&users, &[], "Your server is down");
+        let (tx, mut rx) = mpsc::channel::<OutboundMessage>(8);
+        let deliver_tx = DeliverySender::new(tx);
+
+        let cfg = CronConfig {
+            name: "heartbeat".to_owned(),
+            cron: "*/30 * * * *".to_owned(),
+            message: "check HEARTBEAT.md".to_owned(),
+            user: Some("alice".to_owned()),
+            deliver: None,
+        };
+
+        fire_cron(&cfg, &router, Some(&deliver_tx), &shared).await;
+
+        let msg = rx.try_recv().unwrap();
+        assert_eq!(msg.channel, "signal");
+        assert_eq!(msg.content, "Your server is down");
+    }
+
+    #[tokio::test]
+    async fn fire_cron_explicit_deliver_overrides_user_channels() {
+        let users = [UserConfig {
+            name: "alice".to_owned(),
+            trust: TrustLevel::Full,
+            r#match: vec![
+                "signal:alice-uuid".to_owned(),
+                "signal:group:team-chat".to_owned(),
+            ],
+        }];
+        let (shared, router, _gateway) =
+            make_shared_config_and_router_with_users_and_match(&users, &[], "Alert content");
+        let (tx, mut rx) = mpsc::channel::<OutboundMessage>(8);
+        let deliver_tx = DeliverySender::new(tx);
+
+        // Explicit deliver overrides user match patterns
+        let cfg = CronConfig {
+            name: "heartbeat".to_owned(),
+            cron: "*/30 * * * *".to_owned(),
+            message: "check HEARTBEAT.md".to_owned(),
+            user: Some("alice".to_owned()),
+            deliver: Some(CronDelivery {
+                channel: "signal".to_owned(),
+                target: "override-target".to_owned(),
+            }),
+        };
+
+        fire_cron(&cfg, &router, Some(&deliver_tx), &shared).await;
+
+        let msg = rx.try_recv().unwrap();
+        assert_eq!(msg.channel, "signal");
+        assert_eq!(msg.target, "override-target");
+        assert!(
+            rx.try_recv().is_err(),
+            "should only deliver to explicit target"
+        );
+    }
+
+    #[tokio::test]
+    async fn fire_cron_no_user_no_deliver_does_not_send() {
+        let (shared, router, _gateway) = make_shared_config_and_router(None, &[], "some response");
+        let (tx, mut rx) = mpsc::channel::<OutboundMessage>(8);
+        let deliver_tx = DeliverySender::new(tx);
+
+        let cfg = CronConfig {
+            name: "cleanup".to_owned(),
+            cron: "0 3 * * *".to_owned(),
+            message: "run cleanup".to_owned(),
+            user: None,
+            deliver: None,
+        };
+
+        fire_cron(&cfg, &router, Some(&deliver_tx), &shared).await;
+
+        assert!(rx.try_recv().is_err(), "no user + no deliver = no delivery");
+    }
+
+    #[test]
+    fn resolve_cron_delivery_targets_parses_match_patterns() {
+        let config: Config = serde_yaml::from_str(
+            "
+agent:
+  id: test
+  model: test
+users:
+  - name: alice
+    trust: full
+    match:
+      - 'signal:alice-uuid'
+      - 'terminal:default'
+      - 'signal:group:team-chat'
+",
+        )
+        .unwrap();
+
+        let cfg = CronConfig {
+            name: "heartbeat".to_owned(),
+            cron: "*/30 * * * *".to_owned(),
+            message: "check HEARTBEAT.md".to_owned(),
+            user: Some("alice".to_owned()),
+            deliver: None,
+        };
+
+        let targets = resolve_cron_delivery_targets(&config, &cfg);
+        assert_eq!(targets.len(), 2, "should filter out terminal");
+        assert!(targets.contains(&("signal".to_owned(), "alice-uuid".to_owned())));
+        assert!(targets.contains(&("signal".to_owned(), "group:team-chat".to_owned())));
+    }
+
+    #[test]
+    fn resolve_cron_delivery_targets_explicit_deliver_overrides() {
+        let config: Config = serde_yaml::from_str(
+            "
+agent:
+  id: test
+  model: test
+users:
+  - name: alice
+    trust: full
+    match: ['signal:alice-uuid']
+",
+        )
+        .unwrap();
+
+        let cfg = CronConfig {
+            name: "heartbeat".to_owned(),
+            cron: "*/30 * * * *".to_owned(),
+            message: "check".to_owned(),
+            user: Some("alice".to_owned()),
+            deliver: Some(CronDelivery {
+                channel: "signal".to_owned(),
+                target: "override-uuid".to_owned(),
+            }),
+        };
+
+        let targets = resolve_cron_delivery_targets(&config, &cfg);
+        assert_eq!(
+            targets,
+            vec![("signal".to_owned(), "override-uuid".to_owned())]
+        );
+    }
+
+    #[test]
+    fn resolve_cron_delivery_targets_no_user_returns_empty() {
+        let config: Config = serde_yaml::from_str(
+            "
+agent:
+  id: test
+  model: test
+",
+        )
+        .unwrap();
+
+        let cfg = CronConfig {
+            name: "cleanup".to_owned(),
+            cron: "0 3 * * *".to_owned(),
+            message: "cleanup".to_owned(),
+            user: None,
+            deliver: None,
+        };
+
+        let targets = resolve_cron_delivery_targets(&config, &cfg);
+        assert!(targets.is_empty());
+    }
+
+    #[test]
+    fn resolve_cron_delivery_targets_unknown_user_returns_empty() {
+        let config: Config = serde_yaml::from_str(
+            "
+agent:
+  id: test
+  model: test
+users:
+  - name: alice
+    trust: full
+    match: ['signal:alice-uuid']
+",
+        )
+        .unwrap();
+
+        let cfg = CronConfig {
+            name: "heartbeat".to_owned(),
+            cron: "*/30 * * * *".to_owned(),
+            message: "check".to_owned(),
+            user: Some("mallory".to_owned()),
+            deliver: None,
+        };
+
+        let targets = resolve_cron_delivery_targets(&config, &cfg);
+        assert!(targets.is_empty());
+    }
+
     // -- Helpers --
-
-    fn make_router_and_gateway(users: Option<&[UserConfig]>) -> (MessageRouter, Arc<Gateway>) {
-        make_router_and_gateway_with_response(users, "cron response ok")
-    }
-
-    fn make_router_and_gateway_with_response(
-        users: Option<&[UserConfig]>,
-        response: &str,
-    ) -> (MessageRouter, Arc<Gateway>) {
-        let (_shared, router, gateway) = make_shared_config_and_router(users, &[], response);
-        (router, gateway)
-    }
 
     /// Build a SharedConfig, MessageRouter, and Gateway with the given users,
     /// cron entries, and fake provider response.
@@ -810,16 +1224,88 @@ mod tests {
         users: Option<&[UserConfig]>,
         cron: &[CronConfig],
         response: &str,
-    ) -> (crate::config::SharedConfig, MessageRouter, Arc<Gateway>) {
+    ) -> (SharedConfig, MessageRouter, Arc<Gateway>) {
         let provider: Arc<dyn coop_core::Provider> = Arc::new(FakeProvider::new(response));
         make_shared_config_and_router_with_provider(users, cron, provider)
+    }
+
+    /// Build with users that preserve their match patterns (unlike
+    /// `make_shared_config_and_router` which resets match to `[]`).
+    fn make_shared_config_and_router_with_users_and_match(
+        users: &[UserConfig],
+        cron: &[CronConfig],
+        response: &str,
+    ) -> (SharedConfig, MessageRouter, Arc<Gateway>) {
+        use std::fmt::Write;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("SOUL.md"), "test").unwrap();
+
+        let mut yaml = format!(
+            "agent:\n  id: test\n  model: test\n  workspace: {}\n",
+            dir.path().display()
+        );
+
+        if !users.is_empty() {
+            yaml.push_str("users:\n");
+            for u in users {
+                let matches: Vec<String> = u.r#match.iter().map(|m| format!("'{m}'")).collect();
+                let _ = write!(
+                    yaml,
+                    "  - name: {}\n    trust: {}\n    match: [{}]\n",
+                    u.name,
+                    serde_yaml::to_string(&u.trust).unwrap().trim(),
+                    matches.join(", "),
+                );
+            }
+        }
+
+        if !cron.is_empty() {
+            yaml.push_str("cron:\n");
+            for entry in cron {
+                let _ = write!(
+                    yaml,
+                    "  - name: {}\n    cron: '{}'\n    message: '{}'\n",
+                    entry.name, entry.cron, entry.message,
+                );
+                if let Some(ref user) = entry.user {
+                    let _ = writeln!(yaml, "    user: {user}");
+                }
+                if let Some(ref delivery) = entry.deliver {
+                    let _ = write!(
+                        yaml,
+                        "    deliver:\n      channel: {}\n      target: {}\n",
+                        delivery.channel, delivery.target,
+                    );
+                }
+            }
+        }
+
+        let config: Config = serde_yaml::from_str(&yaml).unwrap();
+        let provider: Arc<dyn coop_core::Provider> = Arc::new(FakeProvider::new(response));
+        let executor = Arc::new(DefaultExecutor::new());
+        let shared = shared_config(config);
+        let gateway = Arc::new(
+            Gateway::new(
+                Arc::clone(&shared),
+                dir.path().to_path_buf(),
+                provider,
+                executor,
+                None,
+                None,
+            )
+            .unwrap(),
+        );
+        std::mem::forget(dir);
+        let router = MessageRouter::new(Arc::clone(&shared), Arc::clone(&gateway));
+        (shared, router, gateway)
     }
 
     fn make_shared_config_and_router_with_provider(
         users: Option<&[UserConfig]>,
         cron: &[CronConfig],
         provider: Arc<dyn coop_core::Provider>,
-    ) -> (crate::config::SharedConfig, MessageRouter, Arc<Gateway>) {
+    ) -> (SharedConfig, MessageRouter, Arc<Gateway>) {
         use std::fmt::Write;
 
         let dir = tempfile::tempdir().unwrap();
@@ -841,7 +1327,10 @@ mod tests {
             None => String::new(),
         };
 
-        let mut yaml = format!("agent:\n  id: test\n  model: test\n{users_yaml}");
+        let mut yaml = format!(
+            "agent:\n  id: test\n  model: test\n  workspace: {}\n{users_yaml}",
+            dir.path().display()
+        );
         if !cron.is_empty() {
             yaml.push_str("cron:\n");
             for entry in cron {
@@ -883,9 +1372,7 @@ mod tests {
     }
 
     /// Verify that slow provider calls don't block the scheduler from firing
-    /// subsequent cron entries. With a synchronous `fire_cron` call, a 2-second
-    /// provider delay would allow at most ~2 fires in 4 seconds. With concurrent
-    /// spawning, the scheduler fires every second regardless of provider latency.
+    /// subsequent cron entries.
     #[tokio::test]
     async fn scheduler_not_blocked_by_slow_provider() {
         use coop_core::fakes::SlowFakeProvider;
@@ -918,10 +1405,6 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(3)).await;
         let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
 
-        // Each completed fire adds 2 messages (user + assistant).
-        // With blocking fire_cron (2s each): max ~2 fires in 4s = 4 messages.
-        // With concurrent spawning: fires at t≈0,1,2,3 all complete by t≈5.
-        // We expect at least 3 completed fires (6 messages).
         let sessions = gateway.list_sessions();
         let cron_session = sessions
             .iter()

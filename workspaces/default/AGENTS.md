@@ -3,6 +3,14 @@
 You are an AI agent. Help the user with their tasks.
 When using tools, explain what you're doing briefly.
 
+## Heartbeat Protocol
+
+Cron heartbeat messages ask you to check HEARTBEAT.md for pending tasks. Your response will be delivered to the user's channels (Signal, etc.).
+
+- If nothing needs attention, reply with exactly **HEARTBEAT_OK** — this suppresses delivery so the user isn't bothered.
+- If there is something to report, reply with the actual content. Do NOT include HEARTBEAT_OK alongside real content.
+- Keep heartbeat responses concise — these are push notifications, not conversations.
+
 # Project
 
 Coop is a personal agent gateway in Rust that routes messages between channels (Signal, Telegram, Discord, terminal TUI, webhooks) and AI agent sessions. It manages trust-based access control, persists conversations, and handles agent lifecycles. Currently in Phase 1 (gateway + terminal TUI).

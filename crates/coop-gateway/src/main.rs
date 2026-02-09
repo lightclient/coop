@@ -9,6 +9,7 @@ mod config_tool;
 mod config_watcher;
 mod config_write;
 mod gateway;
+mod heartbeat;
 mod memory_embedding;
 mod memory_prompt_index;
 mod memory_reconcile;
@@ -361,6 +362,23 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
 
     let memory = init_memory_store(&config, &config_dir, Arc::clone(&provider))?;
 
+    // Capture startup values before wrapping in SharedConfig.
+    // SharedConfig is created early so it can be shared with tool executors.
+    let agent_id = config.agent.id.clone();
+    let agent_model = config.agent.model.clone();
+
+    let shared = shared_config(config);
+
+    // Build the delivery sender early so both the send_message tool and the
+    // scheduler can use it.
+    #[cfg(feature = "signal")]
+    let deliver_tx: Option<scheduler::DeliverySender> = signal_action_tx
+        .as_ref()
+        .map(|tx| scheduler::spawn_signal_delivery_bridge(tx.clone()));
+
+    #[cfg(not(feature = "signal"))]
+    let deliver_tx: Option<scheduler::DeliverySender> = None;
+
     let default_executor = DefaultExecutor::new();
     let config_executor = config_tool::ConfigToolExecutor::new(config_file.clone());
     let memory_executor = MemoryToolExecutor::new(Arc::clone(&memory));
@@ -390,12 +408,6 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
     let typing_notifier: Option<Arc<dyn coop_core::TypingNotifier>> = None;
 
     let maintenance_memory = Arc::clone(&memory);
-
-    // Capture startup values before wrapping in SharedConfig
-    let agent_id = config.agent.id.clone();
-    let agent_model = config.agent.model.clone();
-
-    let shared = shared_config(config);
 
     let gateway = Arc::new(Gateway::new(
         Arc::clone(&shared),
@@ -445,14 +457,6 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
     }
 
     {
-        #[cfg(feature = "signal")]
-        let deliver_tx = signal_action_tx
-            .as_ref()
-            .map(|tx| scheduler::spawn_signal_delivery_bridge(tx.clone()));
-
-        #[cfg(not(feature = "signal"))]
-        let deliver_tx: Option<scheduler::DeliverySender> = None;
-
         let sched_config = Arc::clone(&shared);
         let sched_router = Arc::clone(&router);
         let sched_token = shutdown_token.clone();

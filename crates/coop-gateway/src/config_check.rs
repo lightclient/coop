@@ -526,6 +526,35 @@ fn check_cron(report: &mut CheckReport, config: &Config) {
             });
         }
     }
+
+    // 13. cron_user_no_deliverable_channels
+    for entry in &config.cron {
+        if entry.deliver.is_some() {
+            continue;
+        }
+        if let Some(ref user_name) = entry.user
+            && let Some(user) = config.users.iter().find(|u| u.name == *user_name)
+        {
+            let has_deliverable = user.r#match.iter().any(|pattern| {
+                pattern
+                    .split_once(':')
+                    .is_some_and(|(channel, _)| channel != "terminal")
+            });
+            if !has_deliverable {
+                report.push(CheckResult {
+                    name: "cron_user_no_deliverable_channels",
+                    severity: Severity::Warning,
+                    passed: false,
+                    message: format!(
+                        "cron '{}' has user '{}' but no deliver override, \
+                         and user has no non-terminal match patterns — \
+                         heartbeat will have no delivery targets",
+                        entry.name, user_name,
+                    ),
+                });
+            }
+        }
+    }
 }
 
 #[allow(clippy::unwrap_used)]
@@ -843,6 +872,65 @@ mod tests {
             .unwrap();
         assert!(!cron_users_check.passed);
         assert!(cron_users_check.message.contains("mallory"));
+    }
+
+    #[test]
+    fn test_cron_user_no_deliverable_channels_warns() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(workspace.join("SOUL.md"), "test soul").unwrap();
+
+        let config_path = dir.path().join("coop.yaml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "agent:\n  id: test\n  model: test-model\n  workspace: {}\n\
+                 users:\n  - name: alice\n    trust: full\n    match: ['terminal:default']\n\
+                 cron:\n  - name: heartbeat\n    cron: '*/30 * * * *'\n    user: alice\n    message: check\n",
+                workspace.display()
+            ),
+        )
+        .unwrap();
+
+        let report = validate_config(&config_path, dir.path());
+        let check = report
+            .results
+            .iter()
+            .find(|r| r.name == "cron_user_no_deliverable_channels");
+        assert!(check.is_some(), "should warn about no deliverable channels");
+        assert!(!check.unwrap().passed);
+        assert!(check.unwrap().message.contains("alice"));
+    }
+
+    #[test]
+    fn test_cron_user_with_signal_channel_no_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(workspace.join("SOUL.md"), "test soul").unwrap();
+
+        let config_path = dir.path().join("coop.yaml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "agent:\n  id: test\n  model: test-model\n  workspace: {}\n\
+                 users:\n  - name: alice\n    trust: full\n    match: ['signal:alice-uuid']\n\
+                 cron:\n  - name: heartbeat\n    cron: '*/30 * * * *'\n    user: alice\n    message: check\n",
+                workspace.display()
+            ),
+        )
+        .unwrap();
+
+        let report = validate_config(&config_path, dir.path());
+        let check = report
+            .results
+            .iter()
+            .find(|r| r.name == "cron_user_no_deliverable_channels");
+        assert!(
+            check.is_none(),
+            "should not warn when user has signal channel"
+        );
     }
 
     #[test]
