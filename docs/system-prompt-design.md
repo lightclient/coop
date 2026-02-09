@@ -34,21 +34,32 @@ The system prompt is assembled from layers, each with different caching and refr
 
 ```
 ┌─────────────────────────────────────┐
-│ Layer 0: Identity (SOUL.md)         │  static per agent, cacheable
-│ Layer 1: Behavior (AGENTS.md)       │  static per agent, cacheable
+│ Layer 0: Identity (SOUL.md)         │  stable per agent, cacheable
+│ Layer 1: Behavior (AGENTS.md)       │  stable per agent, cacheable
 ├─────────────────────────────────────┤
 │ Layer 2: User context               │  static per user, varies by session
 │ Layer 3: Workspace files            │  semi-static, refresh on file change
+│ Layer 4: Channel context            │  static per session (channel-specific)
 ├─────────────────────────────────────┤
-│ Layer 4: Extensions / Tools         │  injected from tool definitions
-│ Layer 5: Runtime context            │  dynamic per turn (date, model, channel)
-│ Layer 6: Situation rules            │  depends on DM vs group vs cron
-│ Layer 7: Memory index               │  lightweight TOC, not full content
+│ Layer 5: Extensions / Tools         │  injected from tool definitions
+│ Layer 6: Runtime context            │  dynamic per turn (date, model, channel)
+│ Layer 7: Situation rules            │  depends on DM vs group vs cron
+│ Layer 8: Memory index               │  lightweight TOC, not full content
 └─────────────────────────────────────┘
 ```
 
 Layers 0-1 are stable per agent and rarely change.
-Layers 2-7 vary per turn or session.
+Layers 2-8 vary per turn or session.
+
+### Channel Context
+
+Layer 4 injects channel-specific formatting instructions so the agent adapts its output to each transport's capabilities. Resolution order:
+
+1. **Workspace file** — `channels/<family>.md` (e.g. `channels/signal.md`). If present and non-empty, used verbatim.
+2. **Built-in default** — hardcoded for known channels (currently: Signal → plain text, no markdown).
+3. **None** — channels without a file or built-in get no layer (e.g. terminal).
+
+The channel "family" is extracted from the channel identifier by taking everything before the first colon (`terminal:default` → `terminal`). This layer uses `CacheHint::Session` since the channel never changes within a session.
 
 ### Trust Gating
 

@@ -530,6 +530,7 @@ async fn cmd_chat(config_path: Option<&str>, user_flag: Option<&str>) -> Result<
                                     &input,
                                     coop_core::TrustLevel::Full,
                                     Some(&user),
+                                    Some("terminal:default"),
                                     tx,
                                 )
                                 .await

@@ -147,7 +147,12 @@ impl Gateway {
     }
 
     /// Build a trust-gated system prompt for this turn.
-    fn build_prompt(&self, trust: TrustLevel, user_name: Option<&str>) -> Result<String> {
+    fn build_prompt(
+        &self,
+        trust: TrustLevel,
+        user_name: Option<&str>,
+        channel: Option<&str>,
+    ) -> Result<String> {
         let file_configs = default_file_configs();
         let mut index = self
             .workspace_index
@@ -166,6 +171,9 @@ impl Gateway {
             .skills(self.skills.clone());
         if let Some(name) = user_name {
             builder = builder.user(name);
+        }
+        if let Some(ch) = channel {
+            builder = builder.channel(ch);
         }
         let prompt = builder.build(&index)?;
         drop(index);
@@ -212,13 +220,14 @@ impl Gateway {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
     pub(crate) async fn run_turn_with_trust(
         &self,
         session_key: &SessionKey,
         user_input: &str,
         trust: TrustLevel,
         user_name: Option<&str>,
+        channel: Option<&str>,
         event_tx: mpsc::Sender<TurnEvent>,
     ) -> Result<()> {
         let span = info_span!(
@@ -228,6 +237,7 @@ impl Gateway {
             user_input = user_input,
             trust = ?trust,
             user = ?user_name,
+            channel = ?channel,
         );
 
         async {
@@ -239,7 +249,7 @@ impl Gateway {
                 None
             };
 
-            let system_prompt = self.build_prompt(trust, user_name)?;
+            let system_prompt = self.build_prompt(trust, user_name, channel)?;
             let session_len_before = self.messages(session_key).len();
             self.append_message(session_key, Message::user().with_text(user_input));
 
@@ -897,6 +907,7 @@ agent:
                 "hello",
                 TrustLevel::Full,
                 Some("alice"),
+                None,
                 event_tx,
             )
             .await;
@@ -954,6 +965,7 @@ agent:
                 "hello",
                 TrustLevel::Full,
                 Some("alice"),
+                None,
                 event_tx,
             )
             .await;
@@ -1010,7 +1022,14 @@ agent:
         let (event_tx, mut event_rx) = mpsc::channel(32);
 
         let result = gateway
-            .run_turn_with_trust(&session_key, "hello", TrustLevel::Public, None, event_tx)
+            .run_turn_with_trust(
+                &session_key,
+                "hello",
+                TrustLevel::Public,
+                None,
+                None,
+                event_tx,
+            )
             .await;
 
         assert!(result.is_ok());
@@ -1058,6 +1077,7 @@ agent:
                 "hello",
                 TrustLevel::Full,
                 Some("alice"),
+                None,
                 event_tx,
             )
             .await

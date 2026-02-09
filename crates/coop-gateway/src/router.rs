@@ -59,6 +59,7 @@ impl MessageRouter {
                 &msg.content,
                 decision.trust,
                 decision.user_name.as_deref(),
+                Some(&msg.channel),
                 event_tx,
             )
             .instrument(span)

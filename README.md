@@ -51,6 +51,42 @@ Five workspace crates:
 | `coop-channels` | Channel adapters (terminal; Signal scaffolded) |
 | `coop-tui` | Terminal UI (crossterm) |
 
+## Workspace
+
+Agent personality and context live in workspace files (default: `./workspaces/default/`):
+
+| File | Purpose | Trust |
+|------|---------|-------|
+| `SOUL.md` | Agent personality and voice | familiar |
+| `AGENTS.md` | Behavioral instructions | familiar |
+| `TOOLS.md` | Tool usage notes | familiar |
+| `IDENTITY.md` | Agent identity | familiar |
+| `USER.md` | Per-user info | inner |
+| `MEMORY.md` | Long-term curated memory | full |
+| `HEARTBEAT.md` | Periodic check tasks | full |
+
+All files are optional. Trust level controls which files are visible in a given session — see [System Prompt Design](docs/system-prompt-design.md).
+
+### Channel prompts
+
+Coop injects channel-specific formatting instructions into the system prompt so the agent adapts its output to each channel's capabilities. For example, Signal messages use plain text (no markdown), while terminal sessions get rich formatting.
+
+Built-in defaults are provided for known channels:
+
+| Channel | Default behavior |
+|---------|-----------------|
+| `signal` | Plain text only — no markdown, asterisks, backticks, code fences, or bullet markers |
+| `terminal` | No restrictions (supports rich formatting) |
+
+To override the built-in or add instructions for a new channel, create a file in the workspace:
+
+```
+workspaces/default/channels/signal.md     # override Signal default
+workspaces/default/channels/discord.md    # add Discord-specific instructions
+```
+
+The file content replaces the built-in default entirely. The channel name is the part before the first colon in the channel identifier (`terminal:default` → `terminal`, `signal` → `signal`).
+
 ## Development
 
 ```bash

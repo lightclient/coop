@@ -247,6 +247,36 @@ pub fn scan_skills(workspace: &Path) -> Vec<SkillEntry> {
 }
 
 // ---------------------------------------------------------------------------
+// Channel context
+// ---------------------------------------------------------------------------
+
+/// Extract the channel family from a channel identifier.
+///
+/// Returns the part before the first colon, or the whole string if there is no
+/// colon. E.g. `"terminal:default"` → `"terminal"`, `"signal"` → `"signal"`.
+pub fn channel_family(channel: &str) -> &str {
+    channel.split(':').next().unwrap_or(channel)
+}
+
+/// Built-in formatting instructions for known channels.
+///
+/// Returns `None` for channels that need no special formatting hints (e.g.
+/// terminal, which supports rich text).
+pub fn default_channel_prompt(channel: &str) -> Option<&'static str> {
+    match channel_family(channel) {
+        "signal" => Some(concat!(
+            "You are responding via Signal messenger. ",
+            "Signal has no formatting support — all text is rendered as plain text.\n",
+            "\n",
+            "Do not use markdown syntax in your responses: no asterisks, backticks, ",
+            "code fences, headers, or bullet markers. Write in plain conversational ",
+            "text with short paragraphs.",
+        )),
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Workspace index
 // ---------------------------------------------------------------------------
 
@@ -545,6 +575,12 @@ impl PromptBuilder {
             }
         }
 
+        // Channel context layer (after user memory, before runtime).
+        if let Some(layer) = self.build_channel_context()? {
+            used_tokens += layer.tokens;
+            layers.push(layer);
+        }
+
         // Runtime context layer.
         let runtime = self.build_runtime_context();
         used_tokens += runtime.tokens;
@@ -751,6 +787,63 @@ impl PromptBuilder {
 
         Ok(Some(PromptLayer {
             name: "user_memory",
+            content: counted.content,
+            tokens: counted.tokens,
+            cache: CacheHint::Session,
+        }))
+    }
+
+    /// Build a channel-specific formatting context layer.
+    ///
+    /// Checks for `channels/<family>.md` in the workspace first (user override),
+    /// then falls back to built-in defaults from [`default_channel_prompt`].
+    fn build_channel_context(&self) -> Result<Option<PromptLayer>> {
+        let Some(channel) = &self.channel else {
+            return Ok(None);
+        };
+
+        let family = channel_family(channel);
+
+        // Try workspace file override first.
+        let rel_path = format!("channels/{family}.md");
+        let full_path = self.workspace.join(&rel_path);
+
+        let content = match std::fs::read_to_string(&full_path) {
+            Ok(c) if !c.trim().is_empty() => {
+                debug!(channel, path = %rel_path, "using workspace channel prompt");
+                c
+            }
+            Ok(_) => {
+                trace!(channel, path = %rel_path, "workspace channel file empty, trying built-in");
+                match default_channel_prompt(channel) {
+                    Some(builtin) => builtin.to_owned(),
+                    None => return Ok(None),
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                match default_channel_prompt(channel) {
+                    Some(builtin) => {
+                        debug!(channel, "using built-in channel prompt");
+                        builtin.to_owned()
+                    }
+                    None => return Ok(None),
+                }
+            }
+            Err(e) => return Err(e).with_context(|| format!("failed to read {rel_path}")),
+        };
+
+        let header = format!("## Channel: {family}");
+        let counted = Counted::new(format!("{header}\n{content}"));
+
+        debug!(
+            channel,
+            family,
+            tokens = counted.tokens,
+            "channel context included in prompt"
+        );
+
+        Ok(Some(PromptLayer {
+            name: "channel_context",
             content: counted.content,
             tokens: counted.tokens,
             cache: CacheHint::Session,
@@ -1433,6 +1526,199 @@ mod tests {
         assert!(
             !layer_names.contains(&"skills"),
             "should not have skills layer when no skills"
+        );
+    }
+
+    // -- Channel context tests --
+
+    #[test]
+    fn channel_family_extracts_base_name() {
+        assert_eq!(channel_family("signal"), "signal");
+        assert_eq!(channel_family("terminal:default"), "terminal");
+        assert_eq!(channel_family("discord:guild:123"), "discord");
+        assert_eq!(channel_family(""), "");
+    }
+
+    #[test]
+    fn default_channel_prompt_signal_returns_content() {
+        let prompt = default_channel_prompt("signal");
+        assert!(prompt.is_some());
+        let text = prompt.unwrap();
+        assert!(text.contains("Signal"), "should mention Signal");
+        assert!(text.contains("plain text"), "should mention plain text");
+    }
+
+    #[test]
+    fn default_channel_prompt_terminal_returns_none() {
+        assert!(default_channel_prompt("terminal:default").is_none());
+        assert!(default_channel_prompt("terminal").is_none());
+    }
+
+    #[test]
+    fn default_channel_prompt_unknown_returns_none() {
+        assert!(default_channel_prompt("discord").is_none());
+        assert!(default_channel_prompt("webhook").is_none());
+    }
+
+    #[test]
+    fn channel_context_included_for_signal() {
+        let dir = setup_workspace(&[("SOUL.md", "I am an agent.")]);
+
+        let index = WorkspaceIndex::scan(dir.path(), &default_file_configs()).unwrap();
+        let prompt = PromptBuilder::new(dir.path().to_path_buf(), "test".into())
+            .trust(TrustLevel::Full)
+            .channel("signal")
+            .build(&index)
+            .unwrap();
+
+        let flat = prompt.to_flat_string();
+        assert!(
+            flat.contains("## Channel: signal"),
+            "should have channel context header"
+        );
+        assert!(
+            flat.contains("plain text"),
+            "should contain Signal formatting instructions"
+        );
+
+        let layer_names: Vec<&str> = prompt.layers.iter().map(|l| l.name).collect();
+        assert!(
+            layer_names.contains(&"channel_context"),
+            "should have channel_context layer, got: {layer_names:?}"
+        );
+    }
+
+    #[test]
+    fn channel_context_not_included_for_terminal() {
+        let dir = setup_workspace(&[("SOUL.md", "I am an agent.")]);
+
+        let index = WorkspaceIndex::scan(dir.path(), &default_file_configs()).unwrap();
+        let prompt = PromptBuilder::new(dir.path().to_path_buf(), "test".into())
+            .trust(TrustLevel::Full)
+            .channel("terminal:default")
+            .build(&index)
+            .unwrap();
+
+        let layer_names: Vec<&str> = prompt.layers.iter().map(|l| l.name).collect();
+        assert!(
+            !layer_names.contains(&"channel_context"),
+            "terminal should not have channel_context layer"
+        );
+    }
+
+    #[test]
+    fn channel_context_not_included_without_channel() {
+        let dir = setup_workspace(&[("SOUL.md", "I am an agent.")]);
+
+        let index = WorkspaceIndex::scan(dir.path(), &default_file_configs()).unwrap();
+        let prompt = PromptBuilder::new(dir.path().to_path_buf(), "test".into())
+            .trust(TrustLevel::Full)
+            .build(&index)
+            .unwrap();
+
+        let layer_names: Vec<&str> = prompt.layers.iter().map(|l| l.name).collect();
+        assert!(
+            !layer_names.contains(&"channel_context"),
+            "no channel set = no channel_context layer"
+        );
+    }
+
+    #[test]
+    fn workspace_channel_file_overrides_builtin() {
+        let dir = setup_workspace(&[("SOUL.md", "I am an agent.")]);
+        fs::create_dir_all(dir.path().join("channels")).unwrap();
+        fs::write(
+            dir.path().join("channels/signal.md"),
+            "Custom signal instructions: be extra terse.",
+        )
+        .unwrap();
+
+        let index = WorkspaceIndex::scan(dir.path(), &default_file_configs()).unwrap();
+        let prompt = PromptBuilder::new(dir.path().to_path_buf(), "test".into())
+            .trust(TrustLevel::Full)
+            .channel("signal")
+            .build(&index)
+            .unwrap();
+
+        let flat = prompt.to_flat_string();
+        assert!(
+            flat.contains("Custom signal instructions"),
+            "should use workspace file content"
+        );
+        assert!(
+            !flat.contains("Signal has no formatting support"),
+            "should NOT contain built-in default when workspace file exists"
+        );
+    }
+
+    #[test]
+    fn workspace_channel_file_for_unknown_channel() {
+        let dir = setup_workspace(&[("SOUL.md", "I am an agent.")]);
+        fs::create_dir_all(dir.path().join("channels")).unwrap();
+        fs::write(
+            dir.path().join("channels/discord.md"),
+            "Discord supports markdown. Use it.",
+        )
+        .unwrap();
+
+        let index = WorkspaceIndex::scan(dir.path(), &default_file_configs()).unwrap();
+        let prompt = PromptBuilder::new(dir.path().to_path_buf(), "test".into())
+            .trust(TrustLevel::Full)
+            .channel("discord")
+            .build(&index)
+            .unwrap();
+
+        let flat = prompt.to_flat_string();
+        assert!(
+            flat.contains("## Channel: discord"),
+            "should have channel header"
+        );
+        assert!(
+            flat.contains("Discord supports markdown"),
+            "should use workspace file for unknown channel"
+        );
+    }
+
+    #[test]
+    fn empty_workspace_channel_file_falls_back_to_builtin() {
+        let dir = setup_workspace(&[("SOUL.md", "I am an agent.")]);
+        fs::create_dir_all(dir.path().join("channels")).unwrap();
+        fs::write(dir.path().join("channels/signal.md"), "   \n  ").unwrap();
+
+        let index = WorkspaceIndex::scan(dir.path(), &default_file_configs()).unwrap();
+        let prompt = PromptBuilder::new(dir.path().to_path_buf(), "test".into())
+            .trust(TrustLevel::Full)
+            .channel("signal")
+            .build(&index)
+            .unwrap();
+
+        let flat = prompt.to_flat_string();
+        assert!(
+            flat.contains("Signal has no formatting support"),
+            "empty workspace file should fall back to built-in"
+        );
+    }
+
+    #[test]
+    fn channel_context_layer_is_session_cache() {
+        let dir = setup_workspace(&[("SOUL.md", "I am an agent.")]);
+
+        let index = WorkspaceIndex::scan(dir.path(), &default_file_configs()).unwrap();
+        let prompt = PromptBuilder::new(dir.path().to_path_buf(), "test".into())
+            .trust(TrustLevel::Full)
+            .channel("signal")
+            .build(&index)
+            .unwrap();
+
+        let channel_layer = prompt
+            .layers
+            .iter()
+            .find(|l| l.name == "channel_context")
+            .expect("should have channel_context layer");
+        assert_eq!(
+            channel_layer.cache,
+            CacheHint::Session,
+            "channel context should use Session cache hint"
         );
     }
 }
