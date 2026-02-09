@@ -1,8 +1,44 @@
+use std::sync::Once;
+
 use anyhow::Result;
 use rusqlite::{Connection, types::Value};
 use tracing::warn;
 
 use crate::types::MemoryQuery;
+
+static SQLITE_VEC_REGISTERED: Once = Once::new();
+
+/// Register sqlite-vec as an auto-extension so every new connection gets it.
+/// Safe to call multiple times — the registration only happens once.
+///
+/// # Safety justification
+/// `sqlite3_vec_init` has the standard SQLite extension entry-point signature
+/// `(sqlite3*, char**, const sqlite3_api_routines*) -> int`. The transmute
+/// casts it to the `Option<fn()>` that `sqlite3_auto_extension` expects —
+/// SQLite internally casts it back before calling. This is the pattern the
+/// `sqlite-vec` crate itself uses in its own tests.
+#[allow(unsafe_code)]
+pub(super) fn ensure_sqlite_vec_registered() {
+    SQLITE_VEC_REGISTERED.call_once(|| {
+        // SAFETY: see doc comment above. sqlite3_vec_init is a well-known
+        // C entry point compiled from sqlite-vec.c with SQLITE_CORE.
+        unsafe {
+            type AutoExtFn = unsafe extern "C" fn(
+                *mut rusqlite::ffi::sqlite3,
+                *mut *mut std::os::raw::c_char,
+                *const rusqlite::ffi::sqlite3_api_routines,
+            ) -> std::os::raw::c_int;
+
+            let func: AutoExtFn = std::mem::transmute::<*const (), AutoExtFn>(
+                sqlite_vec::sqlite3_vec_init as *const (),
+            );
+            let rc = rusqlite::ffi::sqlite3_auto_extension(Some(func));
+            if rc != rusqlite::ffi::SQLITE_OK {
+                warn!(rc, "failed to register sqlite-vec auto-extension");
+            }
+        }
+    });
+}
 
 #[allow(clippy::too_many_lines)]
 pub(super) fn init_schema(conn: &Connection) -> Result<()> {

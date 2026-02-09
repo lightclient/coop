@@ -394,9 +394,14 @@ async fn reconciliation_none_bumps_mentions_and_skips_write() {
 }
 
 #[tokio::test]
-async fn vector_search_path_or_fallback_still_returns_results() {
+async fn vector_search_returns_results() {
     let embedder = Arc::new(RecordingEmbedder::new(8));
     let memory = memory_with(Some(embedder as Arc<dyn EmbeddingProvider>), None);
+
+    assert!(
+        memory.vector_search_enabled(),
+        "vec0 table should be active when embedder is present"
+    );
 
     memory
         .write(sample_obs("semantic alpha", &["one"]))
@@ -406,6 +411,17 @@ async fn vector_search_path_or_fallback_still_returns_results() {
         .write(sample_obs("semantic beta", &["two"]))
         .await
         .unwrap();
+
+    // Verify rows landed in the vec0 virtual table, not just observation_embeddings
+    let vec_count: i64 = memory
+        .conn
+        .lock()
+        .expect("memory db mutex poisoned")
+        .query_row("SELECT COUNT(*) FROM observations_vec", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(vec_count, 2, "both embeddings should be in the vec0 table");
 
     let results = memory
         .search(&MemoryQuery {
@@ -418,6 +434,12 @@ async fn vector_search_path_or_fallback_still_returns_results() {
         .unwrap();
 
     assert!(!results.is_empty());
+
+    // vec0 should still be enabled after the search — no silent fallback
+    assert!(
+        memory.vector_search_enabled(),
+        "vector search should remain enabled after a successful query"
+    );
 }
 
 #[tokio::test]
@@ -669,6 +691,39 @@ async fn maintenance_respects_max_rows_per_run() {
         .await
         .unwrap();
     assert_eq!(remaining.len(), 2);
+}
+
+#[test]
+fn sqlite_vec_extension_loaded() {
+    let embedder = Arc::new(RecordingEmbedder::new(8));
+    let memory = memory_with(Some(embedder as Arc<dyn EmbeddingProvider>), None);
+
+    let conn = memory.conn.lock().expect("memory db mutex poisoned");
+    let version: String = conn
+        .query_row("SELECT vec_version()", [], |row| row.get(0))
+        .unwrap();
+    assert!(
+        version.starts_with('v'),
+        "unexpected vec_version: {version}"
+    );
+
+    // vec0 virtual table should exist and be usable
+    conn.execute(
+        "INSERT INTO observations_vec(rowid, embedding) VALUES (999, ?)",
+        rusqlite::params![serde_json::to_string(&vec![0.1_f32; 8]).unwrap()],
+    )
+    .unwrap();
+
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM observations_vec", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert!(count >= 1);
+
+    conn.execute("DELETE FROM observations_vec WHERE rowid = 999", [])
+        .unwrap();
+    drop(conn);
 }
 
 #[test]

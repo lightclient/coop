@@ -85,6 +85,7 @@ impl SqliteMemory {
             std::fs::create_dir_all(parent)?;
         }
 
+        schema::ensure_sqlite_vec_registered();
         let conn = Connection::open(path)?;
         conn.execute_batch(
             "
