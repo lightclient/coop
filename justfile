@@ -83,7 +83,7 @@ trace:
 trace-gateway:
     COOP_TRACE_FILE={{trace_file}} cargo run {{_feat}} --bin coop -- {{_conf}} start
 
-# Tail recent trace events
+# Tail recent trace events (current file)
 trace-tail n="50":
     tail -n {{n}} {{trace_file}}
 
@@ -112,9 +112,70 @@ trace-api:
 trace-turns:
     grep 'agent_turn' {{trace_file}} | tail -20
 
-# Clear trace file
+# Clear current trace file and all rotated archives
 trace-clear:
-    rm -f {{trace_file}}
+    #!/bin/bash
+    prefix=$(echo "{{trace_file}}" | sed 's/\.jsonl$//')
+    rm -f "{{trace_file}}"
+    archives=$(find . -maxdepth 1 -name "${prefix}.*.jsonl" 2>/dev/null)
+    if [ -n "$archives" ]; then
+        echo "$archives" | xargs rm -v
+    fi
+
+# List current trace file and all rotated archives
+trace-list:
+    #!/bin/bash
+    prefix=$(echo "{{trace_file}}" | sed 's/\.jsonl$//')
+    { [ -f "{{trace_file}}" ] && echo "{{trace_file}} (current)"; \
+      find . -maxdepth 1 -name "${prefix}.*.jsonl" | sort; \
+    } | grep . || echo "No trace files found"
+
+# Search all trace files (current + archives) for a pattern
+trace-grep pattern:
+    #!/bin/bash
+    prefix=$(echo "{{trace_file}}" | sed 's/\.jsonl$//')
+    files=$(find . -maxdepth 1 \( -name "{{trace_file}}" -o -name "${prefix}.*.jsonl" \) | sort)
+    if [ -n "$files" ]; then
+        grep '{{pattern}}' $files | tail -40
+    else
+        echo "No trace files found"
+    fi
+
+# Clean old rotated archives (keep last N, default 7)
+trace-clean n="7":
+    #!/bin/bash
+    prefix=$(echo "{{trace_file}}" | sed 's/\.jsonl$//')
+    archives=$(find . -maxdepth 1 -name "${prefix}.*.jsonl" | sort -r)
+    to_remove=$(echo "$archives" | tail -n +$(({{n}}+1)))
+    if [ -n "$to_remove" ]; then
+        echo "$to_remove" | xargs rm -v
+    else
+        echo "Nothing to clean ({{n}} or fewer archives)"
+    fi
+
+# Show total size of all trace files (current + archives)
+trace-size:
+    #!/bin/bash
+    prefix=$(echo "{{trace_file}}" | sed 's/\.jsonl$//')
+    files=$(find . -maxdepth 1 \( -name "{{trace_file}}" -o -name "${prefix}.*.jsonl" \) 2>/dev/null)
+    if [ -n "$files" ]; then
+        echo "$files" | xargs du -ch | tail -1
+    else
+        echo "0	total"
+    fi
+
+# Archive rotated trace files older than N days
+trace-archive days="7" dir="archive":
+    #!/bin/bash
+    mkdir -p {{dir}}
+    prefix=$(echo "{{trace_file}}" | sed 's/\.jsonl$//')
+    files=$(find . -maxdepth 1 -name "${prefix}.*.jsonl" -mtime +{{days}})
+    if [ -n "$files" ]; then
+        echo "Archiving files older than {{days}} days:"
+        echo "$files" | xargs -I {} mv -v {} {{dir}}/
+    else
+        echo "No archives older than {{days}} days"
+    fi
 
 # ---------------------------------------------------------------------------
 # Code quality & analysis
