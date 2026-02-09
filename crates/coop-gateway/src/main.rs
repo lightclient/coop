@@ -1,6 +1,8 @@
 #![allow(clippy::print_stdout, clippy::print_stderr)] // CLI binary — stdout/stderr is the UI
 
 mod cli;
+mod compaction;
+mod compaction_store;
 mod config;
 mod config_check;
 mod config_tool;

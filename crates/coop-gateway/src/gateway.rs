@@ -17,6 +17,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, error, info, info_span, warn};
 use uuid::Uuid;
 
+use crate::compaction::{self, CompactionState};
+use crate::compaction_store::CompactionStore;
 use crate::config::Config;
 use crate::memory_prompt_index;
 use crate::session_store::DiskSessionStore;
@@ -32,6 +34,8 @@ pub(crate) struct Gateway {
     typing_notifier: Option<Arc<dyn TypingNotifier>>,
     sessions: Mutex<HashMap<SessionKey, Vec<Message>>>,
     session_store: DiskSessionStore,
+    compaction_store: CompactionStore,
+    compaction_cache: Mutex<HashMap<SessionKey, (CompactionState, usize)>>,
 }
 
 /// Re-send interval for typing indicators. Signal's client-side timeout is
@@ -136,6 +140,7 @@ impl Gateway {
         }
 
         let session_store = DiskSessionStore::new(workspace.join("sessions"))?;
+        let compaction_store = CompactionStore::new(workspace.join("sessions"))?;
 
         Ok(Self {
             config,
@@ -148,6 +153,8 @@ impl Gateway {
             typing_notifier,
             sessions: Mutex::new(HashMap::new()),
             session_store,
+            compaction_store,
+            compaction_cache: Mutex::new(HashMap::new()),
         })
     }
 
@@ -375,7 +382,16 @@ impl Gateway {
                 );
 
                 let iter_result: Result<(Message, bool)> = async {
-                    let messages = self.messages(session_key);
+                    let all_messages = self.messages(session_key);
+                    let compaction_state = self.get_compaction(session_key);
+                    let messages = match &compaction_state {
+                        Some((state, msg_count_before)) => compaction::build_provider_context(
+                            &all_messages,
+                            Some(state),
+                            *msg_count_before,
+                        ),
+                        None => all_messages,
+                    };
                     let (response, usage) = self
                         .assistant_response(&system_prompt, &messages, &tool_defs, &event_tx)
                         .await?;
@@ -511,9 +527,38 @@ impl Gateway {
             info!(
                 input_tokens = total_usage.input_tokens,
                 output_tokens = total_usage.output_tokens,
+                cache_read_tokens = total_usage.cache_read_tokens,
+                cache_write_tokens = total_usage.cache_write_tokens,
                 hit_limit,
                 "turn complete"
             );
+
+            // Check if compaction is needed for next turn
+            if compaction::should_compact(&total_usage) {
+                let all_messages = self.messages(session_key);
+                let msg_count = all_messages.len();
+                match compaction::compact(&all_messages, self.provider.as_ref(), &system_prompt)
+                    .await
+                {
+                    Ok(state) => {
+                        info!(
+                            tokens_before = total_usage.input_tokens.unwrap_or(0)
+                                + total_usage.cache_read_tokens.unwrap_or(0)
+                                + total_usage.cache_write_tokens.unwrap_or(0)
+                                + total_usage.output_tokens.unwrap_or(0),
+                            summary_len = state.summary.len(),
+                            "session compacted"
+                        );
+                        self.set_compaction(session_key, state, msg_count);
+                    }
+                    Err(e) => {
+                        warn!(
+                            error = %e,
+                            "compaction failed, continuing with full context"
+                        );
+                    }
+                }
+            }
 
             let _ = event_tx
                 .send(TurnEvent::Done(TurnResult {
@@ -537,6 +582,58 @@ impl Gateway {
         if let Err(e) = self.session_store.delete(session_key) {
             warn!(session = %session_key, error = %e, "failed to delete persisted session");
         }
+        self.compaction_cache
+            .lock()
+            .expect("compaction cache mutex poisoned")
+            .remove(session_key);
+        if let Err(e) = self.compaction_store.delete(session_key) {
+            warn!(session = %session_key, error = %e, "failed to delete compaction state");
+        }
+    }
+
+    fn get_compaction(&self, session_key: &SessionKey) -> Option<(CompactionState, usize)> {
+        {
+            let cache = self
+                .compaction_cache
+                .lock()
+                .expect("compaction cache mutex poisoned");
+
+            if let Some(entry) = cache.get(session_key) {
+                return Some(entry.clone());
+            }
+        }
+
+        match self.compaction_store.load(session_key) {
+            Ok(Some(state)) => {
+                let msg_count = self.messages(session_key).len();
+                let entry = (state, msg_count);
+                self.compaction_cache
+                    .lock()
+                    .expect("compaction cache mutex poisoned")
+                    .insert(session_key.clone(), entry.clone());
+                Some(entry)
+            }
+            Ok(None) => None,
+            Err(e) => {
+                warn!(session = %session_key, error = %e, "failed to load compaction state");
+                None
+            }
+        }
+    }
+
+    fn set_compaction(
+        &self,
+        session_key: &SessionKey,
+        state: CompactionState,
+        messages_before: usize,
+    ) {
+        if let Err(e) = self.compaction_store.save(session_key, &state) {
+            warn!(session = %session_key, error = %e, "failed to persist compaction state");
+        }
+        self.compaction_cache
+            .lock()
+            .expect("compaction cache mutex poisoned")
+            .insert(session_key.clone(), (state, messages_before));
     }
 
     fn append_message(&self, session_key: &SessionKey, message: Message) {
@@ -687,6 +784,8 @@ impl Gateway {
         info!(
             input_tokens = usage.input_tokens,
             output_tokens = usage.output_tokens,
+            cache_read_tokens = usage.cache_read_tokens,
+            cache_write_tokens = usage.cache_write_tokens,
             stop_reason = %usage.stop_reason.as_deref().unwrap_or("unknown"),
             "provider response complete"
         );
@@ -714,6 +813,8 @@ impl Gateway {
         info!(
             input_tokens = usage.input_tokens,
             output_tokens = usage.output_tokens,
+            cache_read_tokens = usage.cache_read_tokens,
+            cache_write_tokens = usage.cache_write_tokens,
             stop_reason = %usage.stop_reason.as_deref().unwrap_or("unknown"),
             "provider response complete"
         );

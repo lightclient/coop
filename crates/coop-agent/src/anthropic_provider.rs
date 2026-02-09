@@ -167,10 +167,12 @@ impl AnthropicProvider {
         );
     }
 
-    /// Build system prompt array with Claude Code identity for OAuth tokens.
+    /// Build system prompt array with cache_control breakpoints.
+    ///
+    /// OAuth tokens include Claude Code identity as first block.
+    /// Both paths use structured arrays for prompt caching.
     fn build_system_blocks(&self, system: &str) -> Value {
         if self.is_oauth {
-            // OAuth tokens MUST include Claude Code identity as first system block
             json!([
                 {
                     "type": "text",
@@ -184,7 +186,11 @@ impl AnthropicProvider {
                 }
             ])
         } else {
-            json!(system)
+            json!([{
+                "type": "text",
+                "text": system,
+                "cache_control": { "type": "ephemeral" }
+            }])
         }
     }
 
@@ -197,11 +203,17 @@ impl AnthropicProvider {
         stream: bool,
     ) -> Value {
         let has_tools = !tools.is_empty();
+
+        // Place cache breakpoint on second-to-last message so the
+        // entire conversation prefix is cached — only the newest
+        // message (latest content) is uncached.
+        let cache_at = (messages.len() >= 2).then(|| messages.len() - 2);
+
         let mut body = json!({
             "model": self.model.name,
             "max_tokens": 8192,
             "system": self.build_system_blocks(system),
-            "messages": Self::format_messages(messages, self.is_oauth),
+            "messages": Self::format_messages(messages, self.is_oauth, cache_at),
         });
 
         if has_tools {
@@ -216,83 +228,113 @@ impl AnthropicProvider {
     }
 
     /// Convert Coop messages to Anthropic API format.
-    fn format_messages(messages: &[Message], prefix_tools: bool) -> Vec<Value> {
-        messages
-            .iter()
-            .filter_map(|m| {
-                let role = match m.role {
-                    Role::User => "user",
-                    Role::Assistant => "assistant",
-                };
+    ///
+    /// When `cache_at` is `Some(i)`, the last content block of the
+    /// i-th source message gets a `cache_control` breakpoint so the
+    /// entire conversation prefix up to that point is cached.
+    fn format_messages(
+        messages: &[Message],
+        prefix_tools: bool,
+        cache_at: Option<usize>,
+    ) -> Vec<Value> {
+        let mut formatted: Vec<Value> = Vec::new();
+        let mut source_index = 0;
 
-                let content: Vec<Value> = m
-                    .content
-                    .iter()
-                    .filter_map(|c| match c {
-                        Content::Text { text } => Some(json!({
-                            "type": "text",
-                            "text": text
-                        })),
-                        Content::ToolRequest {
-                            id,
-                            name,
-                            arguments,
-                        } => {
-                            let api_name = if prefix_tools {
-                                format!("{TOOL_PREFIX}{name}")
-                            } else {
-                                name.clone()
-                            };
-                            Some(json!({
-                                "type": "tool_use",
-                                "id": id,
-                                "name": api_name,
-                                "input": arguments
-                            }))
-                        }
-                        Content::ToolResult {
-                            id,
-                            output,
-                            is_error,
-                        } => Some(json!({
-                            "type": "tool_result",
-                            "tool_use_id": id,
-                            "content": output,
-                            "is_error": is_error
-                        })),
-                        _ => None, // Skip Image, Thinking for now
-                    })
-                    .collect();
+        for m in messages {
+            let role = match m.role {
+                Role::User => "user",
+                Role::Assistant => "assistant",
+            };
 
-                // Drop messages with empty content after filtering — Anthropic
-                // rejects non-final messages with `"content": []` (BUG-001).
-                if content.is_empty() {
-                    return None;
-                }
+            let content: Vec<Value> = m
+                .content
+                .iter()
+                .filter_map(|c| match c {
+                    Content::Text { text } => Some(json!({
+                        "type": "text",
+                        "text": text
+                    })),
+                    Content::ToolRequest {
+                        id,
+                        name,
+                        arguments,
+                    } => {
+                        let api_name = if prefix_tools {
+                            format!("{TOOL_PREFIX}{name}")
+                        } else {
+                            name.clone()
+                        };
+                        Some(json!({
+                            "type": "tool_use",
+                            "id": id,
+                            "name": api_name,
+                            "input": arguments
+                        }))
+                    }
+                    Content::ToolResult {
+                        id,
+                        output,
+                        is_error,
+                    } => Some(json!({
+                        "type": "tool_result",
+                        "tool_use_id": id,
+                        "content": output,
+                        "is_error": is_error
+                    })),
+                    _ => None, // Skip Image, Thinking for now
+                })
+                .collect();
 
-                Some(json!({
-                    "role": role,
-                    "content": content
-                }))
-            })
-            .collect()
+            // Drop messages with empty content after filtering — Anthropic
+            // rejects non-final messages with `"content": []` (BUG-001).
+            if content.is_empty() {
+                source_index += 1;
+                continue;
+            }
+
+            let mut msg = json!({
+                "role": role,
+                "content": content
+            });
+
+            if cache_at == Some(source_index)
+                && let Some(arr) = msg["content"].as_array_mut()
+                && let Some(last_block) = arr.last_mut()
+            {
+                last_block["cache_control"] = json!({ "type": "ephemeral" });
+            }
+
+            formatted.push(msg);
+            source_index += 1;
+        }
+
+        formatted
     }
 
     /// Convert Coop tools to Anthropic API format.
+    ///
+    /// Sets `cache_control` on the last tool definition so that
+    /// system prompt + all tools form a cached prefix.
     fn format_tools(tools: &[ToolDef], prefix: bool) -> Vec<Value> {
+        let len = tools.len();
         tools
             .iter()
-            .map(|t| {
+            .enumerate()
+            .map(|(i, t)| {
                 let name = if prefix {
                     format!("{TOOL_PREFIX}{}", t.name)
                 } else {
                     t.name.clone()
                 };
-                json!({
+                let mut tool = json!({
                     "name": name,
                     "description": t.description,
                     "input_schema": t.parameters
-                })
+                });
+                if i == len - 1 {
+                    tool["cache_control"] = json!({ "type": "ephemeral" });
+                }
+                tool
             })
             .collect()
     }
@@ -328,8 +370,9 @@ impl AnthropicProvider {
         Usage {
             input_tokens: Some(response.usage.input_tokens),
             output_tokens: Some(response.usage.output_tokens),
+            cache_read_tokens: response.usage.cache_read_input_tokens,
+            cache_write_tokens: response.usage.cache_creation_input_tokens,
             stop_reason: response.stop_reason.clone(),
-            ..Default::default()
         }
     }
 }
@@ -561,6 +604,8 @@ where
                     if let Some(out) = u.output_tokens {
                         self.usage.output_tokens = Some(out);
                     }
+                    self.usage.cache_read_tokens = u.cache_read_input_tokens;
+                    self.usage.cache_write_tokens = u.cache_creation_input_tokens;
                 }
                 SseAction::Continue
             }
@@ -602,6 +647,12 @@ where
             SseEvent::MessageDelta { delta, usage } => {
                 if let Some(out) = usage.output_tokens {
                     self.usage.output_tokens = Some(out);
+                }
+                if let Some(v) = usage.cache_creation_input_tokens {
+                    self.usage.cache_write_tokens = Some(v);
+                }
+                if let Some(v) = usage.cache_read_input_tokens {
+                    self.usage.cache_read_tokens = Some(v);
                 }
                 if delta.stop_reason.is_some() {
                     self.usage.stop_reason = delta.stop_reason;
@@ -671,9 +722,14 @@ enum ContentBlock {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(clippy::struct_field_names)] // field names match Anthropic API
 struct ApiUsage {
     input_tokens: u32,
     output_tokens: u32,
+    #[serde(default)]
+    cache_creation_input_tokens: Option<u32>,
+    #[serde(default)]
+    cache_read_input_tokens: Option<u32>,
 }
 
 // --- SSE event types ---
@@ -719,9 +775,14 @@ struct SseMessageStart {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(clippy::struct_field_names)] // field names match Anthropic API
 struct SseMessageStartUsage {
     input_tokens: u32,
     output_tokens: Option<u32>,
+    #[serde(default)]
+    cache_creation_input_tokens: Option<u32>,
+    #[serde(default)]
+    cache_read_input_tokens: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -730,8 +791,13 @@ struct SseMessageDeltaDelta {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(clippy::struct_field_names)] // field names match Anthropic API
 struct SseMessageDeltaUsage {
     output_tokens: Option<u32>,
+    #[serde(default)]
+    cache_creation_input_tokens: Option<u32>,
+    #[serde(default)]
+    cache_read_input_tokens: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -774,6 +840,7 @@ struct SseError {
     message: String,
 }
 
+#[allow(clippy::unwrap_used)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -799,7 +866,7 @@ mod tests {
             Message::user().with_text("who are you"),
         ];
 
-        let formatted = AnthropicProvider::format_messages(&messages, false);
+        let formatted = AnthropicProvider::format_messages(&messages, false, None);
 
         // The thinking-only message must be absent
         assert_eq!(formatted.len(), 4);
@@ -818,10 +885,107 @@ mod tests {
             Message::assistant().with_text("world"),
         ];
 
-        let formatted = AnthropicProvider::format_messages(&messages, false);
+        let formatted = AnthropicProvider::format_messages(&messages, false, None);
 
         assert_eq!(formatted.len(), 2);
         assert_eq!(formatted[1]["role"], "assistant");
         assert_eq!(formatted[1]["content"][0]["text"], "world");
+    }
+
+    #[test]
+    fn format_messages_sets_cache_control_on_second_to_last() {
+        let messages = vec![
+            Message::user().with_text("first"),
+            Message::assistant().with_text("second"),
+            Message::user().with_text("third"),
+        ];
+
+        // cache_at = 1 (second-to-last of 3 messages, index 1)
+        let formatted = AnthropicProvider::format_messages(&messages, false, Some(1));
+
+        assert_eq!(formatted.len(), 3);
+        // Second message (index 1) should have cache_control on last content block
+        assert_eq!(
+            formatted[1]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
+        // First and third should not
+        assert!(formatted[0]["content"][0]["cache_control"].is_null());
+        assert!(formatted[2]["content"][0]["cache_control"].is_null());
+    }
+
+    #[test]
+    fn format_messages_no_cache_on_single_message() {
+        let messages = vec![Message::user().with_text("only one")];
+
+        let formatted = AnthropicProvider::format_messages(&messages, false, None);
+
+        assert_eq!(formatted.len(), 1);
+        assert!(formatted[0]["content"][0]["cache_control"].is_null());
+    }
+
+    #[test]
+    fn format_tools_sets_cache_on_last_tool() {
+        let tools = vec![
+            ToolDef::new("bash", "Run a command", json!({"type": "object"})),
+            ToolDef::new("read_file", "Read a file", json!({"type": "object"})),
+        ];
+
+        let formatted = AnthropicProvider::format_tools(&tools, false);
+
+        assert_eq!(formatted.len(), 2);
+        assert!(formatted[0]["cache_control"].is_null());
+        assert_eq!(formatted[1]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn build_system_blocks_non_oauth_has_cache_control() {
+        let provider =
+            AnthropicProvider::new("sk-ant-api-test".into(), "claude-sonnet-4-20250514").unwrap();
+
+        let blocks = provider.build_system_blocks("You are a test agent.");
+
+        let arr = blocks.as_array().expect("should be an array");
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(arr[0]["text"], "You are a test agent.");
+    }
+
+    #[test]
+    fn parse_usage_includes_cache_tokens() {
+        let response = AnthropicResponse {
+            content: vec![],
+            usage: ApiUsage {
+                input_tokens: 100,
+                output_tokens: 50,
+                cache_creation_input_tokens: Some(200),
+                cache_read_input_tokens: Some(300),
+            },
+            stop_reason: Some("end_turn".into()),
+        };
+
+        let usage = AnthropicProvider::parse_usage(&response);
+
+        assert_eq!(usage.input_tokens, Some(100));
+        assert_eq!(usage.output_tokens, Some(50));
+        assert_eq!(usage.cache_write_tokens, Some(200));
+        assert_eq!(usage.cache_read_tokens, Some(300));
+    }
+
+    #[test]
+    fn parse_usage_handles_missing_cache_fields() {
+        let json_str = r#"{
+            "content": [],
+            "usage": { "input_tokens": 100, "output_tokens": 50 },
+            "stop_reason": "end_turn"
+        }"#;
+
+        let response: AnthropicResponse = serde_json::from_str(json_str).unwrap();
+        let usage = AnthropicProvider::parse_usage(&response);
+
+        assert_eq!(usage.input_tokens, Some(100));
+        assert_eq!(usage.output_tokens, Some(50));
+        assert_eq!(usage.cache_write_tokens, None);
+        assert_eq!(usage.cache_read_tokens, None);
     }
 }

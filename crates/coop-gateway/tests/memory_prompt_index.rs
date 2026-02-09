@@ -23,6 +23,10 @@ use tokio::time::sleep;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::prelude::*;
 
+#[path = "../src/compaction.rs"]
+mod compaction;
+#[path = "../src/compaction_store.rs"]
+mod compaction_store;
 #[path = "../src/config.rs"]
 mod config;
 #[path = "../src/gateway.rs"]
