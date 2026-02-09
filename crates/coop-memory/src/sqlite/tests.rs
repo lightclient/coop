@@ -234,6 +234,7 @@ async fn embeddings_persist_for_add_update_not_exactdup_or_none() {
         panic!("expected add, got {first:?}");
     };
     assert_eq!(embedding_row_count(&memory), 1);
+    assert_eq!(vec_row_count(&memory), 1);
 
     let updated = memory
         .write(sample_obs("service status", &["degraded"]))
@@ -241,6 +242,11 @@ async fn embeddings_persist_for_add_update_not_exactdup_or_none() {
         .unwrap();
     assert_eq!(updated, WriteOutcome::Updated(id));
     assert_eq!(embedding_row_count(&memory), 1);
+    assert_eq!(vec_row_count(&memory), 1);
+    assert!(
+        memory.vector_search_enabled(),
+        "vector search should survive embedding update on same rowid"
+    );
 
     let exact = memory
         .write(sample_obs("service status", &["healthy", "stable"]))
