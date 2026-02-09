@@ -127,7 +127,8 @@ impl Tool for ReadFileTool {
 
         if output.len() > MAX_OUTPUT_BYTES {
             let mut truncated = output;
-            truncated.truncate(MAX_OUTPUT_BYTES);
+            let boundary = truncated.floor_char_boundary(MAX_OUTPUT_BYTES);
+            truncated.truncate(boundary);
             truncated.push_str("\n... [output truncated]");
             Ok(ToolOutput::success(truncated))
         } else {

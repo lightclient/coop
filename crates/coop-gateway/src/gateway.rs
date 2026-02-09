@@ -3,8 +3,8 @@ use coop_core::prompt::{
     PromptBuilder, SkillEntry, WorkspaceIndex, default_file_configs, scan_skills,
 };
 use coop_core::{
-    InboundMessage, Message, Provider, SessionKey, SessionKind, ToolContext, ToolDef, ToolExecutor,
-    TrustLevel, TurnConfig, TurnEvent, TurnResult, TypingNotifier, Usage,
+    InboundMessage, Message, Provider, Role, SessionKey, SessionKind, ToolContext, ToolDef,
+    ToolExecutor, TrustLevel, TurnConfig, TurnEvent, TurnResult, TypingNotifier, Usage,
 };
 use coop_memory::{Memory, NewObservation, min_trust_for_store, trust_to_store};
 use futures::StreamExt;
@@ -298,7 +298,8 @@ impl Gateway {
         let args = serde_json::to_string(arguments).unwrap_or_default();
         let mut output_text = output.content.clone();
         if output_text.len() > 1200 {
-            output_text.truncate(1200);
+            let boundary = output_text.floor_char_boundary(1200);
+            output_text.truncate(boundary);
             output_text.push_str("... [truncated]");
         }
 
@@ -388,6 +389,13 @@ impl Gateway {
             self.sync_provider_model();
 
             let system_prompt = self.build_prompt(trust, user_name, channel).await?;
+
+            // Repair corrupt session state: if the last message is an assistant
+            // with tool_use blocks but no following tool_result message, append
+            // synthetic error results so the API doesn't reject the history.
+            // This can happen when a previous turn panicked mid-tool-execution.
+            self.repair_dangling_tool_use(session_key);
+
             let session_len_before = self.messages(session_key).len();
             self.append_message(session_key, Message::user().with_text(user_input));
 
@@ -771,7 +779,7 @@ impl Gateway {
             .insert(session_key.clone(), (state, messages_before));
     }
 
-    fn append_message(&self, session_key: &SessionKey, message: Message) {
+    pub(crate) fn append_message(&self, session_key: &SessionKey, message: Message) {
         if let Err(e) = self.session_store.append(session_key, &message) {
             warn!(session = %session_key, error = %e, "failed to persist message");
         }
@@ -793,7 +801,37 @@ impl Gateway {
         }
     }
 
-    fn messages(&self, session_key: &SessionKey) -> Vec<Message> {
+    /// If the session ends with an assistant message containing tool_use blocks
+    /// but no subsequent user message with matching tool_result blocks, append a
+    /// synthetic tool_result message so the API doesn't reject the history.
+    fn repair_dangling_tool_use(&self, session_key: &SessionKey) {
+        let msgs = self.messages(session_key);
+        let Some(last) = msgs.last() else { return };
+
+        if last.role != Role::Assistant || !last.has_tool_requests() {
+            return;
+        }
+
+        let tool_ids: Vec<String> = last.tool_requests().iter().map(|r| r.id.clone()).collect();
+
+        warn!(
+            session = %session_key,
+            dangling_tool_ids = ?tool_ids,
+            "repairing session with dangling tool_use blocks from interrupted turn"
+        );
+
+        let mut repair_msg = Message::user();
+        for id in &tool_ids {
+            repair_msg = repair_msg.with_tool_result(
+                id,
+                "error: previous turn was interrupted before this tool result was recorded",
+                true,
+            );
+        }
+        self.append_message(session_key, repair_msg);
+    }
+
+    pub(crate) fn messages(&self, session_key: &SessionKey) -> Vec<Message> {
         let mut sessions = self.sessions.lock().expect("sessions mutex poisoned");
         if !sessions.contains_key(session_key) {
             match self.session_store.load(session_key) {
@@ -1061,7 +1099,7 @@ mod tests {
     use coop_core::fakes::FakeProvider;
     use coop_core::tools::DefaultExecutor;
     use coop_core::traits::ProviderStream;
-    use coop_core::types::ModelInfo;
+    use coop_core::types::{Content, ModelInfo};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -1928,5 +1966,124 @@ agent:
         // Second sync should be a no-op (same model).
         gateway.sync_provider_model();
         assert_eq!(gateway.provider.model_info().name, "test-model");
+    }
+
+    #[test]
+    fn repair_dangling_tool_use_appends_synthetic_results() {
+        let workspace = test_workspace();
+        let provider: Arc<dyn Provider> = Arc::new(FakeProvider::new("ok"));
+        let executor = Arc::new(DefaultExecutor::new());
+        let gateway = Arc::new(
+            Gateway::new(
+                shared_config(test_config()),
+                workspace.path().to_path_buf(),
+                provider,
+                executor,
+                None,
+                None,
+            )
+            .unwrap(),
+        );
+
+        let session_key = gateway.default_session_key();
+
+        // Simulate a corrupt session: assistant message with tool_use but no tool_result
+        gateway.append_message(&session_key, Message::user().with_text("do something"));
+        gateway.append_message(
+            &session_key,
+            Message::assistant()
+                .with_tool_request("tool_a", "bash", serde_json::json!({"command": "echo hi"}))
+                .with_tool_request("tool_b", "read_file", serde_json::json!({"path": "x.txt"})),
+        );
+
+        assert_eq!(gateway.messages(&session_key).len(), 2);
+
+        gateway.repair_dangling_tool_use(&session_key);
+
+        let msgs = gateway.messages(&session_key);
+        assert_eq!(msgs.len(), 3);
+
+        let repair_msg = &msgs[2];
+        assert_eq!(repair_msg.role, Role::User);
+        assert!(repair_msg.has_tool_results());
+
+        let content_strs: Vec<_> = repair_msg
+            .content
+            .iter()
+            .filter_map(|c| match c {
+                Content::ToolResult { id, is_error, .. } => Some((id.clone(), *is_error)),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(content_strs.len(), 2);
+        assert_eq!(content_strs[0].0, "tool_a");
+        assert!(content_strs[0].1, "should be marked as error");
+        assert_eq!(content_strs[1].0, "tool_b");
+        assert!(content_strs[1].1, "should be marked as error");
+    }
+
+    #[test]
+    fn repair_dangling_tool_use_noop_when_session_is_clean() {
+        let workspace = test_workspace();
+        let provider: Arc<dyn Provider> = Arc::new(FakeProvider::new("ok"));
+        let executor = Arc::new(DefaultExecutor::new());
+        let gateway = Arc::new(
+            Gateway::new(
+                shared_config(test_config()),
+                workspace.path().to_path_buf(),
+                provider,
+                executor,
+                None,
+                None,
+            )
+            .unwrap(),
+        );
+
+        let session_key = gateway.default_session_key();
+
+        // Clean session: assistant with tool_use followed by user with tool_result
+        gateway.append_message(&session_key, Message::user().with_text("do something"));
+        gateway.append_message(
+            &session_key,
+            Message::assistant().with_tool_request(
+                "tool_a",
+                "bash",
+                serde_json::json!({"command": "echo hi"}),
+            ),
+        );
+        gateway.append_message(
+            &session_key,
+            Message::user().with_tool_result("tool_a", "hello", false),
+        );
+
+        assert_eq!(gateway.messages(&session_key).len(), 3);
+
+        gateway.repair_dangling_tool_use(&session_key);
+
+        // No change — session was already clean
+        assert_eq!(gateway.messages(&session_key).len(), 3);
+    }
+
+    #[test]
+    fn repair_dangling_tool_use_noop_on_empty_session() {
+        let workspace = test_workspace();
+        let provider: Arc<dyn Provider> = Arc::new(FakeProvider::new("ok"));
+        let executor = Arc::new(DefaultExecutor::new());
+        let gateway = Arc::new(
+            Gateway::new(
+                shared_config(test_config()),
+                workspace.path().to_path_buf(),
+                provider,
+                executor,
+                None,
+                None,
+            )
+            .unwrap(),
+        );
+
+        let session_key = gateway.default_session_key();
+        gateway.repair_dangling_tool_use(&session_key);
+        assert!(gateway.messages(&session_key).is_empty());
     }
 }

@@ -9,8 +9,8 @@ use coop_channels::{
 use coop_core::fakes::FakeProvider;
 use coop_core::tools::DefaultExecutor;
 use coop_core::{
-    InboundMessage, Message, ModelInfo, Provider, ProviderStream, ToolDef, ToolExecutor, TurnEvent,
-    TypingNotifier, Usage,
+    InboundMessage, Message, ModelInfo, Provider, ProviderStream, SessionKey, SessionKind, ToolDef,
+    ToolExecutor, TurnEvent, TypingNotifier, Usage,
 };
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -666,4 +666,101 @@ async fn text_before_tool_call_is_flushed_separately() {
     );
     assert_eq!(outbound[0].content, "before tool");
     assert_eq!(outbound[1].content, "after tool");
+}
+
+fn build_router_with_gateway(
+    provider: Arc<dyn Provider>,
+    executor: Arc<dyn ToolExecutor>,
+    typing_notifier: Option<Arc<dyn TypingNotifier>>,
+) -> (Arc<MessageRouter>, Arc<Gateway>) {
+    let config = test_config();
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::write(workspace.path().join("SOUL.md"), "You are a test agent.").unwrap();
+    let shared = shared_config(config);
+    let gateway = Arc::new(
+        Gateway::new(
+            Arc::clone(&shared),
+            workspace.path().to_path_buf(),
+            provider,
+            executor,
+            typing_notifier,
+            None,
+        )
+        .unwrap(),
+    );
+
+    let router = Arc::new(MessageRouter::new(shared, Arc::clone(&gateway)));
+    (router, gateway)
+}
+
+/// Simulate a crash that left dangling tool_use blocks in the session, then
+/// verify that a subsequent Signal message succeeds because the gateway
+/// repairs the session before sending to the provider.
+#[tokio::test]
+async fn signal_e2e_recovers_from_dangling_tool_use() {
+    let provider = Arc::new(CountingProvider::new("recovered"));
+    let executor = Arc::new(DefaultExecutor::new());
+    let (router, gateway) = build_router_with_gateway(
+        Arc::clone(&provider) as Arc<dyn Provider>,
+        executor as Arc<dyn ToolExecutor>,
+        None,
+    );
+
+    // Build the session key that will be used for alice-uuid DM
+    let session_key = SessionKey {
+        agent_id: "coop".to_owned(),
+        kind: SessionKind::Dm("signal:alice-uuid".to_owned()),
+    };
+
+    // Inject corrupt session state: user msg + assistant with tool_use but no tool_result
+    gateway.append_message(&session_key, Message::user().with_text("do something"));
+    gateway.append_message(
+        &session_key,
+        Message::assistant()
+            .with_tool_request("tool_a", "bash", serde_json::json!({"command": "echo hi"}))
+            .with_tool_request("tool_b", "read_file", serde_json::json!({"path": "x.txt"})),
+    );
+
+    // Session has 2 messages, last is assistant with dangling tool_use
+    assert_eq!(gateway.messages(&session_key).len(), 2);
+
+    // Now send a new inbound Signal message from alice
+    let mut channel = MockSignalChannel::new();
+    channel
+        .inject_inbound(inbound_message(
+            InboundKind::Text,
+            "alice-uuid",
+            None,
+            false,
+            Some("alice-uuid"),
+        ))
+        .await
+        .unwrap();
+
+    handle_signal_inbound_once(&mut channel, router.as_ref())
+        .await
+        .unwrap();
+
+    // The provider should have been called — repair fixed the session
+    assert!(provider.calls() > 0, "provider should have been called");
+
+    // Session should have the repair message + user message + assistant response
+    let msgs = gateway.messages(&session_key);
+    // 2 original + 1 repair (tool_results) + 1 new user + 1 assistant = 5
+    assert_eq!(msgs.len(), 5, "session should have 5 messages after repair");
+
+    // Verify the repair message is at index 2 (has tool_results)
+    assert!(
+        msgs[2].has_tool_results(),
+        "repair msg should have tool results"
+    );
+    // The new user message at index 3
+    assert_eq!(msgs[3].role, coop_core::Role::User);
+    // The assistant response at index 4
+    assert_eq!(msgs[4].role, coop_core::Role::Assistant);
+
+    // Response should have been sent to the channel
+    let outbound = channel.take_outbound();
+    assert_eq!(outbound.len(), 1);
+    assert_eq!(outbound[0].content, "recovered");
 }

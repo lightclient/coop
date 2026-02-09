@@ -84,7 +84,8 @@ impl Tool for BashTool {
                 }
 
                 if combined.len() > MAX_OUTPUT_BYTES {
-                    combined.truncate(MAX_OUTPUT_BYTES);
+                    let boundary = combined.floor_char_boundary(MAX_OUTPUT_BYTES);
+                    combined.truncate(boundary);
                     combined.push_str("\n... [output truncated]");
                 }
 
@@ -165,6 +166,27 @@ mod tests {
 
         assert!(output.is_error);
         assert!(output.content.contains("trust level"));
+    }
+
+    #[tokio::test]
+    async fn truncation_respects_char_boundaries() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(dir.path());
+        let tool = BashTool;
+
+        // Generate output with multi-byte UTF-8 chars that exceeds MAX_OUTPUT_BYTES.
+        // Each '🦀' is 4 bytes. We need enough to exceed 100_000 bytes.
+        let repeat = MAX_OUTPUT_BYTES / 4 + 100;
+        let cmd = format!("python3 -c \"print('🦀' * {repeat})\"");
+        let output = tool
+            .execute(serde_json::json!({"command": cmd}), &ctx)
+            .await
+            .unwrap();
+
+        assert!(!output.is_error);
+        assert!(output.content.contains("[output truncated]"));
+        // Verify it's valid UTF-8 (would have panicked otherwise)
+        assert!(output.content.len() <= MAX_OUTPUT_BYTES + 50);
     }
 
     #[tokio::test]
