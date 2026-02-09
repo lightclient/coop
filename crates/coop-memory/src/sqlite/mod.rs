@@ -183,13 +183,22 @@ impl SqliteMemory {
             params![observation_id, embedding_json, dimensions, now_ms],
         )?;
 
-        if self.vector_search_enabled()
-            && let Err(error) = conn.execute(
-                "INSERT OR REPLACE INTO observations_vec(rowid, embedding) VALUES (?, ?)",
-                params![observation_id, serde_json::to_string(embedding)?],
-            )
-        {
-            self.disable_vector_search(&error, "embedding_upsert");
+        if self.vector_search_enabled() {
+            // vec0 virtual tables don't support INSERT OR REPLACE — delete first
+            let vec_result = conn
+                .execute(
+                    "DELETE FROM observations_vec WHERE rowid = ?",
+                    params![observation_id],
+                )
+                .and_then(|_| {
+                    conn.execute(
+                        "INSERT INTO observations_vec(rowid, embedding) VALUES (?, ?)",
+                        params![observation_id, &embedding_json],
+                    )
+                });
+            if let Err(error) = vec_result {
+                self.disable_vector_search(&error, "embedding_upsert");
+            }
         }
 
         drop(conn);
