@@ -106,12 +106,25 @@ impl MessageRouter {
             }
             "/status" => {
                 let count = self.gateway.session_message_count(&decision.session_key);
+                let usage = self.gateway.session_usage(&decision.session_key);
+                let context_limit = self.gateway.context_limit();
+                #[allow(clippy::cast_precision_loss)]
+                let context_pct = if context_limit > 0 {
+                    f64::from(usage.last_input_tokens) / (context_limit as f64) * 100.0
+                } else {
+                    0.0
+                };
                 let status = format!(
-                    "Session: {}\nAgent: {}\nModel: {}\nMessages: {}",
+                    "Session: {}\nAgent: {}\nModel: {}\nMessages: {}\nContext: {} / {} tokens ({:.1}%)\nTotal tokens used: {} in / {} out",
                     decision.session_key,
                     self.gateway.agent_id(),
                     self.gateway.model_name(),
                     count,
+                    usage.last_input_tokens,
+                    context_limit,
+                    context_pct,
+                    usage.cumulative.input_tokens.unwrap_or(0),
+                    usage.cumulative.output_tokens.unwrap_or(0),
                 );
                 Some(status)
             }
@@ -772,6 +785,12 @@ users:
         assert!(text.contains("Session:"));
         assert!(text.contains("Model:"));
         assert!(text.contains("reid"), "should contain agent id");
+        assert!(text.contains("Context:"), "should show context usage");
+        assert!(text.contains("128000"), "should show context window size");
+        assert!(
+            text.contains("Total tokens used:"),
+            "should show cumulative usage"
+        );
     }
 
     #[tokio::test]

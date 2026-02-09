@@ -36,6 +36,16 @@ pub(crate) struct Gateway {
     session_store: DiskSessionStore,
     compaction_store: CompactionStore,
     compaction_cache: Mutex<HashMap<SessionKey, (CompactionState, usize)>>,
+    /// Per-session cumulative usage and last-turn input tokens (context size).
+    session_usage: Mutex<HashMap<SessionKey, SessionUsage>>,
+}
+
+/// Tracks cumulative token usage and context size for a session.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SessionUsage {
+    pub cumulative: Usage,
+    /// Input tokens from the last turn (approximates current context size).
+    pub last_input_tokens: u32,
 }
 
 /// Re-send interval for typing indicators. Signal's client-side timeout is
@@ -155,6 +165,7 @@ impl Gateway {
             session_store,
             compaction_store,
             compaction_cache: Mutex::new(HashMap::new()),
+            session_usage: Mutex::new(HashMap::new()),
         })
     }
 
@@ -560,6 +571,9 @@ impl Gateway {
                 }
             }
 
+            // Track session-level cumulative usage.
+            self.record_turn_usage(session_key, &total_usage);
+
             let _ = event_tx
                 .send(TurnEvent::Done(TurnResult {
                     messages: new_messages,
@@ -589,6 +603,10 @@ impl Gateway {
         if let Err(e) = self.compaction_store.delete(session_key) {
             warn!(session = %session_key, error = %e, "failed to delete compaction state");
         }
+        self.session_usage
+            .lock()
+            .expect("session_usage mutex poisoned")
+            .remove(session_key);
     }
 
     fn get_compaction(&self, session_key: &SessionKey) -> Option<(CompactionState, usize)> {
@@ -693,6 +711,33 @@ impl Gateway {
     /// Agent ID from config.
     pub(crate) fn agent_id(&self) -> &str {
         &self.config.agent.id
+    }
+
+    /// Context window size in tokens.
+    pub(crate) fn context_limit(&self) -> usize {
+        self.provider.model_info().context_limit
+    }
+
+    /// Session-level usage stats (cumulative + last context size).
+    pub(crate) fn session_usage(&self, session_key: &SessionKey) -> SessionUsage {
+        self.session_usage
+            .lock()
+            .expect("session_usage mutex poisoned")
+            .get(session_key)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Record usage from a completed turn into session-level stats.
+    fn record_turn_usage(&self, session_key: &SessionKey, turn_usage: &Usage) {
+        let mut map = self
+            .session_usage
+            .lock()
+            .expect("session_usage mutex poisoned");
+        let entry = map.entry(session_key.clone()).or_default();
+        entry.cumulative += turn_usage.clone();
+        entry.last_input_tokens = turn_usage.input_tokens.unwrap_or(0);
+        drop(map);
     }
 
     /// Seed a session with formatted Signal chat history for context.
