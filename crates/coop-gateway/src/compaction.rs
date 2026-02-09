@@ -45,20 +45,46 @@ pub(crate) fn should_compact(usage: &Usage) -> bool {
 
 /// Build messages for the compaction summarization call.
 ///
-/// Strips `ToolRequest` blocks from the last assistant message to avoid
-/// Anthropic 400 errors (orphaned tool_use without tool_result).
+/// Ensures every `tool_use` block in an assistant message has a matching
+/// `tool_result` in the immediately following user message. Orphaned
+/// tool_use blocks (e.g. from cancelled turns) are stripped to avoid
+/// Anthropic 400 errors.
 fn prepare_compaction_messages(messages: &[Message]) -> Vec<Message> {
     let mut msgs = messages.to_vec();
 
-    // Strip tool_use from last assistant message
-    if let Some(last) = msgs.last_mut()
-        && last.role == Role::Assistant
-    {
-        last.content
-            .retain(|c| !matches!(c, Content::ToolRequest { .. }));
-        if last.content.is_empty() {
-            msgs.pop();
+    // Walk assistant messages and strip any tool_use ids that lack a
+    // matching tool_result in the next message.
+    let mut i = 0;
+    while i < msgs.len() {
+        if msgs[i].role == Role::Assistant && msgs[i].has_tool_requests() {
+            // Collect tool_result ids from the next message (if it exists and is a user message)
+            let result_ids: std::collections::HashSet<String> =
+                if i + 1 < msgs.len() && msgs[i + 1].role == Role::User {
+                    msgs[i + 1]
+                        .content
+                        .iter()
+                        .filter_map(|c| match c {
+                            Content::ToolResult { id, .. } => Some(id.clone()),
+                            _ => None,
+                        })
+                        .collect()
+                } else {
+                    std::collections::HashSet::new()
+                };
+
+            // Strip tool_use blocks whose id has no matching tool_result
+            msgs[i].content.retain(|c| match c {
+                Content::ToolRequest { id, .. } => result_ids.contains(id),
+                _ => true,
+            });
+
+            // If the assistant message is now empty, remove it
+            if msgs[i].content.is_empty() {
+                msgs.remove(i);
+                continue; // don't increment — next element shifted into i
+            }
         }
+        i += 1;
     }
 
     // Append summary prompt
@@ -266,5 +292,70 @@ mod tests {
         assert_eq!(prepared.len(), 2); // user + summary prompt
         assert_eq!(prepared[0].text(), "hello");
         assert!(prepared[1].text().contains("continuation summary"));
+    }
+
+    #[test]
+    fn strip_orphaned_tool_use_mid_conversation() {
+        // Simulates a cancelled turn: assistant sent tool_use, but the next
+        // message is a new user message (no tool_result).
+        let messages = vec![
+            Message::user().with_text("hello"),
+            Message::assistant()
+                .with_text("Let me check.")
+                .with_tool_request("t1", "bash", json!({"command": "ls"})),
+            // No tool_result — user sent a new message instead (cancelled turn)
+            Message::user().with_text("never mind, do something else"),
+            Message::assistant().with_text("Sure, doing something else."),
+        ];
+
+        let prepared = prepare_compaction_messages(&messages);
+
+        // tool_use should be stripped from assistant[1], text kept
+        assert_eq!(prepared.len(), 5); // user, assistant(text only), user, assistant, summary
+        assert!(!prepared[1].has_tool_requests());
+        assert_eq!(prepared[1].content.len(), 1);
+        assert!(prepared[1].content[0].as_text().is_some());
+    }
+
+    #[test]
+    fn keep_matched_tool_use_mid_conversation() {
+        // Normal turn: tool_use followed by tool_result
+        let messages = vec![
+            Message::user().with_text("hello"),
+            Message::assistant()
+                .with_text("Let me check.")
+                .with_tool_request("t1", "bash", json!({"command": "ls"})),
+            Message::user().with_tool_result("t1", "file1.txt\nfile2.txt", false),
+            Message::assistant().with_text("Found two files."),
+        ];
+
+        let prepared = prepare_compaction_messages(&messages);
+
+        // tool_use should be preserved — it has a matching tool_result
+        assert_eq!(prepared.len(), 5); // all 4 + summary prompt
+        assert!(prepared[1].has_tool_requests());
+    }
+
+    #[test]
+    fn strip_orphaned_tool_use_only_removes_unmatched() {
+        // Assistant has two tool_use: one matched, one orphaned
+        let messages = vec![
+            Message::user().with_text("hello"),
+            Message::assistant()
+                .with_text("Let me check both.")
+                .with_tool_request("t1", "bash", json!({"command": "ls"}))
+                .with_tool_request("t2", "bash", json!({"command": "pwd"})),
+            // Only t1 has a result (t2 was from a cancelled execution)
+            Message::user().with_tool_result("t1", "file1.txt", false),
+            Message::assistant().with_text("Done."),
+        ];
+
+        let prepared = prepare_compaction_messages(&messages);
+
+        // t1 should be kept, t2 should be stripped
+        let assistant = &prepared[1];
+        assert_eq!(assistant.content.len(), 2); // text + t1
+        assert!(assistant.content[0].as_text().is_some());
+        assert!(matches!(&assistant.content[1], Content::ToolRequest { id, .. } if id == "t1"));
     }
 }
