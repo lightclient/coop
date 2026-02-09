@@ -297,11 +297,25 @@ impl AnthropicProvider {
                         } else {
                             name.clone()
                         };
+                        // Ensure input is a valid JSON object, not a serialized string
+                        let input = match arguments {
+                            Value::String(s) => {
+                                warn!(
+                                    tool_id = id,
+                                    tool_name = name,
+                                    serialized_args = s,
+                                    "tool arguments were incorrectly serialized as string, attempting to parse"
+                                );
+                                // Try to parse string as JSON, fall back to empty object
+                                serde_json::from_str::<Value>(s).unwrap_or_else(|_| json!({}))
+                            }
+                            other => other.clone()
+                        };
                         Some(json!({
                             "type": "tool_use",
                             "id": id,
                             "name": api_name,
-                            "input": arguments
+                            "input": input
                         }))
                     }
                     Content::ToolResult {
