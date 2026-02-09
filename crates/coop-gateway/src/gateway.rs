@@ -535,6 +535,51 @@ impl Gateway {
                 }
             }
 
+            // If we hit the iteration limit while the model still wanted to use
+            // tools, do one final provider call with no tools so the model is
+            // forced to produce a text summary for the user.
+            if hit_limit {
+                let final_span = info_span!("turn_limit_completion");
+                let final_result: Result<()> = async {
+                    info!("forcing final completion (iteration limit reached)");
+
+                    let all_messages = self.messages(session_key);
+                    let compaction_state = self.get_compaction(session_key);
+                    let messages = match &compaction_state {
+                        Some((state, msg_count_before)) => compaction::build_provider_context(
+                            &all_messages,
+                            Some(state),
+                            *msg_count_before,
+                        ),
+                        None => all_messages,
+                    };
+
+                    let (response, usage) = self
+                        .assistant_response(&system_prompt, &messages, &[], &event_tx)
+                        .await?;
+
+                    total_usage += usage;
+                    self.append_message(session_key, response.clone());
+                    new_messages.push(response.clone());
+
+                    let _ = event_tx
+                        .send(TurnEvent::AssistantMessage(response.clone()))
+                        .await;
+
+                    info!(
+                        response_text_len = response.text().len(),
+                        "limit completion done"
+                    );
+                    Ok(())
+                }
+                .instrument(final_span)
+                .await;
+
+                if let Err(e) = final_result {
+                    warn!(error = %e, "limit completion failed");
+                }
+            }
+
             info!(
                 input_tokens = total_usage.input_tokens,
                 output_tokens = total_usage.output_tokens,
@@ -1415,5 +1460,146 @@ agent:
 
         let events = notifier.events.lock().await.clone();
         assert_eq!(events, vec![true, true, true, false]);
+    }
+
+    /// Provider that always returns tool_use when tools are available,
+    /// and a text summary when called with no tools (the forced completion).
+    #[derive(Debug)]
+    struct AlwaysToolUseProvider {
+        model: ModelInfo,
+        call_count: Mutex<u32>,
+    }
+
+    impl AlwaysToolUseProvider {
+        fn new() -> Self {
+            Self {
+                model: ModelInfo {
+                    name: "always-tool".into(),
+                    context_limit: 128_000,
+                },
+                call_count: Mutex::new(0),
+            }
+        }
+
+        fn calls(&self) -> u32 {
+            *self.call_count.lock().unwrap()
+        }
+    }
+
+    #[async_trait]
+    impl Provider for AlwaysToolUseProvider {
+        fn name(&self) -> &'static str {
+            "always-tool"
+        }
+
+        fn model_info(&self) -> &ModelInfo {
+            &self.model
+        }
+
+        async fn complete(
+            &self,
+            _system: &str,
+            _messages: &[Message],
+            tools: &[ToolDef],
+        ) -> Result<(Message, Usage)> {
+            *self.call_count.lock().unwrap() += 1;
+            let usage = Usage {
+                input_tokens: Some(100),
+                output_tokens: Some(50),
+                ..Default::default()
+            };
+            if tools.is_empty() {
+                // Forced final completion — return text
+                Ok((
+                    Message::assistant().with_text("I hit the iteration limit. Here's a summary."),
+                    usage,
+                ))
+            } else {
+                // Normal iteration — return tool_use
+                Ok((
+                    Message::assistant().with_tool_request(
+                        "tool_1",
+                        "bash",
+                        serde_json::json!({"command": "echo hi"}),
+                    ),
+                    usage,
+                ))
+            }
+        }
+
+        async fn stream(
+            &self,
+            _system: &str,
+            _messages: &[Message],
+            _tools: &[ToolDef],
+        ) -> Result<ProviderStream> {
+            anyhow::bail!("not supported")
+        }
+    }
+
+    #[tokio::test]
+    async fn hit_limit_forces_final_text_completion() {
+        let workspace = test_workspace();
+        let provider = Arc::new(AlwaysToolUseProvider::new());
+        let provider_ref = Arc::clone(&provider);
+        let executor = Arc::new(DefaultExecutor::new());
+        let gateway = Arc::new(
+            Gateway::new(
+                test_config(),
+                workspace.path().to_path_buf(),
+                provider as Arc<dyn Provider>,
+                executor,
+                None,
+                None,
+            )
+            .unwrap(),
+        );
+
+        let session_key = gateway.default_session_key();
+        let (event_tx, mut event_rx) = mpsc::channel(256);
+
+        let result = gateway
+            .run_turn_with_trust(
+                &session_key,
+                "hello",
+                TrustLevel::Full,
+                Some("alice"),
+                None,
+                event_tx,
+            )
+            .await;
+
+        assert!(result.is_ok());
+
+        // 25 iterations + 1 forced final completion = 26 provider calls
+        assert_eq!(provider_ref.calls(), 26);
+
+        let mut assistant_messages = Vec::new();
+        let mut hit_limit = false;
+        while let Ok(event) = event_rx.try_recv() {
+            match event {
+                TurnEvent::AssistantMessage(msg) => assistant_messages.push(msg),
+                TurnEvent::Done(result) => hit_limit = result.hit_limit,
+                _ => {}
+            }
+        }
+
+        assert!(hit_limit, "should report hit_limit=true");
+
+        // The last assistant message should be the forced text completion
+        let last = assistant_messages.last().expect("should have messages");
+        assert!(
+            !last.text().is_empty(),
+            "final message should contain text summary"
+        );
+        assert!(
+            last.text().contains("iteration limit"),
+            "final message should be the forced completion: {}",
+            last.text()
+        );
+        assert!(
+            !last.has_tool_requests(),
+            "final message should not request tools"
+        );
     }
 }
