@@ -373,8 +373,6 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
     // Capture startup values before wrapping in SharedConfig
     let agent_id = config.agent.id.clone();
     let agent_model = config.agent.model.clone();
-    let cron_entries = config.cron.clone();
-    let users = config.users.clone();
     let retention = config.memory.retention.clone();
 
     let shared = shared_config(config);
@@ -423,7 +421,7 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
         });
     }
 
-    if !cron_entries.is_empty() {
+    {
         #[cfg(feature = "signal")]
         let deliver_tx = signal_action_tx
             .as_ref()
@@ -432,14 +430,12 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
         #[cfg(not(feature = "signal"))]
         let deliver_tx: Option<scheduler::DeliverySender> = None;
 
+        let sched_config = Arc::clone(&shared);
         let sched_router = Arc::clone(&router);
         let sched_token = shutdown_token.clone();
-        let cron_count = cron_entries.len();
         tokio::spawn(async move {
-            scheduler::run_scheduler(cron_entries, sched_router, &users, deliver_tx, sched_token)
-                .await;
+            scheduler::run_scheduler(sched_config, sched_router, deliver_tx, sched_token).await;
         });
-        info!(count = cron_count, "scheduler started");
     }
 
     info!(
