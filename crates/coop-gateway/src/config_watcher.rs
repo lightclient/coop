@@ -372,6 +372,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn poll_loop_notifies_on_cron_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = setup_workspace(dir.path());
+        let yaml = format!(
+            "agent:\n  id: test\n  model: test-model\n  workspace: {}\nprovider:\n  name: anthropic\n",
+            ws.display()
+        );
+        let path = write_config(dir.path(), &yaml);
+        let config = shared_config(Config::load(&path).unwrap());
+        let shutdown = CancellationToken::new();
+        let notify = Arc::new(tokio::sync::Notify::new());
+
+        let handle = spawn_config_watcher(
+            path.clone(),
+            Arc::clone(&config),
+            shutdown.clone(),
+            Some(Arc::clone(&notify)),
+        );
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Add a cron entry — should trigger the notify.
+        let new_yaml = format!(
+            "agent:\n  id: test\n  model: test-model\n  workspace: {}\nprovider:\n  name: anthropic\ncron:\n  - name: test\n    cron: '*/30 * * * *'\n    message: hello\n",
+            ws.display()
+        );
+        fs::write(&path, &new_yaml).unwrap();
+
+        // The notify should fire within poll interval + debounce (~2.2s).
+        let result = tokio::time::timeout(Duration::from_secs(5), notify.notified()).await;
+        assert!(
+            result.is_ok(),
+            "notify should fire when cron entries change"
+        );
+
+        shutdown.cancel();
+        let _ = tokio::time::timeout(Duration::from_secs(1), handle).await;
+    }
+
+    #[tokio::test]
+    async fn poll_loop_does_not_notify_on_non_cron_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = setup_workspace(dir.path());
+        let yaml = format!(
+            "agent:\n  id: test\n  model: test-model\n  workspace: {}\nprovider:\n  name: anthropic\n",
+            ws.display()
+        );
+        let path = write_config(dir.path(), &yaml);
+        let config = shared_config(Config::load(&path).unwrap());
+        let shutdown = CancellationToken::new();
+        let notify = Arc::new(tokio::sync::Notify::new());
+
+        let handle = spawn_config_watcher(
+            path.clone(),
+            Arc::clone(&config),
+            shutdown.clone(),
+            Some(Arc::clone(&notify)),
+        );
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Change users but NOT cron — should NOT trigger notify.
+        let new_yaml = format!(
+            "agent:\n  id: test\n  model: test-model\n  workspace: {}\nprovider:\n  name: anthropic\nusers:\n  - name: alice\n    trust: full\n    match: []\n",
+            ws.display()
+        );
+        fs::write(&path, &new_yaml).unwrap();
+
+        // Wait for poll + debounce to process the change.
+        tokio::time::sleep(Duration::from_secs(3)).await;
+
+        // Config should be updated (users changed)...
+        assert_eq!(config.load().users.len(), 1);
+
+        // ...but notify should NOT have fired (cron didn't change).
+        let result = tokio::time::timeout(Duration::from_millis(100), notify.notified()).await;
+        assert!(
+            result.is_err(),
+            "notify should not fire when only users change"
+        );
+
+        shutdown.cancel();
+        let _ = tokio::time::timeout(Duration::from_secs(1), handle).await;
+    }
+
+    #[tokio::test]
     async fn poll_loop_stops_on_shutdown() {
         let dir = tempfile::tempdir().unwrap();
         let ws = setup_workspace(dir.path());

@@ -894,6 +894,86 @@ mod tests {
         );
     }
 
+    // -- Notify tests --
+
+    #[tokio::test]
+    async fn scheduler_wakes_on_notify_when_sleeping_for_distant_cron() {
+        // Cron fires far in the future (Jan 1). Scheduler would sleep for
+        // months. A notify should wake it to re-evaluate immediately.
+        let cron = vec![CronConfig {
+            name: "distant".to_owned(),
+            cron: "0 0 1 1 *".to_owned(), // once a year
+            message: "yearly".to_owned(),
+            user: None,
+            deliver: None,
+        }];
+        let (shared, router, gateway) = make_shared_config_and_router(None, &cron, "response");
+        let router = Arc::new(router);
+        let cancel = CancellationToken::new();
+        let notify = Arc::new(tokio::sync::Notify::new());
+
+        let sched_shared = Arc::clone(&shared);
+        let sched_cancel = cancel.clone();
+        let sched_notify = Arc::clone(&notify);
+        let handle = tokio::spawn(async move {
+            run_scheduler_with_notify(sched_shared, router, None, sched_cancel, Some(sched_notify))
+                .await;
+        });
+
+        // Give scheduler time to enter its long sleep.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Hot-reload: replace the distant cron with an every-second cron.
+        let mut new_config = shared.load().as_ref().clone();
+        new_config.cron = vec![CronConfig {
+            name: "fast".to_owned(),
+            cron: "* * * * * * *".to_owned(),
+            message: "tick".to_owned(),
+            user: None,
+            deliver: None,
+        }];
+        shared.store(Arc::new(new_config));
+        notify.notify_one();
+
+        // The scheduler should wake, re-parse, and fire within ~2s.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        cancel.cancel();
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+
+        let sessions = gateway.list_sessions();
+        let cron_session = sessions
+            .iter()
+            .find(|s| matches!(&s.kind, SessionKind::Cron(name) if name == "fast"));
+        assert!(
+            cron_session.is_some(),
+            "scheduler should wake from long sleep on notify, found: {sessions:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn scheduler_exits_on_cancellation_when_waiting_on_notify() {
+        // No cron entries — scheduler blocks on notify.notified().
+        // Shutdown should still work.
+        let (shared, router, _gateway) = make_shared_config_and_router(None, &[], "response");
+        let router = Arc::new(router);
+        let cancel = CancellationToken::new();
+        let notify = Arc::new(tokio::sync::Notify::new());
+
+        let sched_cancel = cancel.clone();
+        let sched_notify = Arc::clone(&notify);
+        let handle = tokio::spawn(async move {
+            run_scheduler_with_notify(shared, router, None, sched_cancel, Some(sched_notify)).await;
+        });
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        cancel.cancel();
+
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("scheduler should exit promptly when cancelled while waiting on notify")
+            .expect("scheduler task panicked");
+    }
+
     // -- New heartbeat delivery tests --
 
     #[tokio::test]
