@@ -583,6 +583,21 @@ impl Gateway {
         self.messages(session_key).is_empty()
     }
 
+    /// Number of messages in a session.
+    pub(crate) fn session_message_count(&self, session_key: &SessionKey) -> usize {
+        self.messages(session_key).len()
+    }
+
+    /// Agent model name from config.
+    pub(crate) fn model_name(&self) -> &str {
+        &self.config.agent.model
+    }
+
+    /// Agent ID from config.
+    pub(crate) fn agent_id(&self) -> &str {
+        &self.config.agent.id
+    }
+
     /// Seed a session with formatted Signal chat history for context.
     #[allow(dead_code)]
     pub(crate) fn seed_signal_history(&self, session_key: &SessionKey, history: &[InboundMessage]) {

@@ -5,6 +5,9 @@
 - make it clear that deps like sccache need to be installed to compile
 - make the just follow trace script print the message and tool messages more
   nicely
+- log rotation
+- Don't save keys to memory!!!
+- need to be able to run coop in a way that it can restart itself
 
 ## Gateway
 
@@ -19,6 +22,13 @@
   working as expected even if it is syntactically correct
 - sessions persist across reboots
 - multi agent and subagent support
+- **More slash commands.** Currently have `/new`, `/clear`, `/status`, `/help`, `/verbose`, `/quit`. Add:
+  - `/compact` — Trigger context summarization when running low on context window. Summarize older messages and replace with a condensed summary to free up tokens.
+  - `/sessions` — List active sessions. The gateway already exposes `list_sessions()`. Useful in attach mode.
+  - `/model` — Switch model mid-session. Would need provider hot-swap support in the gateway.
+  - `/undo` — Roll back the last turn (user message + assistant response). The gateway already has `truncate_session()`.
+  - `/retry` — Undo the last turn and re-send the same user input. Combines `/undo` with automatic re-submit.
+- Slash commands should only be allowable by full trust users
 
 ## Agent
 
@@ -30,7 +40,8 @@
 
 - add support for chat history
 - resolve user via phone number instead of uuid
-- typing should last until the agent responds
+- `typing should last until the agent responds`
+- nicer error messages instead of raw json
 - ~~should send delivered / read receipts~~
 
 ## TUI

@@ -471,6 +471,50 @@ impl App {
         self.push_message(DisplayMessage::system(format!("Verbose mode {state}.")));
     }
 
+    /// Show help text listing available commands.
+    pub fn show_help(&mut self) {
+        self.push_message(DisplayMessage::system(
+            "\
+Available commands:
+  /new, /clear, /reset  — Start a new session (clears history)
+  /status               — Show session info (model, tokens, context)
+  /verbose, /v          — Toggle tool call output
+  /help, /?             — Show this help
+  /quit, /exit, /q      — Exit
+
+Shortcuts:
+  Ctrl+C, Ctrl+D        — Exit
+  Shift+Enter            — New line in input"
+                .to_owned(),
+        ));
+    }
+
+    /// Show session status info.
+    pub fn show_status(&mut self) {
+        let verbose_state = if self.verbose { "on" } else { "off" };
+        let msg_count = self.messages.len();
+        let status = format!(
+            "\
+Session:  {}
+Agent:    {}
+Model:    {}
+Tokens:   {} / {} ({:.1}%)
+Messages: {}
+Verbose:  {}
+CWD:      {}",
+            self.session_name,
+            self.agent_name,
+            self.model_name,
+            self.token_count,
+            self.context_limit,
+            self.token_percent(),
+            msg_count,
+            verbose_state,
+            self.working_dir,
+        );
+        self.push_message(DisplayMessage::system(status));
+    }
+
     /// Mark the start of a new agent turn.
     pub fn start_turn(&mut self) {
         self.is_loading = true;

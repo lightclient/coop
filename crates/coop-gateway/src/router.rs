@@ -1,7 +1,9 @@
 use anyhow::Result;
-use coop_core::{InboundMessage, SessionKey, SessionKind, TrustLevel, TurnEvent};
+use coop_core::{
+    InboundMessage, SessionKey, SessionKind, TrustLevel, TurnEvent, TurnResult, Usage,
+};
 use tokio::sync::mpsc;
-use tracing::{Instrument, debug, info_span};
+use tracing::{Instrument, debug, info, info_span};
 
 use std::sync::Arc;
 
@@ -47,6 +49,25 @@ impl MessageRouter {
         event_tx: mpsc::Sender<TurnEvent>,
     ) -> Result<RouteDecision> {
         let decision = self.route(msg);
+
+        // Intercept slash commands before sending to the LLM.
+        if let Some(response) = self.handle_channel_command(msg.content.trim(), &decision) {
+            info!(
+                session = %decision.session_key,
+                command = msg.content.trim(),
+                "channel slash command handled"
+            );
+            let _ = event_tx.send(TurnEvent::TextDelta(response)).await;
+            let _ = event_tx
+                .send(TurnEvent::Done(TurnResult {
+                    messages: Vec::new(),
+                    usage: Usage::default(),
+                    hit_limit: false,
+                }))
+                .await;
+            return Ok(decision);
+        }
+
         let span = info_span!(
             "route_message",
             session = %decision.session_key,
@@ -67,6 +88,36 @@ impl MessageRouter {
             .instrument(span)
             .await?;
         Ok(decision)
+    }
+
+    /// Handle slash commands from non-TUI channels (Signal, IPC, etc.).
+    /// Returns `Some(response_text)` if the input was a command, `None` otherwise.
+    fn handle_channel_command(&self, input: &str, decision: &RouteDecision) -> Option<String> {
+        match input {
+            "/new" | "/clear" | "/reset" => {
+                self.gateway.clear_session(&decision.session_key);
+                Some("Session cleared.".to_owned())
+            }
+            "/status" => {
+                let count = self.gateway.session_message_count(&decision.session_key);
+                let status = format!(
+                    "Session: {}\nAgent: {}\nModel: {}\nMessages: {}",
+                    decision.session_key,
+                    self.gateway.agent_id(),
+                    self.gateway.model_name(),
+                    count,
+                );
+                Some(status)
+            }
+            "/help" | "/?" => Some(
+                "Available commands:\n\
+                     /new, /clear  — Start a new session (clears history)\n\
+                     /status       — Show session info\n\
+                     /help, /?     — Show this help"
+                    .to_owned(),
+            ),
+            _ => None,
+        }
     }
 
     #[allow(dead_code)]
@@ -507,7 +558,7 @@ users:
             _s: &str,
             _m: &[coop_core::Message],
             _t: &[coop_core::ToolDef],
-        ) -> Result<(coop_core::Message, coop_core::Usage)> {
+        ) -> Result<(coop_core::Message, Usage)> {
             anyhow::bail!("{}", self.error_msg)
         }
         async fn stream(
@@ -617,5 +668,151 @@ users:
             SessionKind::Dm("signal:alice-uuid".to_owned())
         );
         assert_eq!(response, "hi from fake");
+    }
+
+    fn make_router_and_gateway(config: &Config) -> (MessageRouter, Arc<Gateway>) {
+        let workspace = test_workspace();
+        let provider: Arc<dyn Provider> = Arc::new(FakeProvider::new("should not reach LLM"));
+        let executor = Arc::new(DefaultExecutor::new());
+        let gateway = Arc::new(
+            Gateway::new(
+                config.clone(),
+                workspace.path().to_path_buf(),
+                provider,
+                executor,
+                None,
+                None,
+            )
+            .unwrap(),
+        );
+        let router = MessageRouter::new(config.clone(), Arc::clone(&gateway));
+        (router, gateway)
+    }
+
+    fn inbound_with_content(channel: &str, sender: &str, content: &str) -> InboundMessage {
+        InboundMessage {
+            channel: channel.to_owned(),
+            sender: sender.to_owned(),
+            content: content.to_owned(),
+            chat_id: None,
+            is_group: false,
+            timestamp: Utc::now(),
+            reply_to: None,
+            kind: coop_core::InboundKind::Text,
+            message_timestamp: None,
+        }
+    }
+
+    async fn dispatch_and_collect_text(
+        router: &MessageRouter,
+        msg: &InboundMessage,
+    ) -> (RouteDecision, String) {
+        let (event_tx, mut event_rx) = mpsc::channel(32);
+        let decision = router.dispatch(msg, event_tx).await.unwrap();
+        let mut text = String::new();
+        while let Some(event) = event_rx.recv().await {
+            match event {
+                TurnEvent::TextDelta(delta) => text.push_str(&delta),
+                TurnEvent::Done(_) => break,
+                _ => {}
+            }
+        }
+        (decision, text)
+    }
+
+    #[tokio::test]
+    async fn slash_help_returns_command_list() {
+        let config = test_config();
+        let (router, _gw) = make_router_and_gateway(&config);
+        let msg = inbound_with_content("signal", "alice-uuid", "/help");
+        let (_decision, text) = dispatch_and_collect_text(&router, &msg).await;
+
+        assert!(text.contains("/new"));
+        assert!(text.contains("/status"));
+        assert!(text.contains("/help"));
+    }
+
+    #[tokio::test]
+    async fn slash_question_mark_is_help_alias() {
+        let config = test_config();
+        let (router, _gw) = make_router_and_gateway(&config);
+        let msg = inbound_with_content("signal", "alice-uuid", "/?");
+        let (_decision, text) = dispatch_and_collect_text(&router, &msg).await;
+
+        assert!(text.contains("/new"));
+    }
+
+    #[tokio::test]
+    async fn slash_status_shows_session_info() {
+        let config = test_config();
+        let (router, _gw) = make_router_and_gateway(&config);
+        let msg = inbound_with_content("signal", "alice-uuid", "/status");
+        let (_decision, text) = dispatch_and_collect_text(&router, &msg).await;
+
+        assert!(text.contains("Session:"));
+        assert!(text.contains("Model:"));
+        assert!(text.contains("reid"), "should contain agent id");
+    }
+
+    #[tokio::test]
+    async fn slash_new_clears_session() {
+        let config = test_config();
+        let (router, gateway) = make_router_and_gateway(&config);
+
+        // First send a normal message to populate the session
+        let msg = inbound_with_content("signal", "alice-uuid", "hello");
+        let (decision, _text) = dispatch_and_collect_text(&router, &msg).await;
+        assert!(
+            gateway.session_message_count(&decision.session_key) > 0,
+            "session should have messages after a turn"
+        );
+
+        // Now send /new to clear
+        let msg = inbound_with_content("signal", "alice-uuid", "/new");
+        let (_decision, text) = dispatch_and_collect_text(&router, &msg).await;
+        assert!(text.contains("Session cleared"));
+        assert_eq!(
+            gateway.session_message_count(&decision.session_key),
+            0,
+            "session should be empty after /new"
+        );
+    }
+
+    #[tokio::test]
+    async fn slash_clear_is_alias_for_new() {
+        let config = test_config();
+        let (router, gateway) = make_router_and_gateway(&config);
+
+        let msg = inbound_with_content("signal", "alice-uuid", "hello");
+        let (decision, _) = dispatch_and_collect_text(&router, &msg).await;
+        assert!(gateway.session_message_count(&decision.session_key) > 0);
+
+        let msg = inbound_with_content("signal", "alice-uuid", "/clear");
+        dispatch_and_collect_text(&router, &msg).await;
+        assert_eq!(gateway.session_message_count(&decision.session_key), 0);
+    }
+
+    #[tokio::test]
+    async fn non_command_reaches_llm() {
+        let config = test_config();
+        let (router, _gw) = make_router_and_gateway(&config);
+        let msg = inbound_with_content("signal", "alice-uuid", "hello there");
+        let (_decision, text) = dispatch_and_collect_text(&router, &msg).await;
+
+        // FakeProvider returns "should not reach LLM" — but it *should* reach it here
+        assert!(
+            text.contains("should not reach LLM"),
+            "non-command should be dispatched to provider"
+        );
+    }
+
+    #[tokio::test]
+    async fn command_with_leading_whitespace_is_recognized() {
+        let config = test_config();
+        let (router, _gw) = make_router_and_gateway(&config);
+        let msg = inbound_with_content("signal", "alice-uuid", "  /help  ");
+        let (_decision, text) = dispatch_and_collect_text(&router, &msg).await;
+
+        assert!(text.contains("/new"), "trimmed input should match /help");
     }
 }

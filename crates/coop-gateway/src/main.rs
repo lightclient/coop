@@ -705,6 +705,14 @@ async fn cmd_chat(config_path: Option<&str>, user_flag: Option<&str>) -> Result<
                         app.toggle_verbose();
                         update_chat_messages(&mut tui, &app, CHAT_IDX);
                     }
+                    InputAction::Help => {
+                        app.show_help();
+                        update_chat_messages(&mut tui, &app, CHAT_IDX);
+                    }
+                    InputAction::Status => {
+                        app.show_status();
+                        update_chat_messages(&mut tui, &app, CHAT_IDX);
+                    }
                     InputAction::None => {}
                 }
 
@@ -862,6 +870,14 @@ async fn cmd_attach(config_path: Option<&str>, session: &str) -> Result<()> {
                     }
                     InputAction::ToggleVerbose => {
                         app.toggle_verbose();
+                        update_chat_messages(&mut tui, &app, CHAT_IDX);
+                    }
+                    InputAction::Help => {
+                        app.show_help();
+                        update_chat_messages(&mut tui, &app, CHAT_IDX);
+                    }
+                    InputAction::Status => {
+                        app.show_status();
                         update_chat_messages(&mut tui, &app, CHAT_IDX);
                     }
                     InputAction::None => {}
