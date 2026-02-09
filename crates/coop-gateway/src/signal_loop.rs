@@ -158,6 +158,7 @@ fn signal_inbound_kind_name(kind: &InboundKind) -> &'static str {
         InboundKind::Receipt => "receipt",
         InboundKind::Edit => "edit",
         InboundKind::Attachment => "attachment",
+        InboundKind::Command => "command",
     }
 }
 

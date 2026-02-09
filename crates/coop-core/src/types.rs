@@ -466,6 +466,9 @@ pub enum InboundKind {
     Receipt,
     Edit,
     Attachment,
+    /// A slash command (e.g. `/status`). `content` holds the raw command
+    /// text without any channel envelope (no `[from …]` prefix).
+    Command,
 }
 
 /// An inbound message from a channel.

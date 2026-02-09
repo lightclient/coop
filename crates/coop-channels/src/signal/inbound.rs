@@ -138,6 +138,7 @@ fn signal_inbound_kind_name(kind: &InboundKind) -> &'static str {
         InboundKind::Receipt => "receipt",
         InboundKind::Edit => "edit",
         InboundKind::Attachment => "attachment",
+        InboundKind::Command => "command",
     }
 }
 
@@ -166,6 +167,22 @@ fn inbound_from_data_message(
 ) -> Option<InboundMessage> {
     let (kind, body) = format_data_message(data_message)?;
     let (chat_id, is_group, reply_to) = chat_context_from_data_message(data_message, sender);
+
+    // Detect slash commands: raw body starting with `/` becomes a Command
+    // with the unwrapped text so the router can match it directly.
+    if kind == InboundKind::Text && body.starts_with('/') {
+        return Some(InboundMessage {
+            channel: "signal".to_owned(),
+            sender: sender.to_owned(),
+            content: body,
+            chat_id,
+            is_group,
+            timestamp: from_epoch_millis(timestamp),
+            reply_to,
+            kind: InboundKind::Command,
+            message_timestamp: Some(timestamp),
+        });
+    }
 
     Some(InboundMessage {
         channel: "signal".to_owned(),
@@ -595,5 +612,41 @@ mod tests {
         assert_eq!(inbound.kind, InboundKind::Edit);
         assert!(inbound.content.contains("[edited message at 88]"));
         assert!(inbound.content.contains("sync updated"));
+    }
+
+    #[test]
+    fn slash_command_detected_as_command_kind() {
+        let content = test_content(
+            ContentBody::DataMessage(DataMessage {
+                body: Some("/status".to_owned()),
+                ..Default::default()
+            }),
+            9000,
+        );
+
+        let inbound = inbound_from_content(&content).unwrap();
+
+        assert_eq!(inbound.kind, InboundKind::Command);
+        assert_eq!(inbound.content, "/status");
+        assert!(
+            !inbound.content.contains("[from"),
+            "command content should not have sender prefix"
+        );
+    }
+
+    #[test]
+    fn regular_text_not_detected_as_command() {
+        let content = test_content(
+            ContentBody::DataMessage(DataMessage {
+                body: Some("hello there".to_owned()),
+                ..Default::default()
+            }),
+            9001,
+        );
+
+        let inbound = inbound_from_content(&content).unwrap();
+
+        assert_eq!(inbound.kind, InboundKind::Text);
+        assert!(inbound.content.contains("[from"));
     }
 }

@@ -1,6 +1,6 @@
 use anyhow::Result;
 use coop_core::{
-    InboundMessage, SessionKey, SessionKind, TrustLevel, TurnEvent, TurnResult, Usage,
+    InboundKind, InboundMessage, SessionKey, SessionKind, TrustLevel, TurnEvent, TurnResult, Usage,
 };
 use tokio::sync::mpsc;
 use tracing::{Instrument, debug, info, info_span};
@@ -51,10 +51,16 @@ impl MessageRouter {
         let decision = self.route(msg);
 
         // Intercept slash commands before sending to the LLM.
-        if let Some(response) = self.handle_channel_command(msg.content.trim(), &decision) {
+        // Channels tag these as InboundKind::Command with the raw command
+        // text (no envelope prefix), so matching is exact.
+        if msg.kind == InboundKind::Command {
+            let cmd = msg.content.trim();
+            let response = self
+                .handle_channel_command(cmd, &decision)
+                .unwrap_or_else(|| format!("Unknown command: {cmd}\nType /help for a list."));
             info!(
                 session = %decision.session_key,
-                command = msg.content.trim(),
+                command = cmd,
                 "channel slash command handled"
             );
             let _ = event_tx.send(TurnEvent::TextDelta(response)).await;
@@ -318,7 +324,7 @@ users:
             is_group,
             timestamp: Utc::now(),
             reply_to: reply_to.map(ToOwned::to_owned),
-            kind: coop_core::InboundKind::Text,
+            kind: InboundKind::Text,
             message_timestamp: None,
         }
     }
@@ -698,7 +704,21 @@ users:
             is_group: false,
             timestamp: Utc::now(),
             reply_to: None,
-            kind: coop_core::InboundKind::Text,
+            kind: InboundKind::Text,
+            message_timestamp: None,
+        }
+    }
+
+    fn inbound_command(channel: &str, sender: &str, command: &str) -> InboundMessage {
+        InboundMessage {
+            channel: channel.to_owned(),
+            sender: sender.to_owned(),
+            content: command.to_owned(),
+            chat_id: None,
+            is_group: false,
+            timestamp: Utc::now(),
+            reply_to: None,
+            kind: InboundKind::Command,
             message_timestamp: None,
         }
     }
@@ -724,7 +744,7 @@ users:
     async fn slash_help_returns_command_list() {
         let config = test_config();
         let (router, _gw) = make_router_and_gateway(&config);
-        let msg = inbound_with_content("signal", "alice-uuid", "/help");
+        let msg = inbound_command("signal", "alice-uuid", "/help");
         let (_decision, text) = dispatch_and_collect_text(&router, &msg).await;
 
         assert!(text.contains("/new"));
@@ -736,7 +756,7 @@ users:
     async fn slash_question_mark_is_help_alias() {
         let config = test_config();
         let (router, _gw) = make_router_and_gateway(&config);
-        let msg = inbound_with_content("signal", "alice-uuid", "/?");
+        let msg = inbound_command("signal", "alice-uuid", "/?");
         let (_decision, text) = dispatch_and_collect_text(&router, &msg).await;
 
         assert!(text.contains("/new"));
@@ -746,7 +766,7 @@ users:
     async fn slash_status_shows_session_info() {
         let config = test_config();
         let (router, _gw) = make_router_and_gateway(&config);
-        let msg = inbound_with_content("signal", "alice-uuid", "/status");
+        let msg = inbound_command("signal", "alice-uuid", "/status");
         let (_decision, text) = dispatch_and_collect_text(&router, &msg).await;
 
         assert!(text.contains("Session:"));
@@ -768,7 +788,7 @@ users:
         );
 
         // Now send /new to clear
-        let msg = inbound_with_content("signal", "alice-uuid", "/new");
+        let msg = inbound_command("signal", "alice-uuid", "/new");
         let (_decision, text) = dispatch_and_collect_text(&router, &msg).await;
         assert!(text.contains("Session cleared"));
         assert_eq!(
@@ -787,9 +807,20 @@ users:
         let (decision, _) = dispatch_and_collect_text(&router, &msg).await;
         assert!(gateway.session_message_count(&decision.session_key) > 0);
 
-        let msg = inbound_with_content("signal", "alice-uuid", "/clear");
+        let msg = inbound_command("signal", "alice-uuid", "/clear");
         dispatch_and_collect_text(&router, &msg).await;
         assert_eq!(gateway.session_message_count(&decision.session_key), 0);
+    }
+
+    #[tokio::test]
+    async fn unknown_command_returns_error() {
+        let config = test_config();
+        let (router, _gw) = make_router_and_gateway(&config);
+        let msg = inbound_command("signal", "alice-uuid", "/bogus");
+        let (_decision, text) = dispatch_and_collect_text(&router, &msg).await;
+
+        assert!(text.contains("Unknown command"));
+        assert!(text.contains("/bogus"));
     }
 
     #[tokio::test]
@@ -810,7 +841,9 @@ users:
     async fn command_with_leading_whitespace_is_recognized() {
         let config = test_config();
         let (router, _gw) = make_router_and_gateway(&config);
-        let msg = inbound_with_content("signal", "alice-uuid", "  /help  ");
+        // Channel is responsible for detecting commands; content may have
+        // leading/trailing whitespace but kind must be Command.
+        let msg = inbound_command("signal", "alice-uuid", "  /help  ");
         let (_decision, text) = dispatch_and_collect_text(&router, &msg).await;
 
         assert!(text.contains("/new"), "trimmed input should match /help");
