@@ -43,6 +43,17 @@ impl MessageRouter {
         self.gateway.seed_signal_history(session_key, history);
     }
 
+    /// Whether the Signal channel is configured with `verbose: true`.
+    #[cfg(feature = "signal")]
+    pub(crate) fn signal_verbose(&self) -> bool {
+        self.config
+            .load()
+            .channels
+            .signal
+            .as_ref()
+            .is_some_and(|s| s.verbose)
+    }
+
     pub(crate) async fn dispatch(
         &self,
         msg: &InboundMessage,

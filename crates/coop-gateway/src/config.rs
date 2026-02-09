@@ -59,6 +59,11 @@ pub(crate) struct ChannelsConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct SignalChannelConfig {
     pub db_path: String,
+    /// When true, flush assistant text to the user on every tool-call
+    /// boundary (each turn iteration sends a message). Default: false
+    /// (one consolidated reply at the end of the turn).
+    #[serde(default)]
+    pub verbose: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]

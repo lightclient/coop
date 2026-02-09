@@ -625,7 +625,7 @@ fn scripted_text_before_tool_provider() -> Arc<dyn Provider> {
 }
 
 #[tokio::test]
-async fn text_before_tool_call_is_flushed_separately() {
+async fn only_final_text_is_sent_to_channel() {
     let mut channel = MockSignalChannel::new();
     let provider = scripted_text_before_tool_provider();
     let executor: Arc<dyn ToolExecutor> = Arc::new(SignalToolExecutor::new(
@@ -653,9 +653,93 @@ async fn text_before_tool_call_is_flushed_separately() {
     assert_eq!(actions.len(), 1);
     assert!(matches!(&actions[0], SignalAction::Reply { .. }));
 
-    // Pre-tool text and post-tool text must arrive as separate messages.
-    // Before this fix, they were concatenated and sent as one message
-    // *after* the tool had already sent its reply — arriving out of order.
+    // Only the final assistant text (after all tool use) is delivered.
+    // Pre-tool narration is not sent — the user sees one consolidated reply.
+    // If the agent needs to notify mid-turn, it uses signal_send explicitly.
+    let outbound = channel.take_outbound();
+    assert_eq!(
+        outbound.len(),
+        1,
+        "expected 1 outbound message (final reply only), got {}: {:?}",
+        outbound.len(),
+        outbound.iter().map(|m| &m.content).collect::<Vec<_>>()
+    );
+    assert_eq!(outbound[0].content, "after tool");
+}
+
+fn test_config_verbose() -> Config {
+    serde_yaml::from_str(
+        "
+agent:
+  id: coop
+  model: test-model
+users:
+  - name: alice
+    trust: full
+    match: ['signal:alice-uuid']
+channels:
+  signal:
+    db_path: ./db/signal.db
+    verbose: true
+",
+    )
+    .unwrap()
+}
+
+fn build_router_verbose(
+    provider: Arc<dyn Provider>,
+    executor: Arc<dyn ToolExecutor>,
+) -> Arc<MessageRouter> {
+    let config = test_config_verbose();
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::write(workspace.path().join("SOUL.md"), "You are a test agent.").unwrap();
+    let shared = shared_config(config);
+    let gateway = Arc::new(
+        Gateway::new(
+            Arc::clone(&shared),
+            workspace.path().to_path_buf(),
+            provider,
+            executor,
+            None,
+            None,
+        )
+        .unwrap(),
+    );
+
+    Arc::new(MessageRouter::new(shared, gateway))
+}
+
+#[tokio::test]
+async fn verbose_flushes_text_before_each_tool_call() {
+    let mut channel = MockSignalChannel::new();
+    let provider = scripted_text_before_tool_provider();
+    let executor: Arc<dyn ToolExecutor> = Arc::new(SignalToolExecutor::new(
+        channel.action_sender(),
+        dummy_query_tx(),
+    ));
+    let router = build_router_verbose(provider, executor);
+
+    channel
+        .inject_inbound(inbound_message(
+            InboundKind::Text,
+            "alice-uuid",
+            None,
+            false,
+            Some("alice-uuid"),
+        ))
+        .await
+        .unwrap();
+
+    handle_signal_inbound_once(&mut channel, router.as_ref())
+        .await
+        .unwrap();
+
+    let actions = channel.take_actions();
+    assert_eq!(actions.len(), 1);
+    assert!(matches!(&actions[0], SignalAction::Reply { .. }));
+
+    // With verbose=true, pre-tool text is flushed separately before
+    // the tool executes, then the post-tool text arrives as a second message.
     let outbound = channel.take_outbound();
     assert_eq!(
         outbound.len(),

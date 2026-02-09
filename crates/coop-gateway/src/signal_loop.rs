@@ -118,12 +118,19 @@ async fn dispatch_command(
 
 /// Dispatch a turn in the background, sending responses via the action_tx
 /// channel instead of requiring `&mut SignalChannel`.
+///
+/// NOTE: The verbose/quiet event-collection logic here is Signal-specific but
+/// generic enough for any messaging channel. When a second chat channel is
+/// added (WhatsApp, Telegram, etc.), extract this into a shared
+/// `router.dispatch_to_channel(msg, verbose, send_fn)` method — see
+/// `router::dispatch_collect_text` for the cron precedent.
 async fn dispatch_signal_turn_background(
     action_tx: &mpsc::Sender<coop_channels::SignalAction>,
     router: &MessageRouter,
     inbound: &InboundMessage,
     target: &str,
 ) -> Result<()> {
+    let verbose = router.signal_verbose();
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let router = router.clone();
     let message = inbound.clone();
@@ -137,7 +144,20 @@ async fn dispatch_signal_turn_background(
                 text.push_str(&delta);
             }
             TurnEvent::ToolStart { .. } => {
-                flush_text_via_action(action_tx, target, &mut text).await?;
+                if verbose {
+                    flush_text_via_action(action_tx, target, &mut text).await?;
+                }
+            }
+            TurnEvent::ToolResult { .. } | TurnEvent::Compacting => {}
+            TurnEvent::AssistantMessage(ref msg) => {
+                if !verbose {
+                    // In quiet mode, only keep the text from the *last*
+                    // assistant message (the final reply after all tool use).
+                    let msg_text = msg.text();
+                    if !msg.has_tool_requests() && !msg_text.is_empty() {
+                        text = msg_text;
+                    }
+                }
             }
             TurnEvent::Error(message) => {
                 text = message;
@@ -145,9 +165,6 @@ async fn dispatch_signal_turn_background(
             TurnEvent::Done(_) => {
                 break;
             }
-            TurnEvent::AssistantMessage(_)
-            | TurnEvent::ToolResult { .. }
-            | TurnEvent::Compacting => {}
         }
     }
 
@@ -194,22 +211,22 @@ pub(crate) async fn handle_signal_inbound_once<C: Channel>(
     };
 
     trace_signal_inbound("signal inbound dispatched", &inbound);
-    dispatch_signal_turn(signal_channel, router, &inbound, &target).await
+    let verbose = router.signal_verbose();
+    dispatch_signal_turn(signal_channel, router, &inbound, &target, verbose).await
 }
 
-/// Dispatch a single inbound message: run the agent turn and stream
-/// text/tool events to the channel.
+/// Dispatch a single inbound message: mirrors production
+/// `dispatch_signal_turn_background` behavior. When `verbose` is false,
+/// only the final assistant text is sent. When true, text is flushed
+/// before each tool call.
 #[cfg(test)]
 async fn dispatch_signal_turn<C: Channel>(
     signal_channel: &mut C,
     router: &MessageRouter,
     inbound: &InboundMessage,
     target: &str,
+    verbose: bool,
 ) -> Result<()> {
-    // Process turn events inline so that text produced before a tool call
-    // is flushed to the channel *before* the tool executes. This prevents
-    // tool side-effects (e.g. signal_reply) from arriving before the
-    // preceding text.
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let router = router.clone();
     let message = inbound.clone();
@@ -223,7 +240,18 @@ async fn dispatch_signal_turn<C: Channel>(
                 text.push_str(&delta);
             }
             TurnEvent::ToolStart { .. } => {
-                flush_text(signal_channel, target, &mut text).await?;
+                if verbose {
+                    flush_text(signal_channel, target, &mut text).await?;
+                }
+            }
+            TurnEvent::ToolResult { .. } | TurnEvent::Compacting => {}
+            TurnEvent::AssistantMessage(ref msg) => {
+                if !verbose {
+                    let msg_text = msg.text();
+                    if !msg.has_tool_requests() && !msg_text.is_empty() {
+                        text = msg_text;
+                    }
+                }
             }
             TurnEvent::Error(message) => {
                 text = message;
@@ -231,9 +259,6 @@ async fn dispatch_signal_turn<C: Channel>(
             TurnEvent::Done(_) => {
                 break;
             }
-            TurnEvent::AssistantMessage(_)
-            | TurnEvent::ToolResult { .. }
-            | TurnEvent::Compacting => {}
         }
     }
 

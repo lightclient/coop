@@ -176,6 +176,7 @@ Structured observation storage with trust-gated access to three stores:
 
 ## Signal tools (available when Signal channel is configured)
 
+- `signal_send` — send a message to the current conversation immediately, mid-turn. Use to notify the user before long-running work. Your final reply still arrives separately.
 - `signal_react` — react to a message with an emoji
 - `signal_reply` — reply to a specific message (shows as a quote)
 - `signal_history` — search message history in the current Signal conversation

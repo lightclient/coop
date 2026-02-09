@@ -327,6 +327,82 @@ impl Tool for SignalHistoryTool {
     }
 }
 
+#[derive(Debug)]
+pub struct SignalSendTool {
+    action_tx: mpsc::Sender<SignalAction>,
+}
+
+impl SignalSendTool {
+    pub fn new(action_tx: mpsc::Sender<SignalAction>) -> Self {
+        Self { action_tx }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct SendArgs {
+    text: String,
+}
+
+#[async_trait]
+impl Tool for SignalSendTool {
+    fn definition(&self) -> ToolDef {
+        ToolDef::new(
+            "signal_send",
+            "Send a message to the current Signal conversation immediately, mid-turn. Use this to notify the user before a long-running task. Your final turn reply is still delivered separately.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "Message text to send"
+                    }
+                },
+                "required": ["text"]
+            }),
+        )
+    }
+
+    async fn execute(&self, arguments: serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
+        let span = info_span!("signal_tool_send");
+        async {
+            let args: SendArgs = serde_json::from_value(arguments)?;
+
+            // Derive the send target from the session ID (same logic as signal_history).
+            let target = extract_signal_target_from_session(&ctx.session_id).ok_or_else(|| {
+                anyhow::anyhow!("signal_send is only available in Signal chat sessions")
+            })?;
+
+            info!(
+                tool.name = "signal_send",
+                signal.action = "send",
+                signal.raw_content = %args.text.as_str(),
+                "signal tool send queued"
+            );
+
+            let action = SignalAction::SendText(coop_core::OutboundMessage {
+                channel: "signal".to_owned(),
+                target: match &target {
+                    SignalTarget::Direct(uuid) => uuid.clone(),
+                    SignalTarget::Group { master_key } => {
+                        format!("group:{}", hex::encode(master_key))
+                    }
+                },
+                content: args.text,
+            });
+
+            debug!(action = ?action, "dispatching signal_send action");
+            self.action_tx
+                .send(action)
+                .await
+                .map_err(|_send_err| anyhow::anyhow!("signal action channel closed"))?;
+
+            Ok(ToolOutput::success("message sent"))
+        }
+        .instrument(span)
+        .await
+    }
+}
+
 #[allow(missing_debug_implementations)]
 pub struct SignalToolExecutor {
     tools: Vec<Box<dyn Tool>>,
@@ -337,7 +413,8 @@ impl SignalToolExecutor {
         Self {
             tools: vec![
                 Box::new(SignalReactTool::new(action_tx.clone())),
-                Box::new(SignalReplyTool::new(action_tx)),
+                Box::new(SignalReplyTool::new(action_tx.clone())),
+                Box::new(SignalSendTool::new(action_tx)),
                 Box::new(SignalHistoryTool::new(query_tx)),
             ],
         }
