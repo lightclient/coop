@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-use crate::config::Config;
+use crate::config::{Config, shared_config};
 use crate::gateway::Gateway;
 
 #[derive(Debug)]
@@ -171,9 +171,10 @@ fn build_router(
     let config = test_config();
     let workspace = tempfile::tempdir().unwrap();
     std::fs::write(workspace.path().join("SOUL.md"), "You are a test agent.").unwrap();
+    let shared = shared_config(config);
     let gateway = Arc::new(
         Gateway::new(
-            config.clone(),
+            Arc::clone(&shared),
             workspace.path().to_path_buf(),
             provider,
             executor,
@@ -183,7 +184,7 @@ fn build_router(
         .unwrap(),
     );
 
-    Arc::new(MessageRouter::new(config, gateway))
+    Arc::new(MessageRouter::new(shared, gateway))
 }
 
 fn inbound_message(

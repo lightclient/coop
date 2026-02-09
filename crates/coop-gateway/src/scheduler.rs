@@ -260,7 +260,7 @@ async fn deliver_response(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Config, CronDelivery, UserConfig};
+    use crate::config::{Config, CronDelivery, UserConfig, shared_config};
     use crate::gateway::Gateway;
     use coop_core::fakes::FakeProvider;
     use coop_core::tools::DefaultExecutor;
@@ -723,9 +723,10 @@ mod tests {
 
         let provider: Arc<dyn coop_core::Provider> = Arc::new(FakeProvider::new(response));
         let executor = Arc::new(DefaultExecutor::new());
+        let shared = shared_config(config);
         let gateway = Arc::new(
             Gateway::new(
-                config.clone(),
+                Arc::clone(&shared),
                 dir.path().to_path_buf(),
                 provider,
                 executor,
@@ -736,6 +737,6 @@ mod tests {
         );
         // Leak dir to keep it alive — test only.
         std::mem::forget(dir);
-        (MessageRouter::new(config, Arc::clone(&gateway)), gateway)
+        (MessageRouter::new(shared, Arc::clone(&gateway)), gateway)
     }
 }

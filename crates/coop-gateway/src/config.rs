@@ -1,11 +1,21 @@
 use anyhow::{Context, Result};
+use arc_swap::ArcSwap;
 use coop_core::TrustLevel;
 use coop_memory::MemoryMaintenanceConfig;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tracing::debug;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Shared config handle. Readers call `.load()` for a lock-free snapshot.
+pub(crate) type SharedConfig = Arc<ArcSwap<Config>>;
+
+/// Wrap a `Config` in an `ArcSwap` for lock-free sharing.
+pub(crate) fn shared_config(config: Config) -> SharedConfig {
+    Arc::new(ArcSwap::from_pointee(config))
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Config {
     pub agent: AgentConfig,
     #[serde(default)]
@@ -20,7 +30,7 @@ pub(crate) struct Config {
     pub cron: Vec<CronConfig>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct AgentConfig {
     pub id: String,
     pub model: String,
@@ -32,7 +42,7 @@ fn default_workspace() -> String {
     "./workspaces/default".to_owned()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct UserConfig {
     pub name: String,
     pub trust: TrustLevel,
@@ -40,24 +50,24 @@ pub(crate) struct UserConfig {
     pub r#match: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub(crate) struct ChannelsConfig {
     #[serde(default)]
     pub signal: Option<SignalChannelConfig>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct SignalChannelConfig {
     pub db_path: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub(crate) struct ProviderConfig {
     #[serde(default = "default_provider")]
     pub name: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct MemoryConfig {
     #[serde(default = "default_memory_db_path")]
     pub db_path: String,
@@ -80,7 +90,7 @@ impl Default for MemoryConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct MemoryPromptIndexConfig {
     #[serde(default = "default_prompt_index_enabled")]
     pub enabled: bool,
@@ -100,7 +110,7 @@ impl Default for MemoryPromptIndexConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct MemoryRetentionConfig {
     #[serde(default = "default_memory_retention_enabled")]
     pub enabled: bool,
@@ -141,7 +151,7 @@ impl MemoryRetentionConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct MemoryEmbeddingConfig {
     pub provider: String,
     pub model: String,
@@ -179,7 +189,7 @@ impl MemoryEmbeddingConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct CronDelivery {
     /// Channel to deliver through (e.g. "signal").
     pub channel: String,
@@ -187,7 +197,7 @@ pub(crate) struct CronDelivery {
     pub target: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct CronConfig {
     pub name: String,
     pub cron: String,

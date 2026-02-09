@@ -6,6 +6,7 @@ mod compaction_store;
 mod config;
 mod config_check;
 mod config_tool;
+mod config_watcher;
 mod config_write;
 mod gateway;
 mod memory_embedding;
@@ -46,7 +47,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, info, info_span, warn};
 
 use crate::cli::{Cli, Commands, SignalCommands};
-use crate::config::{Config, MemoryRetentionConfig};
+use crate::config::{Config, MemoryRetentionConfig, shared_config};
 use crate::gateway::Gateway;
 use crate::memory_embedding::build_embedder;
 use crate::memory_reconcile::ProviderReconciler;
@@ -368,31 +369,46 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
 
     let maintenance_memory = Arc::clone(&memory);
 
+    // Capture startup values before wrapping in SharedConfig
+    let agent_id = config.agent.id.clone();
+    let agent_model = config.agent.model.clone();
+    let cron_entries = config.cron.clone();
+    let users = config.users.clone();
+    let retention = config.memory.retention.clone();
+
+    let shared = shared_config(config);
+
     let gateway = Arc::new(Gateway::new(
-        config.clone(),
+        Arc::clone(&shared),
         workspace,
         provider,
         executor,
         typing_notifier,
         Some(memory),
     )?);
-    let router = Arc::new(MessageRouter::new(config.clone(), Arc::clone(&gateway)));
+    let router = Arc::new(MessageRouter::new(
+        Arc::clone(&shared),
+        Arc::clone(&gateway),
+    ));
 
     let working_dir = resolve_working_dir();
 
     println!(
         "{}\n",
-        format_tui_welcome(env!("CARGO_PKG_VERSION"), &config.agent.model, &working_dir)
+        format_tui_welcome(env!("CARGO_PKG_VERSION"), &agent_model, &working_dir)
     );
 
-    let socket = socket_path(&config.agent.id);
+    let socket = socket_path(&agent_id);
     let server = IpcServer::bind(&socket)?;
 
     let shutdown_token = CancellationToken::new();
 
-    let _maintenance_task = spawn_memory_maintenance_loop(
-        maintenance_memory,
-        &config.memory.retention,
+    let _maintenance_task =
+        spawn_memory_maintenance_loop(maintenance_memory, &retention, shutdown_token.clone());
+
+    let _config_watcher = config_watcher::spawn_config_watcher(
+        config_file,
+        Arc::clone(&shared),
         shutdown_token.clone(),
     );
 
@@ -406,7 +422,7 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
         });
     }
 
-    if !config.cron.is_empty() {
+    if !cron_entries.is_empty() {
         #[cfg(feature = "signal")]
         let deliver_tx = signal_action_tx
             .as_ref()
@@ -415,19 +431,19 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
         #[cfg(not(feature = "signal"))]
         let deliver_tx: Option<scheduler::DeliverySender> = None;
 
-        let cron = config.cron.clone();
-        let users = config.users.clone();
         let sched_router = Arc::clone(&router);
         let sched_token = shutdown_token.clone();
+        let cron_count = cron_entries.len();
         tokio::spawn(async move {
-            scheduler::run_scheduler(cron, sched_router, &users, deliver_tx, sched_token).await;
+            scheduler::run_scheduler(cron_entries, sched_router, &users, deliver_tx, sched_token)
+                .await;
         });
-        info!(count = config.cron.len(), "scheduler started");
+        info!(count = cron_count, "scheduler started");
     }
 
     info!(
-        agent = %config.agent.id,
-        model = %config.agent.model,
+        agent = %agent_id,
+        model = %agent_model,
         socket = %server.socket_path().display(),
         "gateway started"
     );
@@ -441,7 +457,7 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
                     Ok(connection) => {
                         let router = Arc::clone(&router);
                         let gateway = Arc::clone(&gateway);
-                        let agent_id = config.agent.id.clone();
+                        let agent_id = agent_id.clone();
                         tokio::spawn(async move {
                             if let Err(error) = handle_client(connection, router, gateway, agent_id).await {
                                 tracing::warn!(error = %error, "ipc client disconnected with error");
@@ -615,8 +631,13 @@ async fn cmd_chat(config_path: Option<&str>, user_flag: Option<&str>) -> Result<
         Box::new(config_executor),
         Box::new(memory_executor),
     ]));
+
+    let agent_id = config.agent.id.clone();
+    let agent_model = config.agent.model.clone();
+    let shared = shared_config(config);
+
     let gateway = Arc::new(Gateway::new(
-        config.clone(),
+        Arc::clone(&shared),
         workspace,
         provider,
         executor,
@@ -624,16 +645,18 @@ async fn cmd_chat(config_path: Option<&str>, user_flag: Option<&str>) -> Result<
         Some(memory),
     )?);
 
+    let shutdown_token = CancellationToken::new();
+    let _config_watcher = config_watcher::spawn_config_watcher(
+        config_file,
+        Arc::clone(&shared),
+        shutdown_token.clone(),
+    );
+
     let session_key = gateway.default_session_key();
     let working_dir = resolve_working_dir();
 
-    let (mut tui, mut app, mut tool_names) = build_tui(
-        &config.agent.id,
-        &config.agent.model,
-        "main",
-        &working_dir,
-        200_000,
-    );
+    let (mut tui, mut app, mut tool_names) =
+        build_tui(&agent_id, &agent_model, "main", &working_dir, 200_000);
 
     tui.start()?;
     tui.request_render();
@@ -735,6 +758,7 @@ async fn cmd_chat(config_path: Option<&str>, user_flag: Option<&str>) -> Result<
         }
     }
 
+    shutdown_token.cancel();
     tui.stop()?;
     println!("👋 Goodbye!");
     Ok(())

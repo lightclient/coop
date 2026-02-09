@@ -28,6 +28,7 @@ mod compaction;
 mod compaction_store;
 #[path = "../src/config.rs"]
 mod config;
+
 #[path = "../src/gateway.rs"]
 mod gateway;
 #[path = "../src/memory_prompt_index.rs"]
@@ -39,7 +40,7 @@ mod memory_tools;
 #[path = "../src/session_store.rs"]
 mod session_store;
 
-use config::Config;
+use config::{Config, shared_config};
 use gateway::Gateway;
 use memory_reconcile::ProviderReconciler;
 use memory_tools::MemoryToolExecutor;
@@ -188,7 +189,7 @@ impl GatewayHarness {
 
         let gateway = Arc::new(
             Gateway::new(
-                test_config(),
+                shared_config(test_config()),
                 workspace,
                 provider_dyn,
                 executor,

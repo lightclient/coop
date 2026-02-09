@@ -29,6 +29,7 @@ mod compaction;
 mod compaction_store;
 #[path = "../src/config.rs"]
 mod config;
+
 #[path = "../src/gateway.rs"]
 mod gateway;
 #[path = "../src/memory_prompt_index.rs"]
@@ -36,7 +37,7 @@ mod memory_prompt_index;
 #[path = "../src/session_store.rs"]
 mod session_store;
 
-use config::Config;
+use config::{Config, shared_config};
 use gateway::Gateway;
 
 #[derive(Debug)]
@@ -138,7 +139,7 @@ impl PromptHarness {
 
         let gateway = Arc::new(
             Gateway::new(
-                config,
+                shared_config(config),
                 workspace,
                 provider_dyn,
                 executor,
@@ -172,7 +173,7 @@ impl PromptHarness {
 
         let gateway = Arc::new(
             Gateway::new(
-                config,
+                shared_config(config),
                 workspace,
                 provider_dyn,
                 executor,
