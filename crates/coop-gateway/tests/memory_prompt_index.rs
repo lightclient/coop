@@ -82,8 +82,8 @@ impl Provider for PromptCaptureProvider {
         "prompt-capture"
     }
 
-    fn model_info(&self) -> &ModelInfo {
-        &self.model
+    fn model_info(&self) -> ModelInfo {
+        self.model.clone()
     }
 
     async fn complete(

@@ -384,6 +384,9 @@ impl Gateway {
                 None
             };
 
+            // Sync provider model with config (picks up hot-reloaded agent.model).
+            self.sync_provider_model();
+
             let system_prompt = self.build_prompt(trust, user_name, channel).await?;
             let session_len_before = self.messages(session_key).len();
             self.append_message(session_key, Message::user().with_text(user_input));
@@ -812,6 +815,24 @@ impl Gateway {
         self.messages(session_key).len()
     }
 
+    /// Push the current config model into the provider if it has changed.
+    fn sync_provider_model(&self) {
+        let config_model = self.config.load().agent.model.clone();
+        let provider_model = self.provider.model_info().name;
+        // Strip prefix for comparison (config may have "anthropic/" prefix, provider won't)
+        let config_api_model = config_model
+            .strip_prefix("anthropic/")
+            .unwrap_or(&config_model);
+        if provider_model != config_api_model {
+            debug!(
+                old = %provider_model,
+                new = %config_api_model,
+                "syncing provider model from hot-reloaded config"
+            );
+            self.provider.set_model(&config_model);
+        }
+    }
+
     /// Agent model name from config.
     pub(crate) fn model_name(&self) -> String {
         self.config.load().agent.model.clone()
@@ -1174,8 +1195,8 @@ agent:
             "failing"
         }
 
-        fn model_info(&self) -> &ModelInfo {
-            &self.model
+        fn model_info(&self) -> ModelInfo {
+            self.model.clone()
         }
 
         async fn complete(
@@ -1225,8 +1246,8 @@ agent:
             "fail-second"
         }
 
-        fn model_info(&self) -> &ModelInfo {
-            &self.model
+        fn model_info(&self) -> ModelInfo {
+            self.model.clone()
         }
 
         async fn complete(
@@ -1556,8 +1577,8 @@ agent:
             "always-tool"
         }
 
-        fn model_info(&self) -> &ModelInfo {
-            &self.model
+        fn model_info(&self) -> ModelInfo {
+            self.model.clone()
         }
 
         async fn complete(
@@ -1626,8 +1647,8 @@ agent:
             "slow-tool"
         }
 
-        fn model_info(&self) -> &ModelInfo {
-            &self.model
+        fn model_info(&self) -> ModelInfo {
+            self.model.clone()
         }
 
         async fn complete(
@@ -1805,5 +1826,102 @@ agent:
             !last.has_tool_requests(),
             "final message should not request tools"
         );
+    }
+
+    #[tokio::test]
+    async fn sync_provider_model_picks_up_config_change() {
+        let workspace = test_workspace();
+        let provider: Arc<dyn Provider> = Arc::new(FakeProvider::new("hello"));
+        let executor = Arc::new(DefaultExecutor::new());
+        let shared = shared_config(test_config());
+
+        let gateway = Gateway::new(
+            Arc::clone(&shared),
+            workspace.path().to_path_buf(),
+            provider,
+            executor,
+            None,
+            None,
+        )
+        .unwrap();
+
+        // Default model from FakeProvider is "fake-model".
+        assert_eq!(gateway.provider.model_info().name, "fake-model");
+
+        // Simulate hot-reload: change agent.model.
+        let mut new_config = shared.load().as_ref().clone();
+        new_config.agent.model = "new-model".to_owned();
+        shared.store(Arc::new(new_config));
+
+        gateway.sync_provider_model();
+
+        // FakeProvider implements set_model, so the provider should now
+        // report the new model name — proving the full hot-reload path works.
+        assert_eq!(gateway.provider.model_info().name, "new-model");
+        assert_eq!(gateway.model_name(), "new-model");
+    }
+
+    #[tokio::test]
+    async fn sync_provider_model_detects_prefixed_model() {
+        let workspace = test_workspace();
+        let provider: Arc<dyn Provider> = Arc::new(FakeProvider::new("hello"));
+        let executor = Arc::new(DefaultExecutor::new());
+        let shared = shared_config(test_config());
+
+        let gateway = Gateway::new(
+            Arc::clone(&shared),
+            workspace.path().to_path_buf(),
+            provider,
+            executor,
+            None,
+            None,
+        )
+        .unwrap();
+
+        // Config uses "anthropic/" prefix — sync_provider_model compares
+        // after stripping the prefix and calls set_model with the raw config
+        // value. Prefix stripping is the provider's responsibility.
+        // FakeProvider stores the value as-is; AnthropicProvider strips it.
+        let mut new_config = shared.load().as_ref().clone();
+        new_config.agent.model = "anthropic/claude-haiku-3-20250514".to_owned();
+        shared.store(Arc::new(new_config));
+
+        gateway.sync_provider_model();
+
+        // FakeProvider doesn't strip prefix, but the sync did execute.
+        // The actual prefix stripping is tested in coop-agent's
+        // set_model_strips_anthropic_prefix test.
+        let provider_model = gateway.provider.model_info().name;
+        assert!(
+            provider_model.contains("claude-haiku-3-20250514"),
+            "provider should have received the new model: {provider_model}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_provider_model_noop_when_unchanged() {
+        let workspace = test_workspace();
+        let provider: Arc<dyn Provider> = Arc::new(FakeProvider::new("hello"));
+        let executor = Arc::new(DefaultExecutor::new());
+        let shared = shared_config(test_config());
+
+        let gateway = Gateway::new(
+            Arc::clone(&shared),
+            workspace.path().to_path_buf(),
+            provider,
+            executor,
+            None,
+            None,
+        )
+        .unwrap();
+
+        // Config model is "test-model", provider model is "fake-model".
+        // They differ, so first sync will update.
+        gateway.sync_provider_model();
+        assert_eq!(gateway.provider.model_info().name, "test-model");
+
+        // Second sync should be a no-op (same model).
+        gateway.sync_provider_model();
+        assert_eq!(gateway.provider.model_info().name, "test-model");
     }
 }

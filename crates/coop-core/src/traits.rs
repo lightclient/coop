@@ -57,7 +57,7 @@ pub trait Provider: Send + Sync {
     fn name(&self) -> &str;
 
     /// Model info (name, context limit).
-    fn model_info(&self) -> &ModelInfo;
+    fn model_info(&self) -> ModelInfo;
 
     /// Run a completion: given a system prompt, conversation, and available tools,
     /// return a response message and usage.
@@ -80,6 +80,13 @@ pub trait Provider: Send + Sync {
     fn supports_streaming(&self) -> bool {
         false
     }
+
+    /// Update the model name used for subsequent API calls.
+    ///
+    /// The default implementation is a no-op. Providers that store the model
+    /// internally (e.g. `AnthropicProvider`) override this so that
+    /// hot-reloaded config changes take effect without a restart.
+    fn set_model(&self, _model: &str) {}
 
     /// Run a "fast" completion (for summarization, naming, etc.).
     /// Falls back to `complete` by default.

@@ -689,8 +689,8 @@ users:
         fn name(&self) -> &'static str {
             "failing"
         }
-        fn model_info(&self) -> &coop_core::ModelInfo {
-            &self.model
+        fn model_info(&self) -> coop_core::ModelInfo {
+            self.model.clone()
         }
         async fn complete(
             &self,

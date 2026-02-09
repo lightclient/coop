@@ -44,10 +44,10 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::{Instrument, info, info_span, warn};
+use tracing::{Instrument, debug, info, info_span, warn};
 
 use crate::cli::{Cli, Commands, MemoryCommands, SignalCommands};
-use crate::config::{Config, MemoryRetentionConfig, shared_config};
+use crate::config::{Config, SharedConfig, shared_config};
 use crate::gateway::Gateway;
 use crate::memory_embedding::build_embedder;
 use crate::memory_reconcile::ProviderReconciler;
@@ -190,12 +190,12 @@ fn init_memory_store(
 
 fn spawn_memory_maintenance_loop(
     memory: Arc<dyn Memory>,
-    retention: &MemoryRetentionConfig,
+    config: SharedConfig,
     shutdown_token: CancellationToken,
-) -> Option<tokio::task::JoinHandle<()>> {
+) -> tokio::task::JoinHandle<()> {
     spawn_memory_maintenance_loop_with_interval(
         memory,
-        retention,
+        config,
         shutdown_token,
         Duration::from_secs(3600),
     )
@@ -203,29 +203,29 @@ fn spawn_memory_maintenance_loop(
 
 fn spawn_memory_maintenance_loop_with_interval(
     memory: Arc<dyn Memory>,
-    retention: &MemoryRetentionConfig,
+    config: SharedConfig,
     shutdown_token: CancellationToken,
     interval_duration: Duration,
-) -> Option<tokio::task::JoinHandle<()>> {
-    if !retention.enabled {
-        info!("memory maintenance loop disabled");
-        return None;
-    }
+) -> tokio::task::JoinHandle<()> {
+    let span = info_span!("memory_maintenance_loop");
 
-    let maintenance = retention.to_maintenance_config();
-    let span = info_span!(
-        "memory_maintenance_loop",
-        archive_after_days = maintenance.archive_after_days,
-        delete_archive_after_days = maintenance.delete_archive_after_days,
-        compress_after_days = maintenance.compress_after_days,
-        compression_min_cluster_size = maintenance.compression_min_cluster_size,
-        max_rows_per_run = maintenance.max_rows_per_run,
-    );
-
-    Some(tokio::spawn(
+    tokio::spawn(
         async move {
-            info!("memory maintenance loop started");
-            run_memory_maintenance_once(&memory, &maintenance, "startup").await;
+            // Run once at startup if enabled.
+            let retention = config.load().memory.retention.clone();
+            if retention.enabled {
+                info!(
+                    archive_after_days = retention.archive_after_days,
+                    delete_archive_after_days = retention.delete_archive_after_days,
+                    compress_after_days = retention.compress_after_days,
+                    "memory maintenance loop started"
+                );
+                run_memory_maintenance_once(&memory, &retention.to_maintenance_config(), "startup")
+                    .await;
+            } else {
+                info!("memory maintenance loop started (retention disabled)");
+            }
+            let mut last_retention = Some(retention);
 
             let mut interval = tokio::time::interval(interval_duration);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -237,13 +237,34 @@ fn spawn_memory_maintenance_loop_with_interval(
                         break;
                     }
                     _ = interval.tick() => {
-                        run_memory_maintenance_once(&memory, &maintenance, "periodic").await;
+                        let retention = config.load().memory.retention.clone();
+
+                        // Log when retention config changes.
+                        if last_retention.as_ref() != Some(&retention) {
+                            debug!(
+                                enabled = retention.enabled,
+                                archive_after_days = retention.archive_after_days,
+                                delete_archive_after_days = retention.delete_archive_after_days,
+                                compress_after_days = retention.compress_after_days,
+                                "memory retention config updated via hot-reload"
+                            );
+                            last_retention = Some(retention.clone());
+                        }
+
+                        if retention.enabled {
+                            run_memory_maintenance_once(
+                                &memory,
+                                &retention.to_maintenance_config(),
+                                "periodic",
+                            )
+                            .await;
+                        }
                     }
                 }
             }
         }
         .instrument(span),
-    ))
+    )
 }
 
 async fn run_memory_maintenance_once(
@@ -373,7 +394,6 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
     // Capture startup values before wrapping in SharedConfig
     let agent_id = config.agent.id.clone();
     let agent_model = config.agent.model.clone();
-    let retention = config.memory.retention.clone();
 
     let shared = shared_config(config);
 
@@ -402,8 +422,11 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
 
     let shutdown_token = CancellationToken::new();
 
-    let _maintenance_task =
-        spawn_memory_maintenance_loop(maintenance_memory, &retention, shutdown_token.clone());
+    let _maintenance_task = spawn_memory_maintenance_loop(
+        maintenance_memory,
+        Arc::clone(&shared),
+        shutdown_token.clone(),
+    );
 
     let _config_watcher = config_watcher::spawn_config_watcher(
         config_file,
@@ -1258,6 +1281,7 @@ fn clear_chat(tui: &mut Tui) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::MemoryRetentionConfig;
     use async_trait::async_trait;
     use coop_core::SessionKey;
     use coop_memory::{
@@ -1388,7 +1412,8 @@ agent:
         let memory_dyn: Arc<dyn Memory> = Arc::<CountingMemory>::clone(&memory);
         let shutdown = CancellationToken::new();
 
-        let retention = MemoryRetentionConfig {
+        let mut config = test_config();
+        config.memory.retention = MemoryRetentionConfig {
             enabled: true,
             archive_after_days: 1,
             delete_archive_after_days: 2,
@@ -1396,14 +1421,14 @@ agent:
             compression_min_cluster_size: 3,
             max_rows_per_run: 10,
         };
+        let shared = shared_config(config);
 
         let handle = spawn_memory_maintenance_loop_with_interval(
             memory_dyn,
-            &retention,
+            shared,
             shutdown.clone(),
             Duration::from_millis(20),
-        )
-        .unwrap();
+        );
 
         tokio::time::sleep(Duration::from_millis(80)).await;
         shutdown.cancel();
@@ -1412,13 +1437,14 @@ agent:
         assert!(memory.maintenance_calls() >= 2);
     }
 
-    #[test]
-    fn maintenance_loop_not_spawned_when_disabled() {
+    #[tokio::test]
+    async fn maintenance_loop_skips_when_disabled() {
         let memory = Arc::new(CountingMemory::default());
         let memory_dyn: Arc<dyn Memory> = Arc::<CountingMemory>::clone(&memory);
         let shutdown = CancellationToken::new();
 
-        let retention = MemoryRetentionConfig {
+        let mut config = test_config();
+        config.memory.retention = MemoryRetentionConfig {
             enabled: false,
             archive_after_days: 1,
             delete_archive_after_days: 2,
@@ -1426,13 +1452,71 @@ agent:
             compression_min_cluster_size: 3,
             max_rows_per_run: 10,
         };
+        let shared = shared_config(config);
 
         let handle = spawn_memory_maintenance_loop_with_interval(
             memory_dyn,
-            &retention,
-            shutdown,
-            Duration::from_secs(1),
+            shared,
+            shutdown.clone(),
+            Duration::from_millis(20),
         );
-        assert!(handle.is_none());
+
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        shutdown.cancel();
+        handle.await.unwrap();
+
+        // Maintenance should never have been called since retention is disabled.
+        assert_eq!(memory.maintenance_calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn maintenance_loop_picks_up_hot_reloaded_retention() {
+        let memory = Arc::new(CountingMemory::default());
+        let memory_dyn: Arc<dyn Memory> = Arc::<CountingMemory>::clone(&memory);
+        let shutdown = CancellationToken::new();
+
+        // Start with retention disabled.
+        let mut config = test_config();
+        config.memory.retention = MemoryRetentionConfig {
+            enabled: false,
+            archive_after_days: 1,
+            delete_archive_after_days: 2,
+            compress_after_days: 1,
+            compression_min_cluster_size: 3,
+            max_rows_per_run: 10,
+        };
+        let shared = shared_config(config);
+
+        let handle = spawn_memory_maintenance_loop_with_interval(
+            memory_dyn,
+            Arc::clone(&shared),
+            shutdown.clone(),
+            Duration::from_millis(20),
+        );
+
+        // Let a few ticks pass — should NOT run maintenance.
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert_eq!(
+            memory.maintenance_calls(),
+            0,
+            "should not run when disabled"
+        );
+
+        // Hot-reload: enable retention.
+        let mut new_config = shared.load().as_ref().clone();
+        new_config.memory.retention.enabled = true;
+        new_config.memory.retention.archive_after_days = 99;
+        shared.store(Arc::new(new_config));
+
+        // Let a few more ticks pass — should now run maintenance.
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        shutdown.cancel();
+        handle.await.unwrap();
+
+        assert!(
+            memory.maintenance_calls() >= 1,
+            "maintenance should run after hot-reload enables retention, got {}",
+            memory.maintenance_calls()
+        );
     }
 }

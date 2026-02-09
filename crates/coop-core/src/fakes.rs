@@ -75,7 +75,7 @@ impl Channel for FakeChannel {
 #[derive(Debug)]
 pub struct FakeProvider {
     pub name: String,
-    pub model: ModelInfo,
+    pub model: Mutex<ModelInfo>,
     /// The text response to return on each complete() call.
     pub response: Mutex<String>,
 }
@@ -84,10 +84,10 @@ impl FakeProvider {
     pub fn new(response: impl Into<String>) -> Self {
         Self {
             name: "fake".into(),
-            model: ModelInfo {
+            model: Mutex::new(ModelInfo {
                 name: "fake-model".into(),
                 context_limit: 128_000,
-            },
+            }),
             response: Mutex::new(response.into()),
         }
     }
@@ -103,8 +103,12 @@ impl Provider for FakeProvider {
         &self.name
     }
 
-    fn model_info(&self) -> &ModelInfo {
-        &self.model
+    fn model_info(&self) -> ModelInfo {
+        self.model.lock().unwrap().clone()
+    }
+
+    fn set_model(&self, model: &str) {
+        model.clone_into(&mut self.model.lock().unwrap().name);
     }
 
     async fn complete(
@@ -160,7 +164,7 @@ impl Provider for SlowFakeProvider {
         self.inner.name()
     }
 
-    fn model_info(&self) -> &ModelInfo {
+    fn model_info(&self) -> ModelInfo {
         self.inner.model_info()
     }
 

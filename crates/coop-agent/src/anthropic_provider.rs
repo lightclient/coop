@@ -9,6 +9,7 @@ use futures::StreamExt;
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::sync::RwLock;
 use tracing::{Instrument, debug, info, info_span, warn};
 
 use coop_core::traits::{Provider, ProviderStream};
@@ -60,7 +61,7 @@ fn format_api_error(status: reqwest::StatusCode, raw_body: &str) -> String {
 pub struct AnthropicProvider {
     client: Client,
     api_key: String,
-    model: ModelInfo,
+    model: RwLock<ModelInfo>,
     is_oauth: bool,
 }
 
@@ -93,7 +94,7 @@ impl AnthropicProvider {
         Ok(Self {
             client,
             api_key,
-            model,
+            model: RwLock::new(model),
             is_oauth,
         })
     }
@@ -103,6 +104,11 @@ impl AnthropicProvider {
         let api_key = std::env::var("ANTHROPIC_API_KEY")
             .context("ANTHROPIC_API_KEY environment variable not set")?;
         Self::new(api_key, model_name)
+    }
+
+    /// Read a snapshot of the current model info.
+    fn model_snapshot(&self) -> ModelInfo {
+        self.model.read().expect("model lock poisoned").clone()
     }
 
     /// Build request with appropriate auth headers.
@@ -236,6 +242,7 @@ impl AnthropicProvider {
         stream: bool,
     ) -> Value {
         let has_tools = !tools.is_empty();
+        let model = self.model_snapshot();
 
         // Place cache breakpoint on second-to-last message so the
         // entire conversation prefix is cached — only the newest
@@ -243,7 +250,7 @@ impl AnthropicProvider {
         let cache_at = (messages.len() >= 2).then(|| messages.len() - 2);
 
         let mut body = json!({
-            "model": self.model.name,
+            "model": model.name,
             "max_tokens": 8192,
             "system": self.build_system_blocks(system),
             "messages": Self::format_messages(messages, self.is_oauth, cache_at),
@@ -427,8 +434,9 @@ impl AnthropicProvider {
 
 impl std::fmt::Debug for AnthropicProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let model = self.model_snapshot();
         f.debug_struct("AnthropicProvider")
-            .field("model", &self.model.name)
+            .field("model", &model.name)
             .field("is_oauth", &self.is_oauth)
             .finish_non_exhaustive()
     }
@@ -440,8 +448,17 @@ impl Provider for AnthropicProvider {
         "anthropic"
     }
 
-    fn model_info(&self) -> &ModelInfo {
-        &self.model
+    fn model_info(&self) -> ModelInfo {
+        self.model_snapshot()
+    }
+
+    fn set_model(&self, model: &str) {
+        let api_model = model.strip_prefix("anthropic/").unwrap_or(model);
+        let mut info = self.model.write().expect("model lock poisoned");
+        if info.name != api_model {
+            debug!(old = %info.name, new = %api_model, "provider model updated");
+            api_model.clone_into(&mut info.name);
+        }
     }
 
     async fn complete(
@@ -450,9 +467,10 @@ impl Provider for AnthropicProvider {
         messages: &[Message],
         tools: &[ToolDef],
     ) -> Result<(Message, Usage)> {
+        let model_name = self.model_snapshot().name;
         let span = info_span!(
             "anthropic_request",
-            model = %self.model.name,
+            model = %model_name,
             method = "complete",
             message_count = messages.len(),
             tool_count = tools.len(),
@@ -495,9 +513,10 @@ impl Provider for AnthropicProvider {
         messages: &[Message],
         tools: &[ToolDef],
     ) -> Result<ProviderStream> {
+        let model_name = self.model_snapshot().name;
         let span = info_span!(
             "anthropic_request",
-            model = %self.model.name,
+            model = %model_name,
             method = "stream",
             message_count = messages.len(),
             tool_count = tools.len(),
@@ -1095,5 +1114,48 @@ mod tests {
             result,
             "new_error_type (400 Bad Request): Something new happened."
         );
+    }
+
+    #[test]
+    fn set_model_updates_model_info() {
+        let provider =
+            AnthropicProvider::new("sk-ant-api-test".into(), "claude-sonnet-4-20250514").unwrap();
+        assert_eq!(provider.model_info().name, "claude-sonnet-4-20250514");
+
+        provider.set_model("claude-haiku-3-20250514");
+        assert_eq!(provider.model_info().name, "claude-haiku-3-20250514");
+    }
+
+    #[test]
+    fn set_model_strips_anthropic_prefix() {
+        let provider =
+            AnthropicProvider::new("sk-ant-api-test".into(), "claude-sonnet-4-20250514").unwrap();
+
+        provider.set_model("anthropic/claude-haiku-3-20250514");
+        assert_eq!(provider.model_info().name, "claude-haiku-3-20250514");
+    }
+
+    #[test]
+    fn set_model_noop_when_same() {
+        let provider =
+            AnthropicProvider::new("sk-ant-api-test".into(), "claude-sonnet-4-20250514").unwrap();
+
+        // Same model — should be a no-op (no panic, no change).
+        provider.set_model("claude-sonnet-4-20250514");
+        assert_eq!(provider.model_info().name, "claude-sonnet-4-20250514");
+    }
+
+    #[test]
+    fn set_model_affects_build_body() {
+        let provider =
+            AnthropicProvider::new("sk-ant-api-test".into(), "claude-sonnet-4-20250514").unwrap();
+
+        let messages = vec![Message::user().with_text("hello")];
+        let body = provider.build_body("system", &messages, &[], false);
+        assert_eq!(body["model"], "claude-sonnet-4-20250514");
+
+        provider.set_model("claude-haiku-3-20250514");
+        let body = provider.build_body("system", &messages, &[], false);
+        assert_eq!(body["model"], "claude-haiku-3-20250514");
     }
 }
