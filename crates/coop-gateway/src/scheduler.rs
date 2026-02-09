@@ -142,9 +142,23 @@ pub(crate) async fn run_scheduler(
 
         let delay = (fire_time - now).to_std().unwrap_or(Duration::ZERO);
 
+        debug!(
+            cron.name = %cfg.name,
+            fire_time = %fire_time,
+            delay_secs = delay.as_secs(),
+            "scheduler sleeping until next cron"
+        );
+
         tokio::select! {
             () = tokio::time::sleep(delay) => {
-                fire_cron(cfg, &router, deliver_tx.as_ref()).await;
+                // Spawn fire_cron as a separate task so the scheduler loop
+                // is not blocked by slow AI turns or hanging API calls.
+                let cfg = cfg.clone();
+                let router = Arc::clone(&router);
+                let deliver_tx = deliver_tx.clone();
+                tokio::spawn(async move {
+                    fire_cron(&cfg, &router, deliver_tx.as_ref()).await;
+                });
             }
             () = shutdown.cancelled() => {
                 info!("scheduler shutting down");
@@ -738,5 +752,108 @@ mod tests {
         // Leak dir to keep it alive — test only.
         std::mem::forget(dir);
         (MessageRouter::new(shared, Arc::clone(&gateway)), gateway)
+    }
+
+    fn make_router_and_gateway_with_provider(
+        users: Option<&[UserConfig]>,
+        provider: Arc<dyn coop_core::Provider>,
+    ) -> (MessageRouter, Arc<Gateway>) {
+        use std::fmt::Write;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("SOUL.md"), "test").unwrap();
+
+        let users_yaml = match users {
+            Some(users) => {
+                let mut s = "users:\n".to_owned();
+                for u in users {
+                    let _ = write!(
+                        s,
+                        "  - name: {}\n    trust: {}\n    match: []\n",
+                        u.name,
+                        serde_yaml::to_string(&u.trust).unwrap().trim()
+                    );
+                }
+                s
+            }
+            None => String::new(),
+        };
+
+        let yaml = format!("agent:\n  id: test\n  model: test\n{users_yaml}");
+        let config: Config = serde_yaml::from_str(&yaml).unwrap();
+
+        let executor = Arc::new(DefaultExecutor::new());
+        let shared = shared_config(config);
+        let gateway = Arc::new(
+            Gateway::new(
+                Arc::clone(&shared),
+                dir.path().to_path_buf(),
+                provider,
+                executor,
+                None,
+                None,
+            )
+            .unwrap(),
+        );
+        std::mem::forget(dir);
+        (MessageRouter::new(shared, Arc::clone(&gateway)), gateway)
+    }
+
+    /// Verify that slow provider calls don't block the scheduler from firing
+    /// subsequent cron entries. With a synchronous `fire_cron` call, a 2-second
+    /// provider delay would allow at most ~2 fires in 4 seconds. With concurrent
+    /// spawning, the scheduler fires every second regardless of provider latency.
+    #[tokio::test]
+    async fn scheduler_not_blocked_by_slow_provider() {
+        use coop_core::fakes::SlowFakeProvider;
+
+        // Provider that takes 2 seconds per call.
+        let provider: Arc<dyn coop_core::Provider> = Arc::new(SlowFakeProvider::new(
+            "slow response",
+            Duration::from_secs(2),
+        ));
+
+        let (router, gateway) = make_router_and_gateway_with_provider(None, provider);
+        let router = Arc::new(router);
+        let cancel = CancellationToken::new();
+
+        // Fires every second, but each fire takes 2 seconds to complete.
+        let entries = vec![CronConfig {
+            name: "fast-cron".to_owned(),
+            cron: "* * * * * * *".to_owned(),
+            message: "tick".to_owned(),
+            user: None,
+            deliver: None,
+        }];
+
+        let sched_router = Arc::clone(&router);
+        let sched_cancel = cancel.clone();
+        let handle = tokio::spawn(async move {
+            run_scheduler(entries, sched_router, &[], None, sched_cancel).await;
+        });
+
+        // Run for 4 seconds, then cancel and give in-flight tasks time to finish.
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        cancel.cancel();
+        // Grace period: spawned fire_cron tasks keep running after scheduler stops.
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+
+        // Each completed fire adds 2 messages (user + assistant).
+        // With blocking fire_cron (2s each): max ~2 fires in 4s = 4 messages.
+        // With concurrent spawning: fires at t≈0,1,2,3 all complete by t≈5.
+        // We expect at least 3 completed fires (6 messages).
+        let sessions = gateway.list_sessions();
+        let cron_session = sessions
+            .iter()
+            .find(|s| matches!(&s.kind, SessionKind::Cron(name) if name == "fast-cron"));
+        assert!(cron_session.is_some(), "expected cron session");
+
+        let msg_count = gateway.session_message_count(cron_session.unwrap());
+        assert!(
+            msg_count >= 6,
+            "expected at least 3 concurrent fires (6 messages), got {msg_count} messages — \
+             scheduler is likely blocking on fire_cron"
+        );
     }
 }

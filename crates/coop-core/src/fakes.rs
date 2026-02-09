@@ -135,6 +135,56 @@ impl Provider for FakeProvider {
 }
 
 // ---------------------------------------------------------------------------
+// SlowFakeProvider
+// ---------------------------------------------------------------------------
+
+/// Fake provider that sleeps before returning, simulating slow API calls.
+#[derive(Debug)]
+pub struct SlowFakeProvider {
+    inner: FakeProvider,
+    delay: std::time::Duration,
+}
+
+impl SlowFakeProvider {
+    pub fn new(response: impl Into<String>, delay: std::time::Duration) -> Self {
+        Self {
+            inner: FakeProvider::new(response),
+            delay,
+        }
+    }
+}
+
+#[async_trait]
+impl Provider for SlowFakeProvider {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn model_info(&self) -> &ModelInfo {
+        self.inner.model_info()
+    }
+
+    async fn complete(
+        &self,
+        system: &str,
+        messages: &[Message],
+        tools: &[ToolDef],
+    ) -> Result<(Message, Usage)> {
+        tokio::time::sleep(self.delay).await;
+        self.inner.complete(system, messages, tools).await
+    }
+
+    async fn stream(
+        &self,
+        _system: &str,
+        _messages: &[Message],
+        _tools: &[ToolDef],
+    ) -> Result<ProviderStream> {
+        anyhow::bail!("SlowFakeProvider does not support streaming")
+    }
+}
+
+// ---------------------------------------------------------------------------
 // FakeTool
 // ---------------------------------------------------------------------------
 
