@@ -145,7 +145,9 @@ async fn dispatch_signal_turn_background(
             TurnEvent::Done(_) => {
                 break;
             }
-            TurnEvent::AssistantMessage(_) | TurnEvent::ToolResult { .. } => {}
+            TurnEvent::AssistantMessage(_)
+            | TurnEvent::ToolResult { .. }
+            | TurnEvent::Compacting => {}
         }
     }
 
@@ -229,7 +231,9 @@ async fn dispatch_signal_turn<C: Channel>(
             TurnEvent::Done(_) => {
                 break;
             }
-            TurnEvent::AssistantMessage(_) | TurnEvent::ToolResult { .. } => {}
+            TurnEvent::AssistantMessage(_)
+            | TurnEvent::ToolResult { .. }
+            | TurnEvent::Compacting => {}
         }
     }
 

@@ -396,6 +396,11 @@ impl Gateway {
             // This can happen when a previous turn panicked mid-tool-execution.
             self.repair_dangling_tool_use(session_key);
 
+            // Compact before appending the new message if the session is
+            // already over the threshold from a previous turn.
+            self.maybe_compact(session_key, &system_prompt, &event_tx)
+                .await?;
+
             let session_len_before = self.messages(session_key).len();
             self.append_message(session_key, Message::user().with_text(user_input));
 
@@ -434,6 +439,7 @@ impl Gateway {
                         .assistant_response(&system_prompt, &messages, &tool_defs, &event_tx)
                         .await?;
 
+                    self.update_last_input_tokens(session_key, &usage);
                     total_usage += usage;
                     self.append_message(session_key, response.clone());
                     new_messages.push(response.clone());
@@ -567,6 +573,12 @@ impl Gateway {
                 self.append_message(session_key, result_msg.clone());
                 new_messages.push(result_msg);
 
+                // Compact mid-turn if the context grew past the threshold
+                // during this iteration. The next iteration will use the
+                // compacted context automatically via build_provider_context.
+                self.maybe_compact(session_key, &system_prompt, &event_tx)
+                    .await?;
+
                 if iteration + 1 >= turn_config.max_iterations {
                     hit_limit = true;
                 }
@@ -597,6 +609,7 @@ impl Gateway {
                         .assistant_response(&system_prompt, &messages, &[], &event_tx)
                         .await?;
 
+                    self.update_last_input_tokens(session_key, &usage);
                     total_usage += usage;
                     self.append_message(session_key, response.clone());
                     new_messages.push(response.clone());
@@ -630,34 +643,6 @@ impl Gateway {
                     hit_limit,
                     "turn complete"
                 );
-            }
-
-            // Check if compaction is needed for next turn
-            if !cancelled && compaction::should_compact(&total_usage) {
-                let all_messages = self.messages(session_key);
-                let msg_count = all_messages.len();
-                match compaction::compact(&all_messages, self.provider.as_ref(), &system_prompt)
-                    .await
-                {
-                    Ok(mut state) => {
-                        info!(
-                            tokens_before = total_usage.input_tokens.unwrap_or(0)
-                                + total_usage.cache_read_tokens.unwrap_or(0)
-                                + total_usage.cache_write_tokens.unwrap_or(0)
-                                + total_usage.output_tokens.unwrap_or(0),
-                            summary_len = state.summary.len(),
-                            "session compacted"
-                        );
-                        state.messages_at_compaction = Some(msg_count);
-                        self.set_compaction(session_key, state, msg_count);
-                    }
-                    Err(e) => {
-                        warn!(
-                            error = %e,
-                            "compaction failed, continuing with full context"
-                        );
-                    }
-                }
             }
 
             // Track session-level cumulative usage.
@@ -777,6 +762,73 @@ impl Gateway {
             .lock()
             .expect("compaction cache mutex poisoned")
             .insert(session_key.clone(), (state, messages_before));
+    }
+
+    /// Check if the session needs compaction and perform it if so.
+    ///
+    /// Uses `last_input_tokens` from session usage as the signal — this is
+    /// the input token count the provider reported on the most recent call,
+    /// reflecting how large the context actually was.
+    ///
+    /// Returns `Ok(true)` if compaction was performed.
+    async fn maybe_compact(
+        &self,
+        session_key: &SessionKey,
+        system_prompt: &str,
+        event_tx: &mpsc::Sender<TurnEvent>,
+    ) -> Result<bool> {
+        let input_tokens = self
+            .session_usage
+            .lock()
+            .expect("session_usage mutex poisoned")
+            .get(session_key)
+            .map_or(0, |u| u.last_input_tokens);
+
+        if !compaction::should_compact(input_tokens) {
+            return Ok(false);
+        }
+
+        // If we already have a compaction state and no new messages have been
+        // added since, there's nothing to re-compact.
+        if let Some((_, msg_count_at_compaction)) = self.get_compaction(session_key) {
+            let current_count = self.messages(session_key).len();
+            if current_count <= msg_count_at_compaction {
+                return Ok(false);
+            }
+        }
+
+        let _ = event_tx.send(TurnEvent::Compacting).await;
+
+        let all_messages = self.messages(session_key);
+        let msg_count = all_messages.len();
+
+        info!(
+            session = %session_key,
+            input_tokens,
+            message_count = msg_count,
+            "compaction triggered"
+        );
+
+        match compaction::compact(&all_messages, self.provider.as_ref(), system_prompt).await {
+            Ok(mut state) => {
+                info!(
+                    session = %session_key,
+                    summary_len = state.summary.len(),
+                    "session compacted"
+                );
+                state.messages_at_compaction = Some(msg_count);
+                self.set_compaction(session_key, state, msg_count);
+                Ok(true)
+            }
+            Err(e) => {
+                warn!(
+                    session = %session_key,
+                    error = %e,
+                    "compaction failed, continuing with full context"
+                );
+                Ok(false)
+            }
+        }
     }
 
     pub(crate) fn append_message(&self, session_key: &SessionKey, message: Message) {
@@ -901,7 +953,21 @@ impl Gateway {
             .unwrap_or_default()
     }
 
-    /// Record usage from a completed turn into session-level stats.
+    /// Update the last-seen input token count for a session.
+    ///
+    /// Called after each provider response so that `maybe_compact` can
+    /// check mid-turn whether the context has grown past the threshold.
+    fn update_last_input_tokens(&self, session_key: &SessionKey, usage: &Usage) {
+        let mut map = self
+            .session_usage
+            .lock()
+            .expect("session_usage mutex poisoned");
+        let entry = map.entry(session_key.clone()).or_default();
+        entry.last_input_tokens = usage.input_tokens.unwrap_or(0);
+        drop(map);
+    }
+
+    /// Record usage from a completed turn into session-level cumulative stats.
     fn record_turn_usage(&self, session_key: &SessionKey, turn_usage: &Usage) {
         let mut map = self
             .session_usage
@@ -909,6 +975,7 @@ impl Gateway {
             .expect("session_usage mutex poisoned");
         let entry = map.entry(session_key.clone()).or_default();
         entry.cumulative += turn_usage.clone();
+        // Also set last_input_tokens from the final iteration.
         entry.last_input_tokens = turn_usage.input_tokens.unwrap_or(0);
         drop(map);
     }
@@ -2085,5 +2152,329 @@ agent:
         let session_key = gateway.default_session_key();
         gateway.repair_dangling_tool_use(&session_key);
         assert!(gateway.messages(&session_key).is_empty());
+    }
+
+    /// Provider that reports high input tokens to trigger compaction.
+    /// On non-tool calls (i.e. compaction summarization), returns a summary.
+    /// On tool calls, returns a tool_use on the first call then text on subsequent calls.
+    #[derive(Debug)]
+    struct HighTokenProvider {
+        model: ModelInfo,
+        call_count: Mutex<u32>,
+        input_tokens: u32,
+    }
+
+    impl HighTokenProvider {
+        fn new(input_tokens: u32) -> Self {
+            Self {
+                model: ModelInfo {
+                    name: "high-token".into(),
+                    context_limit: 200_000,
+                },
+                call_count: Mutex::new(0),
+                input_tokens,
+            }
+        }
+
+        fn calls(&self) -> u32 {
+            *self.call_count.lock().unwrap()
+        }
+    }
+
+    #[async_trait]
+    impl Provider for HighTokenProvider {
+        fn name(&self) -> &'static str {
+            "high-token"
+        }
+
+        fn model_info(&self) -> ModelInfo {
+            self.model.clone()
+        }
+
+        async fn complete(
+            &self,
+            _system: &str,
+            messages: &[Message],
+            tools: &[ToolDef],
+        ) -> Result<(Message, Usage)> {
+            let mut count = self.call_count.lock().unwrap();
+            *count += 1;
+
+            let is_compaction_call = messages
+                .last()
+                .is_some_and(|m| m.text().contains("continuation summary"));
+
+            if is_compaction_call {
+                return Ok((
+                    Message::assistant()
+                        .with_text("<summary>Compacted summary of conversation.</summary>"),
+                    Usage {
+                        input_tokens: Some(self.input_tokens),
+                        output_tokens: Some(500),
+                        ..Default::default()
+                    },
+                ));
+            }
+
+            let usage = Usage {
+                input_tokens: Some(self.input_tokens),
+                output_tokens: Some(500),
+                ..Default::default()
+            };
+
+            if !tools.is_empty() && *count == 1 {
+                // First real call: return tool_use to keep the turn going
+                Ok((
+                    Message::assistant()
+                        .with_text("Let me check.")
+                        .with_tool_request(
+                            "tool_1",
+                            "bash",
+                            serde_json::json!({"command": "echo hi"}),
+                        ),
+                    usage,
+                ))
+            } else {
+                // Subsequent calls or no tools: return text
+                Ok((Message::assistant().with_text("Done."), usage))
+            }
+        }
+
+        async fn stream(
+            &self,
+            _system: &str,
+            _messages: &[Message],
+            _tools: &[ToolDef],
+        ) -> Result<ProviderStream> {
+            anyhow::bail!("not supported")
+        }
+    }
+
+    #[tokio::test]
+    async fn pre_turn_compaction_fires_before_user_message() {
+        let workspace = test_workspace();
+        let provider: Arc<dyn Provider> = Arc::new(HighTokenProvider::new(200_000));
+        let executor = Arc::new(DefaultExecutor::new());
+        let gateway = Arc::new(
+            Gateway::new(
+                shared_config(test_config()),
+                workspace.path().to_path_buf(),
+                provider,
+                executor,
+                None,
+                None,
+            )
+            .unwrap(),
+        );
+
+        let session_key = gateway.default_session_key();
+
+        // Seed the session with some messages so there's something to compact.
+        gateway.append_message(&session_key, Message::user().with_text("first message"));
+        gateway.append_message(
+            &session_key,
+            Message::assistant().with_text("first response"),
+        );
+
+        // Simulate that the previous turn used high input tokens — this is
+        // what maybe_compact checks to decide whether to compact.
+        gateway
+            .session_usage
+            .lock()
+            .expect("session_usage mutex poisoned")
+            .entry(session_key.clone())
+            .or_default()
+            .last_input_tokens = 200_000;
+
+        let (event_tx, mut event_rx) = mpsc::channel(128);
+
+        let result = gateway
+            .run_turn_with_trust(
+                &session_key,
+                "second message",
+                TrustLevel::Full,
+                Some("alice"),
+                None,
+                event_tx,
+            )
+            .await;
+
+        assert!(result.is_ok());
+
+        // Collect events
+        let mut saw_compacting = false;
+        let mut saw_done = false;
+        let mut saw_text = false;
+        while let Ok(event) = event_rx.try_recv() {
+            match event {
+                TurnEvent::Compacting => saw_compacting = true,
+                TurnEvent::Done(_) => saw_done = true,
+                TurnEvent::TextDelta(t) if !t.is_empty() => saw_text = true,
+                _ => {}
+            }
+        }
+
+        assert!(saw_compacting, "should emit Compacting event");
+        assert!(
+            saw_done,
+            "should emit Done event (turn continues after compaction)"
+        );
+        assert!(saw_text, "should produce a text response after compaction");
+
+        // Compaction state should exist
+        assert!(
+            gateway.get_compaction(&session_key).is_some(),
+            "compaction state should be persisted"
+        );
+    }
+
+    #[tokio::test]
+    async fn mid_turn_compaction_fires_between_iterations() {
+        let workspace = test_workspace();
+        // Use tokens over the threshold so compaction fires after the first
+        // iteration's provider response + tool results are appended.
+        let provider = Arc::new(HighTokenProvider::new(200_000));
+        let executor = Arc::new(DefaultExecutor::new());
+        let gateway = Arc::new(
+            Gateway::new(
+                shared_config(test_config()),
+                workspace.path().to_path_buf(),
+                Arc::clone(&provider) as Arc<dyn Provider>,
+                executor,
+                None,
+                None,
+            )
+            .unwrap(),
+        );
+
+        let session_key = gateway.default_session_key();
+        let (event_tx, mut event_rx) = mpsc::channel(128);
+
+        let result = gateway
+            .run_turn_with_trust(
+                &session_key,
+                "do something",
+                TrustLevel::Full,
+                Some("alice"),
+                None,
+                event_tx,
+            )
+            .await;
+
+        assert!(result.is_ok());
+
+        // Collect events in order
+        let mut events = Vec::new();
+        while let Ok(event) = event_rx.try_recv() {
+            events.push(event);
+        }
+
+        let saw_compacting = events.iter().any(|e| matches!(e, TurnEvent::Compacting));
+        let saw_tool_start = events
+            .iter()
+            .any(|e| matches!(e, TurnEvent::ToolStart { .. }));
+        let saw_done = events.iter().any(|e| matches!(e, TurnEvent::Done(_)));
+
+        assert!(saw_tool_start, "should have a tool execution");
+        assert!(
+            saw_compacting,
+            "compaction should fire mid-turn after first iteration"
+        );
+        assert!(saw_done, "turn should complete after compaction");
+
+        // The compaction event should come after tool execution but before Done
+        let compact_idx = events
+            .iter()
+            .position(|e| matches!(e, TurnEvent::Compacting))
+            .unwrap();
+        let done_idx = events
+            .iter()
+            .position(|e| matches!(e, TurnEvent::Done(_)))
+            .unwrap();
+        let tool_idx = events
+            .iter()
+            .position(|e| matches!(e, TurnEvent::ToolStart { .. }))
+            .unwrap();
+
+        assert!(
+            compact_idx > tool_idx,
+            "compaction should come after tool execution"
+        );
+        assert!(
+            compact_idx < done_idx,
+            "compaction should come before Done (not terminal)"
+        );
+
+        // Verify the user gets a text response AFTER compaction — the turn
+        // must not leave the user hanging.
+        let post_compaction_assistant = events[compact_idx..]
+            .iter()
+            .any(|e| matches!(e, TurnEvent::AssistantMessage(msg) if !msg.text().is_empty()));
+        assert!(
+            post_compaction_assistant,
+            "user must receive an assistant message after compaction"
+        );
+
+        // Provider should have been called more than once:
+        // 1. First iteration (tool_use) 2. Compaction summarization 3. Second iteration (text)
+        assert!(
+            provider.calls() >= 3,
+            "expected at least 3 provider calls, got {}",
+            provider.calls()
+        );
+
+        // Compaction state should exist
+        assert!(
+            gateway.get_compaction(&session_key).is_some(),
+            "compaction state should be persisted"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_compaction_when_below_threshold() {
+        let workspace = test_workspace();
+        // Use low token count — should NOT trigger compaction
+        let provider: Arc<dyn Provider> = Arc::new(FakeProvider::new("hello"));
+        let executor = Arc::new(DefaultExecutor::new());
+        let gateway = Arc::new(
+            Gateway::new(
+                shared_config(test_config()),
+                workspace.path().to_path_buf(),
+                provider,
+                executor,
+                None,
+                None,
+            )
+            .unwrap(),
+        );
+
+        let session_key = gateway.default_session_key();
+        let (event_tx, mut event_rx) = mpsc::channel(128);
+
+        let result = gateway
+            .run_turn_with_trust(
+                &session_key,
+                "hello",
+                TrustLevel::Full,
+                Some("alice"),
+                None,
+                event_tx,
+            )
+            .await;
+
+        assert!(result.is_ok());
+
+        let mut saw_compacting = false;
+        while let Ok(event) = event_rx.try_recv() {
+            if matches!(event, TurnEvent::Compacting) {
+                saw_compacting = true;
+            }
+        }
+
+        assert!(!saw_compacting, "should NOT compact when below threshold");
+        assert!(
+            gateway.get_compaction(&session_key).is_none(),
+            "no compaction state should exist"
+        );
     }
 }

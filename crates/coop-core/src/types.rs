@@ -565,6 +565,8 @@ pub enum TurnEvent {
     },
     /// A tool execution completed.
     ToolResult { id: String, message: Message },
+    /// Context compaction is in progress.
+    Compacting,
     /// Turn complete.
     Done(TurnResult),
     /// Non-fatal error.

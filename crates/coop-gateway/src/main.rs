@@ -1123,6 +1123,12 @@ fn handle_turn_event(
             update_chat_messages(tui, app, CHAT_IDX);
         }
         TurnEvent::AssistantMessage(_) => {}
+        TurnEvent::Compacting => {
+            app.push_message(DisplayMessage::system(
+                "Compacting conversation history…".to_owned(),
+            ));
+            update_chat_messages(tui, app, CHAT_IDX);
+        }
         TurnEvent::Done(result) => {
             let tokens = result.usage.total_tokens();
             app.end_turn(tokens);

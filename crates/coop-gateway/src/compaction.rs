@@ -7,12 +7,12 @@
 
 use anyhow::Result;
 use coop_core::traits::Provider;
-use coop_core::types::{Content, Message, Role, Usage};
+use coop_core::types::{Content, Message, Role};
 use tracing::{Instrument, info, info_span};
 
 /// Compact when total tokens exceeds this.
 /// Matches Anthropic SDK's `DEFAULT_TOKEN_THRESHOLD`.
-pub(crate) const COMPACTION_THRESHOLD: u32 = 100_000;
+pub(crate) const COMPACTION_THRESHOLD: u32 = 175_000;
 
 const SUMMARY_PROMPT: &str = "You have been working on the task described above but have not yet completed it. Write a continuation summary that will allow you (or another instance of yourself) to resume work efficiently in a future context window where the conversation history will be replaced with this summary. Your summary should be structured, concise, and actionable. Include:\n\
 1. Task Overview — The user's core request and success criteria, any clarifications or constraints\n\
@@ -39,13 +39,12 @@ pub(crate) struct CompactionState {
     pub messages_at_compaction: Option<usize>,
 }
 
-/// Returns true if total usage exceeds the compaction threshold.
-pub(crate) fn should_compact(usage: &Usage) -> bool {
-    let total = usage.input_tokens.unwrap_or(0)
-        + usage.cache_read_tokens.unwrap_or(0)
-        + usage.cache_write_tokens.unwrap_or(0)
-        + usage.output_tokens.unwrap_or(0);
-    total > COMPACTION_THRESHOLD
+/// Returns true if the given input token count exceeds the compaction threshold.
+///
+/// Call with the input tokens from the most recent provider response — this
+/// reflects how large the context actually was for that call.
+pub(crate) fn should_compact(input_tokens: u32) -> bool {
+    input_tokens > COMPACTION_THRESHOLD
 }
 
 /// Build messages for the compaction summarization call.
@@ -181,34 +180,17 @@ mod tests {
 
     #[test]
     fn below_threshold_does_not_compact() {
-        let usage = Usage {
-            input_tokens: Some(50_000),
-            output_tokens: Some(10_000),
-            ..Default::default()
-        };
-        assert!(!should_compact(&usage));
+        assert!(!should_compact(50_000));
     }
 
     #[test]
     fn above_threshold_triggers_compaction() {
-        let usage = Usage {
-            input_tokens: Some(80_000),
-            output_tokens: Some(30_000),
-            ..Default::default()
-        };
-        assert!(should_compact(&usage));
+        assert!(should_compact(200_000));
     }
 
     #[test]
-    fn above_threshold_with_cache_tokens() {
-        let usage = Usage {
-            input_tokens: Some(10_000),
-            output_tokens: Some(5_000),
-            cache_read_tokens: Some(80_000),
-            cache_write_tokens: Some(10_000),
-            ..Default::default()
-        };
-        assert!(should_compact(&usage));
+    fn exactly_at_threshold_does_not_compact() {
+        assert!(!should_compact(COMPACTION_THRESHOLD));
     }
 
     #[test]

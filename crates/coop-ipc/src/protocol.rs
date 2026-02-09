@@ -91,6 +91,7 @@ impl ServerMessage {
                 hit_limit: result.hit_limit,
             }),
             TurnEvent::Error(message) => Some(Self::Error { session, message }),
+            TurnEvent::Compacting => None,
         }
     }
 }

@@ -222,7 +222,9 @@ impl MessageRouter {
                 TurnEvent::Done(_) => {
                     break;
                 }
-                TurnEvent::ToolStart { .. } | TurnEvent::ToolResult { .. } => {}
+                TurnEvent::ToolStart { .. }
+                | TurnEvent::ToolResult { .. }
+                | TurnEvent::Compacting => {}
             }
         }
 
