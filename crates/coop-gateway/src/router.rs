@@ -50,6 +50,49 @@ impl MessageRouter {
     ) -> Result<RouteDecision> {
         let decision = self.route(msg);
 
+        // Intercept slash commands before other authorization.
+        // Slash commands require the same trust authorization as regular messages.
+        if msg.kind == InboundKind::Command {
+            if !is_trust_authorized(&decision, msg) {
+                info!(
+                    session = %decision.session_key,
+                    trust = ?decision.trust,
+                    sender = %msg.sender,
+                    channel = %msg.channel,
+                    command = %msg.content.trim(),
+                    "slash command rejected: sender lacks full trust"
+                );
+                let _ = event_tx.send(TurnEvent::TextDelta(String::new())).await;
+                let _ = event_tx
+                    .send(TurnEvent::Done(TurnResult {
+                        messages: Vec::new(),
+                        usage: Usage::default(),
+                        hit_limit: false,
+                    }))
+                    .await;
+                return Ok(decision);
+            }
+
+            let cmd = msg.content.trim();
+            let response = self
+                .handle_channel_command(cmd, &decision)
+                .unwrap_or_else(|| format!("Unknown command: {cmd}\nType /help for a list."));
+            info!(
+                session = %decision.session_key,
+                command = cmd,
+                "channel slash command handled"
+            );
+            let _ = event_tx.send(TurnEvent::TextDelta(response)).await;
+            let _ = event_tx
+                .send(TurnEvent::Done(TurnResult {
+                    messages: Vec::new(),
+                    usage: Usage::default(),
+                    hit_limit: false,
+                }))
+                .await;
+            return Ok(decision);
+        }
+
         // TODO: Replace this simple full-trust gate with a proper authorization
         // system that supports per-session, per-channel, and per-command policies.
         if !is_trust_authorized(&decision, msg) {
@@ -61,30 +104,6 @@ impl MessageRouter {
                 "message rejected: sender lacks full trust"
             );
             let _ = event_tx.send(TurnEvent::TextDelta(String::new())).await;
-            let _ = event_tx
-                .send(TurnEvent::Done(TurnResult {
-                    messages: Vec::new(),
-                    usage: Usage::default(),
-                    hit_limit: false,
-                }))
-                .await;
-            return Ok(decision);
-        }
-
-        // Intercept slash commands before sending to the LLM.
-        // Channels tag these as InboundKind::Command with the raw command
-        // text (no envelope prefix), so matching is exact.
-        if msg.kind == InboundKind::Command {
-            let cmd = msg.content.trim();
-            let response = self
-                .handle_channel_command(cmd, &decision)
-                .unwrap_or_else(|| format!("Unknown command: {cmd}\nType /help for a list."));
-            info!(
-                session = %decision.session_key,
-                command = cmd,
-                "channel slash command handled"
-            );
-            let _ = event_tx.send(TurnEvent::TextDelta(response)).await;
             let _ = event_tx
                 .send(TurnEvent::Done(TurnResult {
                     messages: Vec::new(),
@@ -1000,5 +1019,65 @@ users:
         let (_decision, text) = dispatch_and_collect_text(&router, &msg).await;
 
         assert!(text.contains("/new"), "trimmed input should match /help");
+    }
+
+    #[tokio::test]
+    async fn slash_commands_require_full_trust() {
+        let config = test_config();
+        let (router, _gw) = make_router_and_gateway(&config);
+
+        // Alice has full trust - should be able to use slash commands
+        let msg = inbound_command("signal", "alice-uuid", "/status");
+        let (decision, text) = dispatch_and_collect_text(&router, &msg).await;
+        assert_eq!(decision.trust, TrustLevel::Full);
+        assert!(
+            text.contains("Session:"),
+            "full trust user should get command response"
+        );
+    }
+
+    #[tokio::test]
+    async fn slash_commands_reject_inner_trust() {
+        let config = test_config();
+        let (router, _gw) = make_router_and_gateway(&config);
+
+        // Bob has inner trust - should be rejected for slash commands
+        let msg = inbound_command("signal", "bob-uuid", "/status");
+        let (decision, text) = dispatch_and_collect_text(&router, &msg).await;
+        assert_eq!(decision.trust, TrustLevel::Inner);
+        assert!(
+            text.is_empty(),
+            "inner trust user should not get command response"
+        );
+    }
+
+    #[tokio::test]
+    async fn slash_commands_reject_public_trust() {
+        let config = test_config();
+        let (router, _gw) = make_router_and_gateway(&config);
+
+        // Unknown user has public trust - should be rejected for slash commands
+        let msg = inbound_command("signal", "mallory-uuid", "/help");
+        let (decision, text) = dispatch_and_collect_text(&router, &msg).await;
+        assert_eq!(decision.trust, TrustLevel::Public);
+        assert!(
+            text.is_empty(),
+            "public trust user should not get command response"
+        );
+    }
+
+    #[tokio::test]
+    async fn slash_commands_always_allowed_on_terminal() {
+        let config = test_config();
+        let (router, _gw) = make_router_and_gateway(&config);
+
+        // Terminal access always allows slash commands regardless of trust
+        let msg = inbound_command("terminal:default", "alice", "/status");
+        let (decision, text) = dispatch_and_collect_text(&router, &msg).await;
+        assert_eq!(decision.trust, TrustLevel::Full);
+        assert!(
+            text.contains("Session:"),
+            "terminal user should always get command response"
+        );
     }
 }
