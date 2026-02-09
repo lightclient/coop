@@ -507,11 +507,11 @@ impl Gateway {
                             .await
                         {
                             Ok(output) => {
-                                let preview_len = output.content.len().min(500);
                                 info!(
                                     output_len = output.content.len(),
                                     is_error = output.is_error,
-                                    output_preview = &output.content[..preview_len],
+                                    output_preview =
+                                        &output.content[..output.content.floor_char_boundary(500)],
                                     "tool complete"
                                 );
                                 output

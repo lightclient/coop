@@ -153,7 +153,24 @@ async fn dispatch_signal_turn_background(
 
     match dispatch_task.await {
         Ok(result) => result.map(|_| ()),
-        Err(error) => anyhow::bail!("router task failed: {error}"),
+        Err(error) => {
+            // The dispatch task panicked or was cancelled. The user never
+            // received a response because the event channel was dropped
+            // before any text was produced. Send a fallback error message
+            // so the conversation doesn't silently hang.
+            tracing::error!(
+                error = %error,
+                target = target,
+                "dispatch task failed, sending fallback error to user"
+            );
+            let _ = flush_text_via_action(
+                action_tx,
+                target,
+                &mut "Something went wrong processing that message. Please try again.".to_owned(),
+            )
+            .await;
+            anyhow::bail!("router task failed: {error}");
+        }
     }
 }
 

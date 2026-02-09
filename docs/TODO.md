@@ -8,6 +8,7 @@
 - ~~log rotation~~ ✅ **DONE** - Size and date-based rotation implemented
 - Don't save keys to memory!!!
 - need to be able to run coop in a way that it can restart itself
+- add coop specific info to system prompt 
 
 ## Gateway
 

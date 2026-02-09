@@ -100,12 +100,12 @@ impl Component for Footer {
         if pwd.len() > width {
             let half = width / 2;
             if half > 2 {
-                let start = &pwd[..half - 1];
-                let end_start = pwd.len().saturating_sub(half - 1);
+                let start = &pwd[..pwd.floor_char_boundary(half - 1)];
+                let end_start = pwd.ceil_char_boundary(pwd.len().saturating_sub(half - 1));
                 let end = &pwd[end_start..];
                 pwd = format!("{start}...{end}");
             } else {
-                pwd = pwd[..width].to_string();
+                pwd = pwd[..pwd.floor_char_boundary(width)].to_owned();
             }
         }
 

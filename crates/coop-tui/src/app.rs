@@ -90,7 +90,7 @@ fn format_tool_args(name: &str, args: &Value) -> String {
             // Show first line, truncate if long
             let first_line = cmd.lines().next().unwrap_or(cmd);
             if first_line.len() > 120 {
-                format!("{}…", &first_line[..120])
+                format!("{}…", &first_line[..first_line.floor_char_boundary(120)])
             } else if cmd.lines().count() > 1 {
                 format!("{first_line} …")
             } else {
@@ -119,7 +119,7 @@ fn format_tool_args(name: &str, args: &Value) -> String {
             // Generic: show compact JSON of arguments
             let s = serde_json::to_string(args).unwrap_or_default();
             if s.len() > 120 {
-                format!("{}…", &s[..120])
+                format!("{}…", &s[..s.floor_char_boundary(120)])
             } else {
                 s
             }
