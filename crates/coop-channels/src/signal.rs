@@ -16,7 +16,7 @@ use coop_core::{
 };
 use futures::StreamExt;
 use inbound::inbound_from_content;
-use presage::libsignal_service::content::{ContentBody, DataMessage};
+use presage::libsignal_service::content::{ContentBody, DataMessage, GroupContextV2};
 use presage::libsignal_service::prelude::Uuid;
 use presage::libsignal_service::protocol::ServiceId;
 use presage::manager::Registered;
@@ -486,6 +486,7 @@ async fn send_signal_action(manager: &mut SignalManager, action: SignalAction) -
             );
             let message = DataMessage {
                 body: Some(outbound.content),
+                group_v2: group_context_for_target(&target),
                 ..Default::default()
             };
             send_action_with_trace(manager, span, target, message, timestamp).await
@@ -520,6 +521,7 @@ async fn send_signal_action(manager: &mut SignalManager, action: SignalAction) -
                     target_author_aci: Some(target_author_aci),
                     target_sent_timestamp: Some(target_sent_timestamp),
                 }),
+                group_v2: group_context_for_target(&target),
                 ..Default::default()
             };
             send_action_with_trace(manager, span, target, message, timestamp).await
@@ -553,6 +555,7 @@ async fn send_signal_action(manager: &mut SignalManager, action: SignalAction) -
                     text: None,
                     ..Default::default()
                 }),
+                group_v2: group_context_for_target(&target),
                 ..Default::default()
             };
             send_action_with_trace(manager, span, target, message, timestamp).await
@@ -648,6 +651,22 @@ fn signal_content_body_name(content_body: &ContentBody) -> &'static str {
         ContentBody::ReceiptMessage(_) => "receipt_message",
         ContentBody::SynchronizeMessage(_) => "synchronize_message",
         _ => "unsupported",
+    }
+}
+
+/// Build `GroupContextV2` when the target is a group, `None` for direct messages.
+///
+/// Signal requires every `DataMessage` sent to a group to contain `group_v2`
+/// with the group's master key. Without it, recipients see the message as a
+/// direct message instead of a group message.
+fn group_context_for_target(target: &SignalTarget) -> Option<GroupContextV2> {
+    match target {
+        SignalTarget::Group { master_key } => Some(GroupContextV2 {
+            master_key: Some(master_key.clone()),
+            revision: Some(0),
+            ..Default::default()
+        }),
+        SignalTarget::Direct(_) => None,
     }
 }
 
