@@ -24,6 +24,38 @@ const TOOL_PREFIX: &str = "mcp_";
 /// Max retry attempts for transient errors.
 const MAX_RETRIES: u32 = 3;
 
+/// Parse an Anthropic API error response body into a friendly message.
+///
+/// Anthropic errors are JSON: `{"type":"error","error":{"type":"rate_limit_error","message":"..."}}`
+/// This extracts the human-readable message and error type instead of dumping raw JSON.
+fn format_api_error(status: reqwest::StatusCode, raw_body: &str) -> String {
+    #[derive(Deserialize)]
+    struct ApiErrorResponse {
+        error: ApiErrorDetail,
+    }
+
+    #[derive(Deserialize)]
+    struct ApiErrorDetail {
+        r#type: String,
+        message: String,
+    }
+
+    if let Ok(parsed) = serde_json::from_str::<ApiErrorResponse>(raw_body) {
+        let label = match parsed.error.r#type.as_str() {
+            "rate_limit_error" => "Rate limited",
+            "overloaded_error" => "API overloaded",
+            "authentication_error" => "Authentication failed",
+            "invalid_request_error" => "Invalid request",
+            "not_found_error" => "Not found",
+            "permission_error" => "Permission denied",
+            other => other,
+        };
+        format!("{label} ({status}): {}", parsed.error.message)
+    } else {
+        format!("Anthropic API error ({status}): {raw_body}")
+    }
+}
+
 /// Direct Anthropic provider with OAuth support.
 pub struct AnthropicProvider {
     client: Client,
@@ -134,7 +166,7 @@ impl AnthropicProvider {
 
             if !is_retryable || attempt == MAX_RETRIES {
                 let error_text = response.text().await.unwrap_or_default();
-                anyhow::bail!("Anthropic API error: {status} - {error_text}");
+                anyhow::bail!("{}", format_api_error(status, &error_text));
             }
 
             let error_text = response.text().await.unwrap_or_default();
@@ -158,11 +190,12 @@ impl AnthropicProvider {
 
             tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
 
-            last_err = Some(format!("{status} - {error_text}"));
+            last_err = Some(format_api_error(status, &error_text));
         }
 
         anyhow::bail!(
-            "Anthropic API error after retries: {}",
+            "Anthropic API error after {} retries: {}",
+            MAX_RETRIES,
             last_err.unwrap_or_default()
         );
     }
@@ -987,5 +1020,65 @@ mod tests {
         assert_eq!(usage.output_tokens, Some(50));
         assert_eq!(usage.cache_write_tokens, None);
         assert_eq!(usage.cache_read_tokens, None);
+    }
+
+    #[test]
+    fn format_api_error_parses_rate_limit_json() {
+        let body = r#"{"type":"error","error":{"type":"rate_limit_error","message":"Number of request tokens has exceeded your per-minute rate limit."}}"#;
+        let result = format_api_error(reqwest::StatusCode::TOO_MANY_REQUESTS, body);
+        assert_eq!(
+            result,
+            "Rate limited (429 Too Many Requests): Number of request tokens has exceeded your per-minute rate limit."
+        );
+    }
+
+    #[test]
+    fn format_api_error_parses_overloaded_json() {
+        let body = r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#;
+        let result = format_api_error(reqwest::StatusCode::SERVICE_UNAVAILABLE, body);
+        assert_eq!(
+            result,
+            "API overloaded (503 Service Unavailable): Overloaded"
+        );
+    }
+
+    #[test]
+    fn format_api_error_parses_auth_error_json() {
+        let body = r#"{"type":"error","error":{"type":"authentication_error","message":"Invalid API key."}}"#;
+        let result = format_api_error(reqwest::StatusCode::UNAUTHORIZED, body);
+        assert_eq!(
+            result,
+            "Authentication failed (401 Unauthorized): Invalid API key."
+        );
+    }
+
+    #[test]
+    fn format_api_error_falls_back_on_non_json() {
+        let body = "plain text error";
+        let result = format_api_error(reqwest::StatusCode::INTERNAL_SERVER_ERROR, body);
+        assert_eq!(
+            result,
+            "Anthropic API error (500 Internal Server Error): plain text error"
+        );
+    }
+
+    #[test]
+    fn format_api_error_falls_back_on_unexpected_json_shape() {
+        let body = r#"{"unexpected": "format"}"#;
+        let result = format_api_error(reqwest::StatusCode::BAD_REQUEST, body);
+        assert_eq!(
+            result,
+            r#"Anthropic API error (400 Bad Request): {"unexpected": "format"}"#
+        );
+    }
+
+    #[test]
+    fn format_api_error_handles_unknown_error_type() {
+        let body = r#"{"type":"error","error":{"type":"new_error_type","message":"Something new happened."}}"#;
+        let result = format_api_error(reqwest::StatusCode::BAD_REQUEST, body);
+        assert_eq!(
+            result,
+            "new_error_type (400 Bad Request): Something new happened."
+        );
     }
 }
