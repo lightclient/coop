@@ -364,11 +364,10 @@ async fn receive_task(
                     let sender = content.metadata.sender.raw_uuid().to_string();
                     let content_body = signal_content_body_name(&content.body);
                     let timestamp = content.metadata.timestamp;
-                    let needs_receipt = content.metadata.needs_receipt
-                        || matches!(
-                            &content.body,
-                            ContentBody::DataMessage(_) | ContentBody::EditMessage(_)
-                        );
+                    let needs_receipt = matches!(
+                        &content.body,
+                        ContentBody::DataMessage(_) | ContentBody::EditMessage(_)
+                    );
 
                     let receive_span = info_span!(
                         "signal_receive_event",
