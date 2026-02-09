@@ -135,19 +135,24 @@ Tracing: When modifying tracing spans or events, verify by running the binary wi
 
 ## Tracing (Dev)
 
-Coop uses `tracing` with layered subscribers. Console output is always on. JSONL file output is opt-in via environment variable.
+Coop uses `tracing` with layered subscribers. Console output is always on. JSONL file output is opt-in via environment variable with automatic size and date-based rotation.
 
 ### Quick start
 ```bash
-just trace          # TUI + traces.jsonl
-just trace-gateway  # daemon + traces.jsonl
-just trace-errors   # grep errors from traces
+just trace          # TUI + traces.jsonl (auto-rotated)
+just trace-gateway  # daemon + traces.jsonl (auto-rotated)
+just trace-errors   # grep errors from current file
 just trace-tools    # grep tool executions
 just trace-turns    # grep agent turns
+just trace-list     # list current file + dated archives
+just trace-grep 'pattern'  # search current + all archives
+just trace-clean 5  # keep only 5 most recent archives
+just trace-size     # total size of current + archives
 ```
 
 ### Environment variables
-- `COOP_TRACE_FILE` — path to JSONL trace file (e.g. `traces.jsonl`). Enables file output at `debug` level.
+- `COOP_TRACE_FILE` — path to the current JSONL trace file (e.g. `traces.jsonl`). This file always contains the latest traces. When rotated, it is renamed to a dated archive and a fresh file is created at the same path. Enables file output at `debug` level.
+- `COOP_TRACE_MAX_SIZE` — maximum file size in bytes before rotation (default: 50MB, e.g. `52428800`)
 - `RUST_LOG` — filter for both console and file (default: `info` console, `debug` file)
 
 ### Span hierarchy
@@ -165,7 +170,42 @@ The `traces.jsonl` file contains one JSON object per line. Each object has:
 
 Filter with standard tools: `grep`, `jq`, `rg`. The `just trace-*` recipes provide common queries.
 
-Each process run starts with a `"coop starting"` event containing version and PID — use `grep "coop starting"` to find run boundaries in the append-only file.
+Each process run starts with a `"coop starting"` event containing version and PID — use `grep "coop starting"` to find run boundaries.
+
+### Log Rotation
+
+`COOP_TRACE_FILE` always points to the **current, active** trace file. When rotation triggers, the current file is renamed to a dated archive and a fresh file is created at the original path.
+
+Rotation triggers when either condition is met:
+- **Date change** (UTC midnight)
+- **Size limit** exceeded (default 50MB, configurable via `COOP_TRACE_MAX_SIZE`)
+
+#### File Layout
+
+```
+traces.jsonl                     ← always the current file (stable path)
+traces.2026-02-07.jsonl          ← archived: full day
+traces.2026-02-08.jsonl          ← archived: rotated at midnight
+traces.2026-02-08.001.jsonl      ← archived: size limit hit same day
+```
+
+On startup, if `traces.jsonl` already exists from a previous run on a different date (or is already over the size limit), it is archived before writing begins.
+
+#### Workflow
+
+```bash
+# tail / follow / grep always work on the stable path:
+tail -f traces.jsonl
+grep '"level":"ERROR"' traces.jsonl
+
+# search across current + all archives:
+just trace-grep 'tool_execute'
+
+# manage archives:
+just trace-list                  # current file + archives
+just trace-clean 5               # keep 5 most recent archives
+just trace-archive 7             # move archives older than 7 days
+```
 
 ### Debugging with traces
 

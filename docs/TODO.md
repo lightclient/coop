@@ -5,7 +5,7 @@
 - make it clear that deps like sccache need to be installed to compile
 - make the just follow trace script print the message and tool messages more
   nicely
-- log rotation
+- ~~log rotation~~ ✅ **DONE** - Size and date-based rotation implemented
 - Don't save keys to memory!!!
 - need to be able to run coop in a way that it can restart itself
 
