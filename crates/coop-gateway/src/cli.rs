@@ -31,7 +31,17 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         command: SignalCommands,
     },
+    Memory {
+        #[command(subcommand)]
+        command: MemoryCommands,
+    },
     Version,
+}
+
+#[derive(Subcommand)]
+pub(crate) enum MemoryCommands {
+    /// Rebuild the vector search index from stored embeddings.
+    RebuildIndex,
 }
 
 #[derive(Subcommand)]

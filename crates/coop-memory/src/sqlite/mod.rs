@@ -196,6 +196,50 @@ impl SqliteMemory {
         Ok(())
     }
 
+    pub fn rebuild_vec_index(&self) -> Result<usize> {
+        if !self.vector_search_enabled() {
+            return Ok(0);
+        }
+
+        let now_ms = helpers::now_ms();
+        let conn = self.conn.lock().expect("memory db mutex poisoned");
+
+        let entries: Vec<(i64, String)> = {
+            let mut stmt = conn.prepare(
+                "SELECT e.observation_id, e.embedding
+                 FROM observation_embeddings e
+                 JOIN observations o ON o.id = e.observation_id
+                 WHERE o.agent_id = ?
+                   AND (o.expires_at IS NULL OR o.expires_at > ?)",
+            )?;
+            stmt.query_map(params![self.agent_id, now_ms], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+
+        if let Err(error) = conn.execute("DELETE FROM observations_vec", []) {
+            self.disable_vector_search(&error, "rebuild_clear");
+            return Ok(0);
+        }
+
+        let mut count = 0;
+        for (id, embedding_json) in &entries {
+            if let Err(error) = conn.execute(
+                "INSERT INTO observations_vec(rowid, embedding) VALUES (?, ?)",
+                params![id, embedding_json],
+            ) {
+                self.disable_vector_search(&error, "rebuild_insert");
+                return Ok(count);
+            }
+            count += 1;
+        }
+
+        drop(conn);
+        debug!(rebuilt_entries = count, "vec index rebuilt");
+        Ok(count)
+    }
+
     pub(super) fn remove_embedding(&self, observation_id: i64) -> Result<()> {
         let conn = self.conn.lock().expect("memory db mutex poisoned");
         conn.execute(
@@ -478,6 +522,30 @@ impl Memory for SqliteMemory {
         &self,
         config: &MemoryMaintenanceConfig,
     ) -> Result<MemoryMaintenanceReport> {
-        maintenance::run(self, config)
+        let result = maintenance::run(self, config)?;
+
+        for id in &result.new_summary_ids {
+            if let Some(obs) = self.load_observation(*id)? {
+                let now = helpers::now_ms();
+                if let Some(embedding) = self
+                    .embedding_for_observation(&obs.title, &obs.facts, "maintenance_summary")
+                    .await
+                    && let Err(error) = self.persist_embedding(*id, &embedding, now)
+                {
+                    warn!(
+                        observation_id = id,
+                        error = %error,
+                        "failed to embed maintenance summary"
+                    );
+                }
+            }
+        }
+
+        Ok(result.report)
+    }
+
+    #[instrument(skip(self))]
+    async fn rebuild_index(&self) -> Result<usize> {
+        self.rebuild_vec_index()
     }
 }

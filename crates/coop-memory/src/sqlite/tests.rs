@@ -726,6 +726,215 @@ fn sqlite_vec_extension_loaded() {
     drop(conn);
 }
 
+fn vec_row_count(memory: &SqliteMemory) -> i64 {
+    let conn = memory.conn.lock().expect("memory db mutex poisoned");
+    conn.query_row("SELECT COUNT(*) FROM observations_vec", [], |row| {
+        row.get::<_, i64>(0)
+    })
+    .unwrap()
+}
+
+#[tokio::test]
+async fn rebuild_vec_index_backfills_from_embeddings() {
+    let embedder = Arc::new(RecordingEmbedder::new(8));
+    let memory = memory_with(Some(embedder as Arc<dyn EmbeddingProvider>), None);
+
+    memory.write(sample_obs("alpha", &["one"])).await.unwrap();
+    memory.write(sample_obs("beta", &["two"])).await.unwrap();
+    assert_eq!(vec_row_count(&memory), 2);
+    assert_eq!(embedding_row_count(&memory), 2);
+
+    // Simulate vec table losing data (e.g., corruption)
+    {
+        let conn = memory.conn.lock().expect("memory db mutex poisoned");
+        conn.execute("DELETE FROM observations_vec", []).unwrap();
+        drop(conn);
+    }
+    assert_eq!(vec_row_count(&memory), 0);
+
+    let rebuilt = memory.rebuild_vec_index().unwrap();
+    assert_eq!(rebuilt, 2);
+    assert_eq!(vec_row_count(&memory), 2);
+}
+
+#[tokio::test]
+async fn rebuild_vec_index_skips_expired_observations() {
+    let embedder = Arc::new(RecordingEmbedder::new(8));
+    let memory = memory_with(Some(embedder as Arc<dyn EmbeddingProvider>), None);
+
+    let outcome = memory.write(sample_obs("keeper", &["keep"])).await.unwrap();
+    let WriteOutcome::Added(keep_id) = outcome else {
+        panic!("expected add");
+    };
+
+    let outcome = memory
+        .write(sample_obs("expiring", &["expire"]))
+        .await
+        .unwrap();
+    let WriteOutcome::Added(expire_id) = outcome else {
+        panic!("expected add");
+    };
+    assert_eq!(vec_row_count(&memory), 2);
+
+    // Expire the second observation
+    {
+        let now = chrono::Utc::now().timestamp_millis();
+        let conn = memory.conn.lock().expect("memory db mutex poisoned");
+        conn.execute(
+            "UPDATE observations SET expires_at = ? WHERE id = ?",
+            rusqlite::params![now - 1000, expire_id],
+        )
+        .unwrap();
+        drop(conn);
+    }
+
+    let rebuilt = memory.rebuild_vec_index().unwrap();
+    assert_eq!(rebuilt, 1);
+    assert_eq!(vec_row_count(&memory), 1);
+
+    // The keeper's entry should still work in vec search
+    let results = memory
+        .search(&MemoryQuery {
+            text: Some("keeper".to_owned()),
+            stores: vec!["shared".to_owned()],
+            limit: 10,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].id, keep_id);
+}
+
+#[tokio::test]
+async fn archive_cleans_vec_entries() {
+    let embedder = Arc::new(RecordingEmbedder::new(8));
+    let memory = memory_with(Some(embedder as Arc<dyn EmbeddingProvider>), None);
+
+    let outcome = memory
+        .write(sample_obs("will archive", &["old"]))
+        .await
+        .unwrap();
+    let WriteOutcome::Added(id) = outcome else {
+        panic!("expected add");
+    };
+    assert_eq!(vec_row_count(&memory), 1);
+    assert_eq!(embedding_row_count(&memory), 1);
+
+    let stale_ms = chrono::Utc::now().timestamp_millis() - (3 * 86_400_000);
+    set_observation_created_at(&memory, id, stale_ms);
+
+    let config = MemoryMaintenanceConfig {
+        archive_after_days: 1,
+        delete_archive_after_days: 365,
+        compress_after_days: 365,
+        compression_min_cluster_size: 10,
+        max_rows_per_run: 200,
+    };
+
+    let report = memory.run_maintenance(&config).await.unwrap();
+    assert_eq!(report.archived_rows, 1);
+
+    // Vec entry should be cleaned up (no orphan)
+    assert_eq!(vec_row_count(&memory), 0);
+    // Embedding row cascaded away with the observation
+    assert_eq!(embedding_row_count(&memory), 0);
+}
+
+#[tokio::test]
+async fn compression_embeds_summary_observations() {
+    let embedder = Arc::new(RecordingEmbedder::new(8));
+    let memory = memory_with(Some(embedder as Arc<dyn EmbeddingProvider>), None);
+
+    for fact in ["alpha", "beta", "gamma"] {
+        let outcome = memory
+            .write(sample_obs("release notes", &[fact]))
+            .await
+            .unwrap();
+        assert!(matches!(outcome, WriteOutcome::Added(_)));
+    }
+    assert_eq!(embedding_row_count(&memory), 3);
+    assert_eq!(vec_row_count(&memory), 3);
+
+    let stale_ms = chrono::Utc::now().timestamp_millis() - (3 * 86_400_000);
+    {
+        let conn = memory.conn.lock().expect("memory db mutex poisoned");
+        conn.execute(
+            "UPDATE observations SET created_at = ?, updated_at = ? WHERE agent_id = ?",
+            rusqlite::params![stale_ms, stale_ms, "coop"],
+        )
+        .unwrap();
+    }
+
+    let config = MemoryMaintenanceConfig {
+        archive_after_days: 30,
+        delete_archive_after_days: 365,
+        compress_after_days: 1,
+        compression_min_cluster_size: 3,
+        max_rows_per_run: 200,
+    };
+
+    let report = memory.run_maintenance(&config).await.unwrap();
+    assert_eq!(report.summary_rows, 1);
+    assert_eq!(report.compressed_rows, 3);
+
+    // The summary observation should have an embedding
+    let active = memory
+        .search(&MemoryQuery {
+            text: Some("release notes".to_owned()),
+            stores: vec!["shared".to_owned()],
+            limit: 10,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(active.len(), 1);
+
+    let summary_id = active[0].id;
+
+    // Verify embedding exists for the summary
+    let has_embedding: bool = {
+        let conn = memory.conn.lock().expect("memory db mutex poisoned");
+        conn.query_row(
+            "SELECT COUNT(*) > 0 FROM observation_embeddings WHERE observation_id = ?",
+            rusqlite::params![summary_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    assert!(
+        has_embedding,
+        "summary observation should have an embedding"
+    );
+
+    // Vec table should contain the summary's embedding
+    assert!(vec_row_count(&memory) >= 1);
+}
+
+#[tokio::test]
+async fn rebuild_index_via_trait() {
+    let embedder = Arc::new(RecordingEmbedder::new(8));
+    let memory = memory_with(Some(embedder as Arc<dyn EmbeddingProvider>), None);
+
+    memory
+        .write(sample_obs("trait test", &["one"]))
+        .await
+        .unwrap();
+    assert_eq!(vec_row_count(&memory), 1);
+
+    {
+        let conn = memory.conn.lock().expect("memory db mutex poisoned");
+        conn.execute("DELETE FROM observations_vec", []).unwrap();
+        drop(conn);
+    }
+    assert_eq!(vec_row_count(&memory), 0);
+
+    // Call through the Memory trait method
+    let rebuilt = Memory::rebuild_index(&memory).await.unwrap();
+    assert_eq!(rebuilt, 1);
+    assert_eq!(vec_row_count(&memory), 1);
+}
+
 #[test]
 fn trust_roundtrip_helpers() {
     assert_eq!(trust_from_str("full"), TrustLevel::Full);

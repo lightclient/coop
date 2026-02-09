@@ -3,11 +3,16 @@ use coop_core::prompt::count_tokens;
 use rusqlite::params;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
-use tracing::info;
+use tracing::{debug, info, warn};
 
 use crate::types::{MemoryMaintenanceConfig, MemoryMaintenanceReport};
 
 use super::{SqliteMemory, helpers};
+
+pub(super) struct MaintenanceResult {
+    pub report: MemoryMaintenanceReport,
+    pub new_summary_ids: Vec<i64>,
+}
 
 const DAY_MS: i64 = 86_400_000;
 
@@ -53,6 +58,7 @@ struct CompressionStats {
     scanned: usize,
     compressed: usize,
     summaries: usize,
+    summary_ids: Vec<i64>,
 }
 
 #[derive(Debug, Default)]
@@ -70,7 +76,7 @@ struct CleanupStats {
 pub(super) fn run(
     memory: &SqliteMemory,
     config: &MemoryMaintenanceConfig,
-) -> Result<MemoryMaintenanceReport> {
+) -> Result<MaintenanceResult> {
     let started = Instant::now();
     info!(
         archive_after_days = config.archive_after_days,
@@ -121,7 +127,10 @@ pub(super) fn run(
         "memory maintenance run complete"
     );
 
-    Ok(report)
+    Ok(MaintenanceResult {
+        report,
+        new_summary_ids: compression.summary_ids,
+    })
 }
 
 #[allow(clippy::too_many_lines)]
@@ -368,6 +377,7 @@ fn compress_stale_observations(
 
         stats.compressed = stats.compressed.saturating_add(cluster.len());
         stats.summaries = stats.summaries.saturating_add(1);
+        stats.summary_ids.push(summary_id);
     }
 
     drop(conn);
@@ -528,6 +538,27 @@ fn archive_observations(
     }
 
     tx.commit()?;
+
+    if memory.vector_search_enabled() {
+        for row in &candidates {
+            if let Err(error) = conn.execute(
+                "DELETE FROM observations_vec WHERE rowid = ?",
+                params![row.id],
+            ) {
+                warn!(
+                    observation_id = row.id,
+                    error = %error,
+                    "failed to clean archived observation from vec index"
+                );
+                memory.disable_vector_search(&error, "archive_vec_cleanup");
+                break;
+            }
+        }
+        debug!(
+            cleaned_vec_entries = candidates.len(),
+            "cleaned archived observations from vec index"
+        );
+    }
 
     drop(conn);
     Ok(ArchiveStats {

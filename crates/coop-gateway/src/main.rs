@@ -45,7 +45,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, info, info_span, warn};
 
-use crate::cli::{Cli, Commands, SignalCommands};
+use crate::cli::{Cli, Commands, MemoryCommands, SignalCommands};
 use crate::config::{Config, MemoryRetentionConfig};
 use crate::gateway::Gateway;
 use crate::memory_embedding::build_embedder;
@@ -75,7 +75,7 @@ async fn main() -> Result<()> {
 
     let console_log = matches!(
         cli.command,
-        Commands::Start | Commands::Signal { .. } | Commands::Version
+        Commands::Start | Commands::Signal { .. } | Commands::Memory { .. } | Commands::Version
     );
     let _tracing_guard = tracing_setup::init(console_log);
 
@@ -91,6 +91,7 @@ async fn main() -> Result<()> {
         Commands::Chat { user } => cmd_chat(cli.config.as_deref(), user.as_deref()).await,
         Commands::Attach { session } => cmd_attach(cli.config.as_deref(), &session).await,
         Commands::Signal { command } => cmd_signal(cli.config.as_deref(), command).await,
+        Commands::Memory { command } => cmd_memory(cli.config.as_deref(), command).await,
         Commands::Version => {
             println!("🐔 coop {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -904,6 +905,37 @@ async fn cmd_attach(config_path: Option<&str>, session: &str) -> Result<()> {
 
     tui.stop()?;
     println!("👋 Goodbye!");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// cmd_memory
+// ---------------------------------------------------------------------------
+
+async fn cmd_memory(config_path: Option<&str>, command: MemoryCommands) -> Result<()> {
+    let config_file = Config::find_config_path(config_path);
+    let config = Config::load(&config_file)
+        .with_context(|| format!("loading config from {}", config_file.display()))?;
+
+    let config_dir = config_file
+        .parent()
+        .unwrap_or(&PathBuf::from("."))
+        .to_path_buf();
+
+    let provider: Arc<dyn Provider> = Arc::new(
+        AnthropicProvider::from_env(&config.agent.model)
+            .context("failed to initialize Anthropic provider")?,
+    );
+
+    let memory = init_memory_store(&config, &config_dir, provider)?;
+
+    match command {
+        MemoryCommands::RebuildIndex => {
+            let count = memory.rebuild_index().await?;
+            println!("rebuilt vec index: {count} entries");
+        }
+    }
+
     Ok(())
 }
 

@@ -53,4 +53,11 @@ pub trait Memory: Send + Sync {
         &self,
         config: &MemoryMaintenanceConfig,
     ) -> Result<MemoryMaintenanceReport>;
+
+    /// Rebuild the vector search index from stored embeddings.
+    /// Returns the number of entries rebuilt. Implementations without
+    /// vector indexes should return `Ok(0)`.
+    async fn rebuild_index(&self) -> Result<usize> {
+        Ok(0)
+    }
 }
