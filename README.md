@@ -41,7 +41,7 @@ This is managed by the gateway, not via flakey prompt coercion.
 ## Install
 
 ```bash
-RUSTC_WRAPPER="" cargo install --git https://github.com/lightclient/coop coop-gateway
+RUSTC_WRAPPER="" CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=cc cargo install --git https://github.com/lightclient/coop coop-gateway
 ```
 
 This builds and installs the `coop` binary to `~/.cargo/bin/`.
