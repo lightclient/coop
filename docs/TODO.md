@@ -12,6 +12,8 @@
 - let user interject in the middle of a stream with new prompt / info
 - inject user AGENTS.md
 - trace-follow also needs to create destination folder if it doesn't exist
+- cron seems to be flushing all turns at the end to the chat, but still thinks
+  it can't send a message
 
 ## Gateway
 
