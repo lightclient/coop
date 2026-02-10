@@ -94,11 +94,23 @@ fn try_reload(config_path: &Path, config: &SharedConfig) {
 
     let config_dir = config_path.parent().unwrap_or_else(|| Path::new("."));
     let report = config_check::validate_config(config_path, config_dir);
-    if report.has_errors() {
-        let errors: Vec<_> = report
-            .results
+    // Filter out environment-dependent checks (API keys) — if the server
+    // started successfully the env was already validated; these can't change
+    // via config file modification and would block every hot-reload in
+    // environments where the env var isn't re-exported to the checker.
+    let config_errors: Vec<_> = report
+        .results
+        .iter()
+        .filter(|r| {
+            !r.passed
+                && r.severity == config_check::Severity::Error
+                && r.name != "api_key_present"
+                && r.name != "memory_embedding_api_key"
+        })
+        .collect();
+    if !config_errors.is_empty() {
+        let errors: Vec<_> = config_errors
             .iter()
-            .filter(|r| !r.passed && r.severity == config_check::Severity::Error)
             .map(|r| format!("{}: {}", r.name, r.message))
             .collect();
         warn!(errors = ?errors, "config reload rejected: validation errors");
