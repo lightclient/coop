@@ -12,6 +12,7 @@ mod gateway;
 mod heartbeat;
 mod init;
 mod init_templates;
+mod injection;
 mod memory_embedding;
 mod memory_prompt_index;
 mod memory_reconcile;

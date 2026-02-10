@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use crate::config::{Config, SharedConfig};
 use crate::gateway::Gateway;
+use crate::injection::SessionInjection;
 use crate::trust::resolve_trust;
 
 #[derive(Debug, Clone)]
@@ -58,6 +59,61 @@ impl MessageRouter {
         &self,
         msg: &InboundMessage,
         event_tx: mpsc::Sender<TurnEvent>,
+    ) -> Result<RouteDecision> {
+        self.dispatch_inner(msg, event_tx, None).await
+    }
+
+    pub(crate) async fn dispatch_injection(
+        &self,
+        injection: &SessionInjection,
+        event_tx: mpsc::Sender<TurnEvent>,
+    ) -> Result<RouteDecision> {
+        let decision = RouteDecision {
+            session_key: injection.target.clone(),
+            trust: injection.trust,
+            user_name: injection.user_name.clone(),
+        };
+
+        let span = info_span!(
+            "route_injection",
+            session = %decision.session_key,
+            trust = ?decision.trust,
+            user = ?decision.user_name,
+            source = ?injection.source,
+        );
+        debug!(
+            parent: &span,
+            prompt_channel = ?injection.prompt_channel,
+            content_len = injection.content.len(),
+            "routing session injection"
+        );
+
+        self.gateway
+            .run_turn_with_trust(
+                &decision.session_key,
+                &injection.content,
+                decision.trust,
+                decision.user_name.as_deref(),
+                injection.prompt_channel.as_deref(),
+                event_tx,
+            )
+            .instrument(span)
+            .await?;
+
+        Ok(decision)
+    }
+
+    /// Dispatch with an explicit channel override for prompt context.
+    ///
+    /// When `prompt_channel` is `Some`, the prompt builder uses it for
+    /// channel-specific formatting instructions instead of `msg.channel`.
+    /// This lets cron jobs format for the delivery channel (e.g. Signal)
+    /// while still routing through the cron session.
+    async fn dispatch_inner(
+        &self,
+        msg: &InboundMessage,
+        event_tx: mpsc::Sender<TurnEvent>,
+        prompt_channel: Option<&str>,
     ) -> Result<RouteDecision> {
         let decision = self.route(msg);
 
@@ -133,13 +189,14 @@ impl MessageRouter {
             source = %msg.channel,
         );
         debug!(parent: &span, sender = %msg.sender, "routing message");
+        let channel = prompt_channel.unwrap_or(&msg.channel);
         self.gateway
             .run_turn_with_trust(
                 &decision.session_key,
                 &msg.content,
                 decision.trust,
                 decision.user_name.as_deref(),
-                Some(&msg.channel),
+                Some(channel),
                 event_tx,
             )
             .instrument(span)
@@ -208,11 +265,25 @@ impl MessageRouter {
         &self,
         msg: &InboundMessage,
     ) -> Result<(RouteDecision, String)> {
+        self.dispatch_collect_text_with_channel(msg, None).await
+    }
+
+    /// Like `dispatch_collect_text` but with an explicit channel override for
+    /// prompt context (used by cron to format responses for delivery channels).
+    pub(crate) async fn dispatch_collect_text_with_channel(
+        &self,
+        msg: &InboundMessage,
+        prompt_channel: Option<String>,
+    ) -> Result<(RouteDecision, String)> {
         let (event_tx, mut event_rx) = mpsc::channel(64);
         let router = self.clone();
         let message = msg.clone();
 
-        let dispatch_task = tokio::spawn(async move { router.dispatch(&message, event_tx).await });
+        let dispatch_task = tokio::spawn(async move {
+            router
+                .dispatch_inner(&message, event_tx, prompt_channel.as_deref())
+                .await
+        });
 
         let mut text = String::new();
         let mut fallback_assistant = String::new();
@@ -243,6 +314,59 @@ impl MessageRouter {
             Ok(result) => result?,
             Err(error) => anyhow::bail!("router task failed: {error}"),
         };
+
+        if text.is_empty() {
+            text = fallback_assistant;
+        }
+
+        Ok((decision, text))
+    }
+
+    pub(crate) async fn inject_collect_text(
+        &self,
+        injection: &SessionInjection,
+    ) -> Result<(RouteDecision, String)> {
+        let (event_tx, mut event_rx) = mpsc::channel(64);
+        let router = self.clone();
+        let injection = injection.clone();
+
+        let dispatch_task =
+            tokio::spawn(async move { router.dispatch_injection(&injection, event_tx).await });
+
+        let mut text = String::new();
+        let mut fallback_assistant = String::new();
+        let mut turn_error: Option<String> = None;
+
+        while let Some(event) = event_rx.recv().await {
+            match event {
+                TurnEvent::TextDelta(delta) => {
+                    text.push_str(&delta);
+                }
+                TurnEvent::AssistantMessage(message) => {
+                    if fallback_assistant.is_empty() {
+                        fallback_assistant = message.text();
+                    }
+                }
+                TurnEvent::Error(message) => {
+                    turn_error = Some(message);
+                }
+                TurnEvent::Done(_) => {
+                    break;
+                }
+                TurnEvent::ToolStart { .. }
+                | TurnEvent::ToolResult { .. }
+                | TurnEvent::Compacting => {}
+            }
+        }
+
+        let decision = match dispatch_task.await {
+            Ok(result) => result?,
+            Err(error) => anyhow::bail!("router task failed: {error}"),
+        };
+
+        if let Some(message) = turn_error {
+            anyhow::bail!(message);
+        }
 
         if text.is_empty() {
             text = fallback_assistant;
@@ -373,6 +497,7 @@ fn parse_explicit_session_kind(session: &str, agent_id: &str) -> Option<SessionK
 mod tests {
     use super::*;
     use crate::config::shared_config;
+    use crate::injection::{InjectionSource, SessionInjection};
     use chrono::Utc;
     use coop_core::Provider;
     use coop_core::fakes::FakeProvider;
@@ -874,6 +999,126 @@ match = ["signal:bob-uuid"]
             SessionKind::Dm("signal:alice-uuid".to_owned())
         );
         assert_eq!(response, "hi from fake");
+    }
+
+    #[tokio::test]
+    async fn inject_collect_text_runs_turn_on_target_session() {
+        let workspace = test_workspace();
+        let config = test_config();
+        let provider: Arc<dyn Provider> = Arc::new(FakeProvider::new("injection reply"));
+        let executor = Arc::new(DefaultExecutor::new());
+        let shared = shared_config(config);
+        let gateway = Arc::new(
+            Gateway::new(
+                Arc::clone(&shared),
+                workspace.path().to_path_buf(),
+                provider,
+                executor,
+                None,
+                None,
+            )
+            .unwrap(),
+        );
+        let router = MessageRouter::new(shared, Arc::clone(&gateway));
+
+        let target = SessionKey {
+            agent_id: "reid".to_owned(),
+            kind: SessionKind::Dm("signal:alice-uuid".to_owned()),
+        };
+
+        let injection = SessionInjection {
+            target: target.clone(),
+            content: "summarize this".to_owned(),
+            trust: TrustLevel::Full,
+            user_name: Some("alice".to_owned()),
+            prompt_channel: Some("signal".to_owned()),
+            source: InjectionSource::Cron("heartbeat".to_owned()),
+        };
+
+        let (decision, response) = router.inject_collect_text(&injection).await.unwrap();
+
+        assert_eq!(decision.session_key, target);
+        assert_eq!(decision.trust, TrustLevel::Full);
+        assert_eq!(response, "injection reply");
+        assert_eq!(gateway.session_message_count(&decision.session_key), 2);
+    }
+
+    #[tokio::test]
+    async fn inject_collect_text_uses_explicit_trust() {
+        let workspace = test_workspace();
+        let config = test_config();
+        let provider: Arc<dyn Provider> = Arc::new(FakeProvider::new("public injection reply"));
+        let executor = Arc::new(DefaultExecutor::new());
+        let shared = shared_config(config);
+        let gateway = Arc::new(
+            Gateway::new(
+                Arc::clone(&shared),
+                workspace.path().to_path_buf(),
+                provider,
+                executor,
+                None,
+                None,
+            )
+            .unwrap(),
+        );
+        let router = MessageRouter::new(shared, Arc::clone(&gateway));
+
+        let injection = SessionInjection {
+            target: SessionKey {
+                agent_id: "reid".to_owned(),
+                kind: SessionKind::Dm("signal:mallory-uuid".to_owned()),
+            },
+            content: "announce something".to_owned(),
+            trust: TrustLevel::Public,
+            user_name: None,
+            prompt_channel: Some("signal".to_owned()),
+            source: InjectionSource::System,
+        };
+
+        let (decision, response) = router.inject_collect_text(&injection).await.unwrap();
+
+        assert_eq!(decision.trust, TrustLevel::Public);
+        assert_eq!(response, "public injection reply");
+        assert_eq!(gateway.session_message_count(&decision.session_key), 2);
+    }
+
+    #[tokio::test]
+    async fn inject_collect_text_returns_err_on_turn_error() {
+        let workspace = test_workspace();
+        let config = test_config();
+        let provider: Arc<dyn Provider> = Arc::new(FailingProvider::new("injection failed"));
+        let executor = Arc::new(DefaultExecutor::new());
+        let shared = shared_config(config);
+        let gateway = Arc::new(
+            Gateway::new(
+                Arc::clone(&shared),
+                workspace.path().to_path_buf(),
+                provider,
+                executor,
+                None,
+                None,
+            )
+            .unwrap(),
+        );
+        let router = MessageRouter::new(shared, gateway);
+
+        let injection = SessionInjection {
+            target: SessionKey {
+                agent_id: "reid".to_owned(),
+                kind: SessionKind::Dm("signal:alice-uuid".to_owned()),
+            },
+            content: "announce".to_owned(),
+            trust: TrustLevel::Full,
+            user_name: Some("alice".to_owned()),
+            prompt_channel: Some("signal".to_owned()),
+            source: InjectionSource::Cron("heartbeat".to_owned()),
+        };
+
+        let result = router.inject_collect_text(&injection).await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("injection failed"), "unexpected error: {err}");
     }
 
     fn make_router_and_gateway(config: &Config) -> (MessageRouter, Arc<Gateway>) {

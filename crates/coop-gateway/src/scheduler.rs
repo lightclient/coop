@@ -1,6 +1,8 @@
 use anyhow::Result;
 use chrono::Utc;
-use coop_core::{InboundKind, InboundMessage, OutboundMessage};
+use coop_core::{
+    InboundKind, InboundMessage, OutboundMessage, SessionKey, SessionKind, TrustLevel,
+};
 use cron::Schedule;
 use std::path::Path;
 use std::str::FromStr;
@@ -12,6 +14,7 @@ use tracing::{Instrument, debug, error, info, info_span, warn};
 
 use crate::config::{Config, CronConfig, SharedConfig};
 use crate::heartbeat::{HeartbeatResult, is_heartbeat_content_empty, strip_heartbeat_token};
+use crate::injection::{InjectionSource, SessionInjection};
 use crate::router::MessageRouter;
 
 /// Sender for delivering cron output to channels.
@@ -271,6 +274,7 @@ async fn fire_cron(
 
         let config_snapshot = shared_config.load();
         let delivery_targets = resolve_cron_delivery_targets(&config_snapshot, cfg);
+        let agent_id = config_snapshot.agent.id.clone();
 
         // Skip LLM call for empty HEARTBEAT.md
         if should_skip_heartbeat(&config_snapshot, &cfg.message) {
@@ -283,11 +287,20 @@ async fn fire_cron(
             None => format!("cron:{}", cfg.name),
         };
 
+        // Determine the delivery channel for prompt context. When responses
+        // will be delivered to Signal, the prompt builder should format for
+        // Signal (plain text, conversational tone) instead of the generic
+        // "cron" channel which has no formatting instructions.
+        let prompt_channel = delivery_targets
+            .first()
+            .map(|(channel, _)| channel.clone());
+
         let content = if delivery_targets.is_empty() {
             cfg.message.clone()
         } else {
             format!(
-                "[Your response will be delivered to the user. Reply HEARTBEAT_OK if nothing needs attention.]\n\n{}",
+                "[Your response will be delivered to the user via {}. Reply HEARTBEAT_OK if nothing needs attention. Do not use signal_send — your response is delivered automatically.]\n\n{}",
+                prompt_channel.as_deref().unwrap_or("messaging"),
                 cfg.message
             )
         };
@@ -304,7 +317,10 @@ async fn fire_cron(
             message_timestamp: None,
         };
 
-        match router.dispatch_collect_text(&inbound).await {
+        match router
+            .dispatch_collect_text_with_channel(&inbound, prompt_channel)
+            .await
+        {
             Ok((decision, response)) => {
                 info!(
                     session = %decision.session_key,
@@ -323,13 +339,80 @@ async fn fire_cron(
                     }
                     HeartbeatResult::Deliver(content) => {
                         for (channel, target) in &delivery_targets {
-                            deliver_to_target(channel, target, &content, deliver_tx).await;
+                            announce_to_session(
+                                &cfg.name,
+                                &content,
+                                channel,
+                                target,
+                                &agent_id,
+                                router,
+                                deliver_tx,
+                            )
+                            .await;
                         }
                     }
                 }
             }
             Err(e) => {
                 error!(error = %e, "cron dispatch failed");
+            }
+        }
+    }
+    .instrument(span)
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn announce_to_session(
+    cron_name: &str,
+    cron_output: &str,
+    channel: &str,
+    target: &str,
+    agent_id: &str,
+    router: &MessageRouter,
+    deliver_tx: Option<&DeliverySender>,
+) {
+    if target.starts_with("group:") {
+        deliver_to_target(channel, target, cron_output, deliver_tx).await;
+        return;
+    }
+
+    let announce_content = format!(
+        "[Scheduled task \"{cron_name}\" completed. Summarize the findings naturally for the user. Keep it brief — this is a push notification. If nothing important, you can reply with just \"noted\" or similar. Do not mention that this was a scheduled task unless relevant.]\n\n{cron_output}"
+    );
+
+    let injection = SessionInjection {
+        target: SessionKey {
+            agent_id: agent_id.to_owned(),
+            kind: SessionKind::Dm(format!("{channel}:{target}")),
+        },
+        content: announce_content,
+        trust: TrustLevel::Full,
+        user_name: None,
+        prompt_channel: Some(channel.to_owned()),
+        source: InjectionSource::Cron(cron_name.to_owned()),
+    };
+
+    let span = info_span!(
+        "cron_announce",
+        cron.name = %cron_name,
+        channel = %channel,
+        target = %target,
+        session = %injection.target,
+    );
+
+    async {
+        match router.inject_collect_text(&injection).await {
+            Ok((_decision, response)) => {
+                if response.trim().is_empty() {
+                    debug!(cron.name = %cron_name, channel = %channel, target = %target, "cron announce response empty, skipping delivery");
+                    return;
+                }
+                deliver_to_target(channel, target, &response, deliver_tx).await;
+            }
+            Err(e) => {
+                error!(error = %e, "cron announce dispatch failed");
+                deliver_to_target(channel, target, cron_output, deliver_tx).await;
             }
         }
     }
@@ -416,9 +499,12 @@ mod tests {
     use super::*;
     use crate::config::{Config, CronDelivery, UserConfig, shared_config};
     use crate::gateway::Gateway;
+    use async_trait::async_trait;
     use coop_core::fakes::FakeProvider;
     use coop_core::tools::DefaultExecutor;
-    use coop_core::{SessionKind, TrustLevel};
+    use coop_core::{
+        Message, ModelInfo, Provider, SessionKey, SessionKind, ToolDef, TrustLevel, Usage,
+    };
 
     #[test]
     fn parse_cron_5_field() {
@@ -667,6 +753,70 @@ mod tests {
         );
     }
 
+    #[derive(Debug)]
+    struct FailOnSecondCallProvider {
+        model: ModelInfo,
+        calls: std::sync::Mutex<u32>,
+        first_response: String,
+        error_message: String,
+    }
+
+    impl FailOnSecondCallProvider {
+        fn new(first_response: &str, error_message: &str) -> Self {
+            Self {
+                model: ModelInfo {
+                    name: "fail-on-second".to_owned(),
+                    context_limit: 128_000,
+                },
+                calls: std::sync::Mutex::new(0),
+                first_response: first_response.to_owned(),
+                error_message: error_message.to_owned(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Provider for FailOnSecondCallProvider {
+        fn name(&self) -> &'static str {
+            "fail-on-second"
+        }
+
+        fn model_info(&self) -> ModelInfo {
+            self.model.clone()
+        }
+
+        async fn complete(
+            &self,
+            _system: &str,
+            _messages: &[Message],
+            _tools: &[ToolDef],
+        ) -> Result<(Message, Usage)> {
+            let mut calls = self.calls.lock().unwrap();
+            *calls += 1;
+            if *calls == 1 {
+                Ok((
+                    Message::assistant().with_text(&self.first_response),
+                    Usage {
+                        input_tokens: Some(100),
+                        output_tokens: Some(50),
+                        ..Default::default()
+                    },
+                ))
+            } else {
+                anyhow::bail!("{}", self.error_message);
+            }
+        }
+
+        async fn stream(
+            &self,
+            _system: &str,
+            _messages: &[Message],
+            _tools: &[ToolDef],
+        ) -> Result<coop_core::traits::ProviderStream> {
+            anyhow::bail!("streaming not supported");
+        }
+    }
+
     #[tokio::test]
     async fn fire_cron_with_delivery_sends_response() {
         let (shared, router, _gateway) =
@@ -691,6 +841,107 @@ mod tests {
         assert_eq!(msg.channel, "signal");
         assert_eq!(msg.target, "alice-uuid");
         assert_eq!(msg.content, "cron response ok");
+    }
+
+    #[tokio::test]
+    async fn fire_cron_with_delivery_announces_to_dm_session() {
+        let (shared, router, gateway) =
+            make_shared_config_and_router(None, &[], "cron response ok");
+        let (tx, mut rx) = mpsc::channel::<OutboundMessage>(8);
+        let deliver_tx = DeliverySender::new(tx);
+
+        let cfg = CronConfig {
+            name: "briefing".to_owned(),
+            cron: "0 8 * * *".to_owned(),
+            message: "Morning briefing".to_owned(),
+            user: None,
+            deliver: Some(CronDelivery {
+                channel: "signal".to_owned(),
+                target: "alice-uuid".to_owned(),
+            }),
+        };
+
+        fire_cron(&cfg, &router, Some(&deliver_tx), &shared).await;
+
+        let msg = rx.try_recv().unwrap();
+        assert_eq!(msg.channel, "signal");
+        assert_eq!(msg.target, "alice-uuid");
+        assert_eq!(msg.content, "cron response ok");
+
+        let sessions = gateway.list_sessions();
+        assert!(
+            sessions
+                .iter()
+                .any(|s| matches!(&s.kind, SessionKind::Cron(name) if name == "briefing"))
+        );
+        assert!(sessions.iter().any(|s| {
+            matches!(&s.kind, SessionKind::Dm(identity) if identity == "signal:alice-uuid")
+        }));
+    }
+
+    #[tokio::test]
+    async fn fire_cron_announce_uses_dm_session_key() {
+        let (shared, router, gateway) =
+            make_shared_config_and_router(None, &[], "cron response ok");
+        let (tx, mut rx) = mpsc::channel::<OutboundMessage>(8);
+        let deliver_tx = DeliverySender::new(tx);
+
+        let cfg = CronConfig {
+            name: "heartbeat".to_owned(),
+            cron: "*/30 * * * *".to_owned(),
+            message: "check tasks".to_owned(),
+            user: None,
+            deliver: Some(CronDelivery {
+                channel: "signal".to_owned(),
+                target: "alice-uuid".to_owned(),
+            }),
+        };
+
+        fire_cron(&cfg, &router, Some(&deliver_tx), &shared).await;
+
+        let _ = rx.try_recv().unwrap();
+
+        let cron_key = SessionKey {
+            agent_id: "test".to_owned(),
+            kind: SessionKind::Cron("heartbeat".to_owned()),
+        };
+        let dm_key = SessionKey {
+            agent_id: "test".to_owned(),
+            kind: SessionKind::Dm("signal:alice-uuid".to_owned()),
+        };
+
+        assert_eq!(gateway.session_message_count(&cron_key), 2);
+        assert_eq!(gateway.session_message_count(&dm_key), 2);
+    }
+
+    #[tokio::test]
+    async fn fire_cron_announce_fallback_on_dm_error() {
+        let provider: Arc<dyn Provider> = Arc::new(FailOnSecondCallProvider::new(
+            "raw cron output",
+            "announce dispatch failed",
+        ));
+        let (shared, router, _gateway) =
+            make_shared_config_and_router_with_provider(None, &[], provider);
+        let (tx, mut rx) = mpsc::channel::<OutboundMessage>(8);
+        let deliver_tx = DeliverySender::new(tx);
+
+        let cfg = CronConfig {
+            name: "briefing".to_owned(),
+            cron: "0 8 * * *".to_owned(),
+            message: "Morning briefing".to_owned(),
+            user: None,
+            deliver: Some(CronDelivery {
+                channel: "signal".to_owned(),
+                target: "alice-uuid".to_owned(),
+            }),
+        };
+
+        fire_cron(&cfg, &router, Some(&deliver_tx), &shared).await;
+
+        let msg = rx.try_recv().unwrap();
+        assert_eq!(msg.channel, "signal");
+        assert_eq!(msg.target, "alice-uuid");
+        assert_eq!(msg.content, "raw cron output");
     }
 
     #[tokio::test]
@@ -1075,13 +1326,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fire_cron_suppresses_heartbeat_ok() {
+    async fn fire_cron_heartbeat_ok_skips_announce() {
         let users = [UserConfig {
             name: "alice".to_owned(),
             trust: TrustLevel::Full,
             r#match: vec!["signal:alice-uuid".to_owned()],
         }];
-        let (shared, router, _gateway) =
+        let (shared, router, gateway) =
             make_shared_config_and_router_with_users_and_match(&users, &[], "HEARTBEAT_OK");
         let (tx, mut rx) = mpsc::channel::<OutboundMessage>(8);
         let deliver_tx = DeliverySender::new(tx);
@@ -1099,6 +1350,14 @@ mod tests {
         assert!(
             rx.try_recv().is_err(),
             "HEARTBEAT_OK should suppress delivery"
+        );
+
+        let sessions = gateway.list_sessions();
+        assert!(
+            !sessions.iter().any(
+                |s| matches!(&s.kind, SessionKind::Dm(identity) if identity == "signal:alice-uuid")
+            ),
+            "announce flow should not run when heartbeat is suppressed"
         );
     }
 
@@ -1310,7 +1569,7 @@ match = ["signal:alice-uuid"]
         cron: &[CronConfig],
         response: &str,
     ) -> (SharedConfig, MessageRouter, Arc<Gateway>) {
-        let provider: Arc<dyn coop_core::Provider> = Arc::new(FakeProvider::new(response));
+        let provider: Arc<dyn Provider> = Arc::new(FakeProvider::new(response));
         make_shared_config_and_router_with_provider(users, cron, provider)
     }
 
@@ -1370,7 +1629,7 @@ match = ["signal:alice-uuid"]
         }
 
         let config: Config = toml::from_str(&toml_str).unwrap();
-        let provider: Arc<dyn coop_core::Provider> = Arc::new(FakeProvider::new(response));
+        let provider: Arc<dyn Provider> = Arc::new(FakeProvider::new(response));
         let executor = Arc::new(DefaultExecutor::new());
         let shared = shared_config(config);
         let gateway = Arc::new(
@@ -1392,7 +1651,7 @@ match = ["signal:alice-uuid"]
     fn make_shared_config_and_router_with_provider(
         users: Option<&[UserConfig]>,
         cron: &[CronConfig],
-        provider: Arc<dyn coop_core::Provider>,
+        provider: Arc<dyn Provider>,
     ) -> (SharedConfig, MessageRouter, Arc<Gateway>) {
         use std::fmt::Write;
 
@@ -1458,7 +1717,7 @@ match = ["signal:alice-uuid"]
     async fn scheduler_not_blocked_by_slow_provider() {
         use coop_core::fakes::SlowFakeProvider;
 
-        let provider: Arc<dyn coop_core::Provider> = Arc::new(SlowFakeProvider::new(
+        let provider: Arc<dyn Provider> = Arc::new(SlowFakeProvider::new(
             "slow response",
             Duration::from_secs(2),
         ));
