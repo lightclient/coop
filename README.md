@@ -13,301 +13,311 @@
         ████████████████
 ```
 
+[![CI](https://github.com/lightclient/coop/actions/workflows/ci.yml/badge.svg)](https://github.com/lightclient/coop/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/lightclient/coop)](https://github.com/lightclient/coop/releases)
+[![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue)](LICENSE-MIT)
+
 # Coop
 
-A personal agent gateway in Rust. Coop routes messages between channels (Signal, Telegram, Discord, terminal, webhooks) and AI agent sessions running on your machine. It enforces trust-based access control, persists conversations, and manages agent lifecycles.
+**Coop** is a personal agent gateway, focused on multi-user access of an
+evolving agent. Unlike other platforms, Coop has a native concept of "trust
+levels" that control what data, memories, etc are shared in various contexts.
+This is managed by the gateway, not via flakey prompt coercion.
 
-- ~~Phase 1 — gateway + terminal TUI.~~
-- ~~Phase 2 - separate gateway + telemetry = dogfooding, tight LLM loop~~
-- **Phase 3 - chat channel integration**
-- Phase 4 - user and permissions
+## Focus
+
+- **Native permissions for data**: sessions only have access to what they're
+  given
+- **Self-configuration**: the agent must be *exceptional* at configuring itself.
+  Feature awareness, hot configuration swapping, configuration validation, etc.
+  Coop is extensible by just chatting. 
+- **Shared experience**: Coop is designed to be shared with partners, families,
+  friends, etc. The native permissions for data allows for varying levels of
+  trust depending on context.
+- **trace driven debugging**: agents are great at navigating traces. We
+  accelerate development in Coop by integrating thorough local telemetry so that
+  traces can always be compared with code to isolate and fix issues.
+
+## Install
+
+```bash
+cargo install --git https://github.com/lightclient/coop coop-gateway
+```
+
+This builds and installs the `coop` binary to `~/.cargo/bin/`.
 
 ## Quick start
 
-Coop needs `ANTHROPIC_API_KEY` in your environment. You can use a standard API key from [console.anthropic.com](https://console.anthropic.com/), or reuse your Claude Code OAuth token:
-
 ```bash
-export ANTHROPIC_API_KEY=$(jq -r '.claudeAiOauth.accessToken' ~/.claude/.credentials.json)
+coop init
+
+# Set your API key (standard Anthropic key or Claude Code OAuth token)
+export ANTHROPIC_API_KEY="sk-ant-..."
+
+coop start
+
+# In another terminal, attach a TUI session
+coop attach
 ```
 
-```bash
-# terminal 1
-cargo run --bin coop -- start
+## Configuration
 
-# terminal 2
-cargo run --bin coop -- chat
-```
-
-### API key rotation
-
-For higher throughput, configure multiple API keys. Coop automatically rotates between them based on Anthropic's rate-limit headers — proactively when a key approaches 90% utilization, and reactively on 429 errors.
+Coop is configured via a single `coop.toml` file. Below is a complete example
+showing every available option with comments. Only `[agent]` is required —
+everything else has sensible defaults.
 
 ```toml
+# ---------------------------------------------------------------------------
+# Agent — the core identity (required)
+# ---------------------------------------------------------------------------
+[agent]
+id = "cooper"                        # Agent name
+model = "anthropic/claude-opus-4-6"  # Model to use
+workspace = "./workspaces/default"   # Path to workspace directory
+
+
+# ---------------------------------------------------------------------------
+# Users — who can talk to the agent and what they're allowed to do
+# ---------------------------------------------------------------------------
+# Trust levels control tool access and memory visibility:
+#   full     — all tools, all memory stores, all workspace files, config, etc
+#   inner    — bash/file tools, shared + social memory
+#   familiar — read-only tools, social memory only
+#   public   — no tools, no memory
+#
+# The "match" field binds a user to channels. The format is "channel:identifier".
+# A user can be matched to multiple channels.
+
+[[users]]
+name = "alice"
+trust = "full"
+match = ["terminal:default", "signal:alice-uuid"]
+
+[[users]]
+name = "bob"
+trust = "inner"
+match = ["signal:bob-uuid"]
+
+
+# ---------------------------------------------------------------------------
+# Provider — LLM backend (currently only "anthropic")
+# ---------------------------------------------------------------------------
 [provider]
 name = "anthropic"
-api_keys = ["env:ANTHROPIC_API_KEY", "env:ANTHROPIC_API_KEY_2", "env:ANTHROPIC_API_KEY_3"]
-```
 
-Each entry uses an `env:` prefix referencing an environment variable. Keys are never stored in config files. Mixed pools of regular API keys and OAuth tokens work — each key auto-detects its auth type.
+# Optional: multiple API keys for automatic rotation on rate limits.
+# Each entry references an environment variable with the "env:" prefix.
+# Keys rotate proactively at 90% utilization and reactively on 429 errors.
+# When omitted, falls back to the ANTHROPIC_API_KEY environment variable.
+#
+# api_keys = ["env:ANTHROPIC_API_KEY", "env:ANTHROPIC_API_KEY_2"]
 
-When `api_keys` is omitted (the default), Coop falls back to the single `ANTHROPIC_API_KEY` env var. A single-key pool behaves identically to today.
 
-Key selection prefers the key whose rate-limit window resets soonest among keys below 90% utilization. If all keys are hot, the one with the lowest utilization is picked. The system never refuses to make a request — 90% is a soft preference, not a hard block.
+# ---------------------------------------------------------------------------
+# Channels — where messages come from
+# ---------------------------------------------------------------------------
+# Signal (requires linking — see "Signal setup" below)
+# [channels.signal]
+# db_path = "./db/signal.db"    # Path to signal-cli database
+# verbose = false               # Send partial replies on each tool-call boundary
 
-## Memory
 
-Coop has a built-in structured memory system backed by SQLite. The agent can search, write, and browse observations across trust-gated stores. Memory works out of the box with zero config — add a `[memory]` section to your `coop.toml` to customise it.
+# ---------------------------------------------------------------------------
+# Memory — structured observation store backed by SQLite
+# ---------------------------------------------------------------------------
+# Memory is enabled by default with no config needed. The agent gets tools to
+# search, write, and browse observations across trust-gated stores:
+#   private — full trust only (personal facts, secrets)
+#   shared  — full + inner trust (project context, decisions)
+#   social  — full + inner + familiar trust (public-safe info)
 
-### Minimal setup (works immediately)
-
-Memory is enabled by default. With no `memory:` section in your config, Coop stores observations in `./db/memory.db`, injects a compact memory index into each prompt, and runs periodic maintenance. The agent gets six tools: `memory_search`, `memory_write`, `memory_get`, `memory_timeline`, `memory_history`, `memory_people`.
-
-### Full config reference
-
-```toml
 [memory]
-# Path to the SQLite database (relative to config dir or absolute).
-# Default: ./db/memory.db
-db_path = "./db/memory.db"
+db_path = "./db/memory.db"                     # SQLite database path
 
-# Prompt index: injects a compact summary of recent observations into the
-# system prompt before each turn so the agent has context without searching.
+# Prompt index — injects recent relevant memories into the system prompt
+# so the agent has context without explicitly searching.
 [memory.prompt_index]
-enabled = true       # default: true
-limit = 12           # max observations to include (default: 12)
-max_tokens = 1200    # token budget for the index block (default: 1200)
+enabled = true        # Toggle the prompt index (default: true)
+limit = 12            # Max observations to include (default: 12)
+max_tokens = 1200     # Token budget for the index block (default: 1200)
 
-# Retention: automatic compression, archiving, and cleanup of old observations.
-# Runs once at startup and periodically in the background.
+# Retention — automatic compression, archiving, and cleanup of old observations.
+# Runs at startup and periodically in the background.
 [memory.retention]
-enabled = true                     # default: true
-compress_after_days = 14           # cluster & merge stale observations (default: 14)
-compression_min_cluster_size = 3   # minimum cluster size to trigger compression (default: 3)
-archive_after_days = 30            # move expired observations to archive table (default: 30)
-delete_archive_after_days = 365    # permanently delete old archive rows (default: 365)
-max_rows_per_run = 200             # bound each maintenance stage (default: 200)
+enabled = true                     # Toggle retention maintenance (default: true)
+compress_after_days = 14           # Cluster and merge stale observations (default: 14)
+compression_min_cluster_size = 3   # Min cluster size to trigger compression (default: 3)
+archive_after_days = 30            # Move expired observations to archive (default: 30)
+delete_archive_after_days = 365    # Permanently delete old archives (default: 365)
+max_rows_per_run = 200             # Max rows processed per maintenance run (default: 200)
 
-# Embedding: optional semantic vector search. Without this, retrieval is
-# FTS-only (full-text search), which works well for most use cases.
-[memory.embedding]
-provider = "openai"                # openai | voyage | cohere | openai-compatible
-model = "text-embedding-3-small"
-dimensions = 1536
+# Embedding — optional semantic vector search. Without this, search is
+# full-text only (FTS5), which works well for most use cases.
+# Supported providers: openai, voyage, cohere, openai-compatible
+#
+# [memory.embedding]
+# provider = "openai"                # Provider name
+# model = "text-embedding-3-small"   # Embedding model
+# dimensions = 1536                  # Vector dimensions
+#
+# For openai-compatible endpoints:
+# base_url = "https://your-endpoint/v1"
+# api_key_env = "YOUR_API_KEY_ENV_VAR"
+
+
+# ---------------------------------------------------------------------------
+# Prompt files — control which files are included in the system prompt
+# ---------------------------------------------------------------------------
+# Shared files are loaded once per session from the workspace root.
+# User files are loaded per-user from workspaces/<workspace>/users/<name>/.
+#
+# Each file has a trust gate (minimum trust level to see it) and a cache hint:
+#   stable   — rarely changes (e.g. personality)
+#   session  — changes between sessions
+#   volatile — changes within a session
+#
+# The defaults below work out of the box. Override to add custom files or
+# change visibility.
+
+# [[prompt.shared_files]]
+# path = "SOUL.md"                   # Agent personality and voice
+# trust = "familiar"                 # Visible to familiar+ users
+# cache = "stable"
+#
+# [[prompt.shared_files]]
+# path = "IDENTITY.md"
+# trust = "familiar"
+# cache = "session"
+#
+# [[prompt.shared_files]]
+# path = "TOOLS.md"
+# trust = "full"
+# cache = "session"
+#
+# [[prompt.shared_files]]
+# path = "BOOTSTRAP.md"             # First-run bootstrap instructions
+# trust = "full"
+# cache = "volatile"
+#
+# [[prompt.user_files]]
+# path = "AGENTS.md"                # Behavioral instructions
+# trust = "full"
+# cache = "stable"
+#
+# [[prompt.user_files]]
+# path = "USER.md"                  # Per-user info
+# trust = "inner"
+# cache = "session"
+#
+# [[prompt.user_files]]
+# path = "TOOLS.md"                 # Per-user tool notes
+# trust = "full"
+# cache = "session"
+
+
+# ---------------------------------------------------------------------------
+# Cron — scheduled tasks
+# ---------------------------------------------------------------------------
+# The scheduler runs inside the daemon and sends messages to the agent on a
+# cron schedule. When a cron entry has a "user" field, the response is delivered
+# to all non-terminal channels that user is bound to (from their match patterns).
+# An explicit "deliver" field overrides this with a specific target.
+#
+# If the agent responds with only "HEARTBEAT_OK", delivery is suppressed
+# (nothing to report). An empty HEARTBEAT.md skips the LLM call entirely.
+
+# [[cron]]
+# name = "heartbeat"
+# cron = "*/30 * * * *"              # Standard cron expression
+# user = "alice"                     # Run as this user (optional)
+# message = "check HEARTBEAT.md"     # Message sent to the agent
+#
+# [[cron]]
+# name = "morning-briefing"
+# cron = "0 8 * * *"
+# user = "alice"
+# message = "Morning briefing"
+# [cron.deliver]                     # Explicit delivery target
+# channel = "signal"
+# target = "alice-uuid"              # Or "group:<hex>" for group chats
+#
+# [[cron]]
+# name = "cleanup"                   # No user, no delivery — silent internal work
+# cron = "0 3 * * *"
+# message = "run cleanup"
 ```
 
-### Memory stores and trust
+### Signal setup
 
-Observations live in one of three stores, gated by the user's trust level:
-
-| Store | Who can access | Use for |
-|-------|---------------|---------|
-| `private` | Full trust only | Personal credentials, private notes, secrets |
-| `shared` | Full + Inner trust | Project context, technical decisions, shared state |
-| `social` | Full + Inner + Familiar trust | Public-facing info, meeting notes, social context |
-
-Public-trust users have no memory access at all. The prompt index follows the same gates — a Familiar-trust user only sees `social` observations in their prompt.
-
-### Memory tools
-
-The agent gets these tools automatically when memory is configured:
-
-| Tool | Description |
-|------|-------------|
-| `memory_search` | Full-text (and optionally vector) search across observations |
-| `memory_write` | Create or reconcile a structured observation |
-| `memory_get` | Fetch full observation details by ID |
-| `memory_timeline` | Browse observations around a specific ID |
-| `memory_history` | View mutation history (ADD/UPDATE/DELETE/COMPRESS) for an observation |
-| `memory_people` | Search known people mentioned in observations |
-
-### Reconciliation
-
-When the agent writes an observation that overlaps with existing data, Coop automatically reconciles using the LLM:
-
-- **Exact duplicate** — bumps mention count, no new row
-- **Similar existing** — LLM decides: `ADD` (new), `UPDATE` (merge), `DELETE` (replace stale), or `NONE` (skip)
-- **No match** — inserts as new observation
-
-All mutations are recorded in `observation_history` for auditability.
-
-### Embedding providers
-
-Embeddings are optional. Without them, search uses FTS5 (SQLite full-text search). Adding an embedding provider enables hybrid retrieval (FTS + vector similarity + recency ranking).
-
-**OpenAI** (default):
-```toml
-[memory.embedding]
-provider = "openai"
-model = "text-embedding-3-small"
-dimensions = 1536
-```
-Requires `OPENAI_API_KEY` in your environment.
-
-**Voyage AI**:
-```toml
-[memory.embedding]
-provider = "voyage"
-model = "voyage-3-lite"
-dimensions = 512
-```
-Requires `VOYAGE_API_KEY`.
-
-**Cohere**:
-```toml
-[memory.embedding]
-provider = "cohere"
-model = "embed-english-v3.0"
-dimensions = 1024
-```
-Requires `COHERE_API_KEY`.
-
-**OpenAI-compatible** (any endpoint that speaks the OpenAI embeddings API):
-```toml
-[memory.embedding]
-provider = "openai-compatible"
-model = "text-embedding-3-small"
-dimensions = 1536
-base_url = "https://your-endpoint.example/v1"
-api_key_env = "YOUR_CUSTOM_KEY_ENV"
-```
-Requires the env var named in `api_key_env`.
-
-### Validating your config
+Link coop to your Signal account as a secondary device:
 
 ```bash
-cargo run --bin coop -- check
+coop signal link
 ```
 
-This validates all memory settings: db path, prompt index limits, retention constraints, embedding provider/model/dimensions, and required API key env vars.
+This displays a QR code — scan it with Signal on your phone (Settings → Linked Devices → Link New Device).
 
-### Debugging with traces
+To find your Signal UUID for the `match` field, send a message to the linked device and check the trace output:
 
 ```bash
-COOP_TRACE_FILE=traces.jsonl cargo run --bin coop -- start
+COOP_TRACE_FILE=traces.jsonl coop start
+# Send a message from your phone, then:
+grep '"signal"' traces.jsonl | head -5
 ```
 
-Memory emits structured trace events for: embedding requests/responses, reconciliation decisions, prompt index build/injection, and maintenance stages. Search the JSONL file with `grep` or `jq`. See [Memory Design](docs/memory-design.md) for the full trace event catalogue.
-
-## Cron & Heartbeats
-
-Coop supports scheduled tasks via cron expressions. The scheduler runs inside the gateway daemon and fires messages to the agent on schedule.
-
-### Delivery routing
-
-When a cron entry has a `user` field, the agent's response is automatically delivered to all non-terminal channels the user is bound to (from their `match` patterns). An explicit `deliver` field overrides this with a specific target.
+The sender UUID in the trace is what goes in your config:
 
 ```toml
-# Auto-delivers to alice's Signal (from her match patterns)
-[[cron]]
-name = "heartbeat"
-cron = "*/30 * * * *"
-user = "alice"
-message = "check HEARTBEAT.md"
-
-# Explicit delivery to a specific target
-[[cron]]
-name = "morning-briefing"
-cron = "0 8 * * *"
-user = "alice"
-message = "Morning briefing"
-
-[cron.deliver]
-channel = "signal"
-target = "alice-uuid"
-
-# Silent — no user, no delivery
-[[cron]]
-name = "cleanup"
-cron = "0 3 * * *"
-message = "run cleanup"
+[[users]]
+name = "alice"
+trust = "full"
+match = ["terminal:default", "signal:<your-uuid>"]
 ```
 
-### HEARTBEAT_OK suppression
+### Hot reload
 
-If the agent responds with `HEARTBEAT_OK` (or only that token wrapped in markdown/whitespace), delivery is suppressed — nothing is sent. This lets the agent signal "nothing to report" without spamming the user. Real content alongside the token is delivered with the token stripped.
+The config file is watched for changes. These fields take effect immediately without a restart:
 
-As a cost optimization, if the workspace `HEARTBEAT.md` file contains only headers, empty checklist items, or whitespace, the LLM call is skipped entirely.
+- `agent.model`, `users`, `cron`, `memory.prompt_index`, `memory.retention`
 
-### Workspace file
-
-`HEARTBEAT.md` in the workspace directory is the conventional place for periodic check tasks:
-
-```markdown
-# Heartbeat Tasks
-
-- [ ] Check server status at https://example.test/health
-- [ ] Review overnight error logs
-```
-
-The agent reads this file when prompted by a heartbeat cron and acts on any actionable items.
-
-## Architecture
-
-Five workspace crates:
-
-| Crate | Purpose |
-|-------|---------|
-| `coop-core` | Domain types, trait boundaries, prompt builder, test fakes |
-| `coop-agent` | LLM provider integration (Anthropic API) |
-| `coop-memory` | Structured memory store (SQLite observations + retrieval) |
-| `coop-gateway` | CLI entry point, daemon lifecycle, gateway routing, config |
-| `coop-ipc` | Unix socket IPC protocol and client/server transport |
-| `coop-channels` | Channel adapters (terminal; Signal scaffolded) |
-| `coop-tui` | Terminal UI (crossterm) |
+These require a restart: `agent.id`, `agent.workspace`, `provider`, `channels`, `memory.db_path`, `memory.embedding`
 
 ## Workspace
 
-Agent personality and context live in workspace files (default: `./workspaces/default/`):
+Agent personality and context live in markdown files in the workspace directory. All files are optional.
 
-| File | Purpose | Trust |
-|------|---------|-------|
-| `SOUL.md` | Agent personality and voice | familiar |
-| `AGENTS.md` | Behavioral instructions | familiar |
-| `TOOLS.md` | Tool usage notes | familiar |
-| `IDENTITY.md` | Agent identity | familiar |
-| `USER.md` | Per-user info | inner |
-| `MEMORY.md` | Long-term curated memory | full |
-| `HEARTBEAT.md` | Periodic check tasks (empty file skips LLM call) | full |
+| File | Purpose |
+|------|---------|
+| `SOUL.md` | Agent personality and voice |
+| `IDENTITY.md` | Agent identity |
+| `AGENTS.md` | Behavioral instructions |
+| `TOOLS.md` | Tool usage notes |
+| `USER.md` | Per-user info |
+| `HEARTBEAT.md` | Periodic check tasks |
 
-All files are optional. Trust level controls which files are visible in a given session — see [System Prompt Design](docs/system-prompt-design.md).
+Channel-specific formatting instructions can be added as `channels/<name>.md` (e.g. `channels/signal.md`).
 
-### Channel prompts
-
-Coop injects channel-specific formatting instructions into the system prompt so the agent adapts its output to each channel's capabilities. For example, Signal messages use plain text (no markdown), while terminal sessions get rich formatting.
-
-Built-in defaults are provided for known channels:
-
-| Channel | Default behavior |
-|---------|-----------------|
-| `signal` | Plain text only — no markdown, asterisks, backticks, code fences, or bullet markers |
-| `terminal` | No restrictions (supports rich formatting) |
-
-To override the built-in or add instructions for a new channel, create a file in the workspace:
+## Architecture
 
 ```
-workspaces/default/channels/signal.md     # override Signal default
-workspaces/default/channels/discord.md    # add Discord-specific instructions
+crates/
+├── coop-core       # Shared types, traits, prompt builder, test fakes
+├── coop-agent      # LLM provider integration (Anthropic API)
+├── coop-memory     # Structured memory store (SQLite + FTS5)
+├── coop-gateway    # CLI entry point, daemon, gateway routing, config
+├── coop-ipc        # Unix socket IPC protocol
+├── coop-channels   # Channel adapters (terminal, Signal)
+└── coop-tui        # Terminal UI (crossterm)
 ```
-
-The file content replaces the built-in default entirely. The channel name is the part before the first colon in the channel identifier (`terminal:default` → `terminal`, `signal` → `signal`).
 
 ## Development
 
 ```bash
-just check    # fmt, toml, lint, deny, test
-just fmt      # auto-format
-just lint     # clippy
-just test     # cargo test --all
-just build    # release build
+cargo build                  # Build
+cargo test                   # Run all tests
+just check                   # Full CI: fmt, lint, deny, test
+just fix                     # Auto-fix formatting + clippy
 ```
-
-## Docs
-
-- [Architecture](docs/architecture.md) — core concepts and high-level design
-- [Design](docs/design.md) — full design document with config, trust model, and build phases
-- [Phase 1 Plan](docs/phase1-plan.md) — gateway + terminal TUI (current milestone)
-- [Testing Strategy](docs/testing-strategy.md) — trait boundaries, fakes, fixture-driven testing
-- [Memory Design](docs/memory-design.md) — structured observations, SQLite + FTS5, progressive disclosure
 
 ## License
 
