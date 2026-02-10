@@ -10,6 +10,8 @@ mod config_watcher;
 mod config_write;
 mod gateway;
 mod heartbeat;
+mod init;
+mod init_templates;
 mod memory_embedding;
 mod memory_prompt_index;
 mod memory_reconcile;
@@ -77,7 +79,11 @@ async fn main() -> Result<()> {
 
     let console_log = matches!(
         cli.command,
-        Commands::Start | Commands::Signal { .. } | Commands::Memory { .. } | Commands::Version
+        Commands::Start
+            | Commands::Signal { .. }
+            | Commands::Memory { .. }
+            | Commands::Version
+            | Commands::Init { .. }
     );
     let _tracing_guard = tracing_setup::init(console_log);
 
@@ -88,6 +94,7 @@ async fn main() -> Result<()> {
     );
 
     match cli.command {
+        Commands::Init { dir } => init::cmd_init(dir.as_deref()),
         Commands::Check { format } => cmd_check(cli.config.as_deref(), &format),
         Commands::Start => cmd_start(cli.config.as_deref()).await,
         Commands::Chat { user } => cmd_chat(cli.config.as_deref(), user.as_deref()).await,

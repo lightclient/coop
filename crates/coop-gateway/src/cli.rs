@@ -12,6 +12,11 @@ pub(crate) struct Cli {
 
 #[derive(Subcommand)]
 pub(crate) enum Commands {
+    Init {
+        /// Directory to initialize (default: ~/.coop)
+        #[arg(short, long)]
+        dir: Option<String>,
+    },
     Start,
     Check {
         /// Output format: human (default) or json

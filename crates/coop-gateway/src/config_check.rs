@@ -274,6 +274,19 @@ pub(crate) fn validate_config(config_path: &Path, config_dir: &Path) -> CheckRep
     // 7-8 depend on workspace
     if let Some(ref ws) = workspace {
         check_workspace_files(&mut report, ws, &config);
+
+        // bootstrap_pending
+        let bootstrap_path = ws.join("BOOTSTRAP.md");
+        if bootstrap_path.exists() {
+            report.push(CheckResult {
+                name: "bootstrap_pending",
+                severity: Severity::Info,
+                passed: false,
+                message:
+                    "Bootstrap conversation pending — run `coop chat` to personalize your agent."
+                        .to_owned(),
+            });
+        }
     }
 
     // 9. users
@@ -1127,7 +1140,7 @@ mod tests {
             "should have prompt_files info check"
         );
         assert!(prompt_check.unwrap().passed);
-        assert!(prompt_check.unwrap().message.contains("3 shared"));
+        assert!(prompt_check.unwrap().message.contains("4 shared"));
     }
 
     #[test]

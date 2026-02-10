@@ -171,6 +171,12 @@ fn default_shared_files() -> Vec<PromptFileEntry> {
             cache: CacheHintConfig::Session,
             description: Some("Tool setup notes".into()),
         },
+        PromptFileEntry {
+            path: "BOOTSTRAP.md".into(),
+            trust: TrustLevel::Full,
+            cache: CacheHintConfig::Volatile,
+            description: Some("First-run bootstrap instructions".into()),
+        },
     ]
 }
 
@@ -433,13 +439,21 @@ impl Config {
             return PathBuf::from(p);
         }
 
-        // Check current directory
+        // 1. Current directory
         let local = PathBuf::from("coop.toml");
         if local.exists() {
             return local;
         }
 
-        // Check XDG config
+        // 2. ~/.coop (default init location)
+        if let Ok(home) = std::env::var("HOME") {
+            let dot_coop = PathBuf::from(&home).join(".coop/coop.toml");
+            if dot_coop.exists() {
+                return dot_coop;
+            }
+        }
+
+        // 3. XDG config
         if let Ok(config_dir) = std::env::var("XDG_CONFIG_HOME") {
             let xdg = PathBuf::from(config_dir).join("coop/coop.toml");
             if xdg.exists() {
@@ -447,7 +461,7 @@ impl Config {
             }
         }
 
-        // Check ~/.config/coop
+        // 4. ~/.config/coop
         if let Ok(home) = std::env::var("HOME") {
             let home_config = PathBuf::from(home).join(".config/coop/coop.toml");
             if home_config.exists() {
@@ -719,10 +733,11 @@ id = "test"
 model = "test-model"
 "#;
         let config: Config = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.prompt.shared_files.len(), 3);
+        assert_eq!(config.prompt.shared_files.len(), 4);
         assert_eq!(config.prompt.shared_files[0].path, "SOUL.md");
         assert_eq!(config.prompt.shared_files[1].path, "IDENTITY.md");
         assert_eq!(config.prompt.shared_files[2].path, "TOOLS.md");
+        assert_eq!(config.prompt.shared_files[3].path, "BOOTSTRAP.md");
         assert_eq!(config.prompt.user_files.len(), 3);
         assert_eq!(config.prompt.user_files[0].path, "AGENTS.md");
         assert_eq!(config.prompt.user_files[1].path, "USER.md");
@@ -771,8 +786,8 @@ user_files = []
 "#;
         let config: Config = toml::from_str(toml_str).unwrap();
         assert!(config.prompt.user_files.is_empty());
-        // shared_files should get defaults
-        assert_eq!(config.prompt.shared_files.len(), 3);
+        // shared_files should get defaults (including BOOTSTRAP.md)
+        assert_eq!(config.prompt.shared_files.len(), 4);
     }
 
     #[test]
