@@ -38,6 +38,8 @@ pub(crate) struct Gateway {
     session_usage: Mutex<HashMap<SessionKey, SessionUsage>>,
     /// Per-session cancellation tokens for in-progress turns.
     active_turns: Mutex<HashMap<SessionKey, CancellationToken>>,
+    /// Per-session async mutexes to prevent concurrent turns on the same session.
+    session_turn_locks: Mutex<HashMap<SessionKey, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 /// Tracks cumulative token usage and context size for a session.
@@ -167,6 +169,7 @@ impl Gateway {
             compaction_cache: Mutex::new(HashMap::new()),
             session_usage: Mutex::new(HashMap::new()),
             active_turns: Mutex::new(HashMap::new()),
+            session_turn_locks: Mutex::new(HashMap::new()),
         })
     }
 
@@ -369,6 +372,35 @@ impl Gateway {
             user = ?user_name,
             channel = ?channel,
         );
+
+        // Acquire per-session turn lock to prevent concurrent turns from
+        // interleaving messages in the same session history (which corrupts
+        // the tool_use/tool_result pairing the API requires).
+        let session_lock = {
+            let mut locks = self
+                .session_turn_locks
+                .lock()
+                .expect("session_turn_locks mutex poisoned");
+            Arc::clone(
+                locks
+                    .entry(session_key.clone())
+                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+            )
+        };
+        let Ok(_turn_guard) = session_lock.try_lock() else {
+            warn!(
+                session = %session_key,
+                "skipping turn: another turn is already running on this session"
+            );
+            let _ = event_tx
+                .send(TurnEvent::Done(TurnResult {
+                    messages: Vec::new(),
+                    usage: Usage::default(),
+                    hit_limit: false,
+                }))
+                .await;
+            return Ok(());
+        };
 
         // Register a cancellation token for this turn so `/stop` can cancel it.
         let turn_cancel = CancellationToken::new();
@@ -1885,6 +1917,94 @@ model = "test-model"
         let session_key = gateway.default_session_key();
         assert!(!gateway.cancel_active_turn(&session_key));
         assert!(!gateway.has_active_turn(&session_key));
+    }
+
+    #[tokio::test]
+    async fn concurrent_turn_on_same_session_is_skipped() {
+        let workspace = test_workspace();
+        // SlowToolProvider takes 200ms per call — long enough for us to
+        // start a second turn while the first is still running.
+        let provider: Arc<dyn Provider> =
+            Arc::new(SlowToolProvider::new(Duration::from_millis(200)));
+        let executor = Arc::new(DefaultExecutor::new());
+        let gateway = Arc::new(
+            Gateway::new(
+                shared_config(test_config()),
+                workspace.path().to_path_buf(),
+                provider,
+                executor,
+                None,
+                None,
+            )
+            .unwrap(),
+        );
+
+        let session_key = gateway.default_session_key();
+
+        // Start first turn — will be slow (provider takes 200ms).
+        let (tx1, mut rx1) = mpsc::channel(256);
+        let gw1 = Arc::clone(&gateway);
+        let sk1 = session_key.clone();
+        let turn1 = tokio::spawn(async move {
+            gw1.run_turn_with_trust(&sk1, "first", TrustLevel::Full, Some("alice"), None, tx1)
+                .await
+        });
+
+        // Give the first turn time to acquire the lock.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Start second turn on the same session — should be skipped.
+        let (tx2, mut rx2) = mpsc::channel(256);
+        let gw2 = Arc::clone(&gateway);
+        let sk2 = session_key.clone();
+        let turn2 = tokio::spawn(async move {
+            gw2.run_turn_with_trust(&sk2, "second", TrustLevel::Full, Some("alice"), None, tx2)
+                .await
+        });
+
+        // Second turn should return immediately with an empty Done.
+        let result2 = turn2.await.unwrap();
+        assert!(result2.is_ok());
+
+        let mut saw_done2 = false;
+        let mut turn2_messages = Vec::new();
+        while let Ok(event) = rx2.try_recv() {
+            if let TurnEvent::Done(result) = event {
+                saw_done2 = true;
+                turn2_messages = result.messages;
+            }
+        }
+        assert!(saw_done2, "second turn should emit Done");
+        assert!(
+            turn2_messages.is_empty(),
+            "second turn should produce no messages"
+        );
+
+        // Wait for first turn to finish.
+        let result1 = turn1.await.unwrap();
+        assert!(result1.is_ok());
+
+        let mut turn1_msg_count = 0;
+        while let Ok(event) = rx1.try_recv() {
+            if let TurnEvent::Done(result) = event {
+                turn1_msg_count = result.messages.len();
+            }
+        }
+        assert!(
+            turn1_msg_count > 0,
+            "first turn should have produced messages"
+        );
+
+        // Session should only contain messages from the first turn —
+        // "second" user input should NOT be in the session.
+        let messages = gateway.messages(&session_key);
+        let has_first = messages.iter().any(|m| m.text().contains("first"));
+        let has_second = messages.iter().any(|m| m.text().contains("second"));
+        assert!(has_first, "session should have first turn's message");
+        assert!(
+            !has_second,
+            "session should NOT have second turn's message (it was skipped)"
+        );
     }
 
     #[tokio::test]
