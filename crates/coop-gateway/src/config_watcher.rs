@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, info, info_span, warn};
 
@@ -40,7 +40,7 @@ async fn config_poll_loop(
     shutdown: CancellationToken,
     cron_notify: Option<&tokio::sync::Notify>,
 ) {
-    let mut last_modified = file_modified(config_path);
+    let mut last_hash = file_content_hash(config_path);
     info!("config watcher started");
 
     loop {
@@ -52,14 +52,14 @@ async fn config_poll_loop(
             }
         }
 
-        let current_modified = file_modified(config_path);
-        if current_modified == last_modified {
+        if file_content_hash(config_path) == last_hash {
             continue;
         }
-        last_modified = current_modified;
 
         // Debounce: editors often write-rename-delete in quick succession.
         tokio::time::sleep(DEBOUNCE).await;
+        // Re-read after debounce in case another write landed.
+        last_hash = file_content_hash(config_path);
 
         let old_cron = config.load().cron.clone();
         try_reload(config_path, config);
@@ -72,8 +72,15 @@ async fn config_poll_loop(
     }
 }
 
-fn file_modified(path: &Path) -> Option<SystemTime> {
-    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+/// Cheap content hash — avoids mtime granularity issues on CI/tmpfs.
+fn file_content_hash(path: &Path) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let Ok(bytes) = std::fs::read(path) else {
+        return 0;
+    };
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    hasher.finish()
 }
 
 fn try_reload(config_path: &Path, config: &SharedConfig) {
