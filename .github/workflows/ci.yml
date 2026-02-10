@@ -9,6 +9,10 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
   RUSTFLAGS: "-D warnings"
+  # Disable local dev optimizations from .cargo/config.toml (sccache, mold)
+  RUSTC_WRAPPER: ""
+  CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: ""
+  CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: ""
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
