@@ -337,3 +337,5 @@ just fix                     # Auto-fix formatting + clippy
 ## License
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT License](LICENSE-MIT) at your option.
+
+**Note:** Building with `--features signal` links against [libsignal](https://github.com/signalapp/libsignal), which is licensed under [AGPL-3.0-only](https://www.gnu.org/licenses/agpl-3.0.html). Binaries built with this feature must comply with AGPL-3.0 terms, including making the complete corresponding source available. The coop source code itself remains MIT/Apache-2.0.

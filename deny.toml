@@ -1,4 +1,9 @@
 [advisories]
+ignore = [
+    # Transitive deps from presage/libsignal with no upgrade available.
+    "RUSTSEC-2025-0141", # bincode unmaintained (presage -> libsignal-service -> zkgroup)
+    "RUSTSEC-2023-0089", # atomic-polyfill unmaintained (presage -> phonenumber -> heapless)
+]
 version = 2
 
 [licenses]
@@ -9,6 +14,8 @@ allow = [
     "BSD-3-Clause",
     "CDLA-Permissive-2.0",
     "ISC",
+    "MPL-2.0",
+    "AGPL-3.0-only",
     "Unicode-3.0",
     "Unicode-DFS-2016",
     "Zlib",
@@ -16,6 +23,7 @@ allow = [
 ]
 confidence-threshold = 0.8
 version = 2
+
 
 [bans]
 highlight = "all"
