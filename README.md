@@ -41,7 +41,7 @@ This is managed by the gateway, not via flakey prompt coercion.
 ## Install
 
 ```bash
-cargo install --git https://github.com/lightclient/coop coop-gateway
+RUSTC_WRAPPER="" cargo install --git https://github.com/lightclient/coop coop-gateway
 ```
 
 This builds and installs the `coop` binary to `~/.cargo/bin/`.
@@ -311,6 +311,21 @@ crates/
 ```
 
 ## Development
+
+### Prerequisites
+
+The project's `.cargo/config.toml` enables local compile-time optimizations that
+require three external tools. Install them before building:
+
+| Tool | Purpose | Install |
+|------|---------|---------|
+| [sccache](https://github.com/mozilla/sccache) | Shared compilation cache (`rustc-wrapper`) | `cargo install sccache` |
+| [clang](https://clang.llvm.org/) | Linker driver | `apt install clang` / `brew install llvm` |
+| [mold](https://github.com/rui314/mold) | Fast linker | `apt install mold` / `brew install mold` |
+
+These are disabled in CI (which uses its own caching via `rust-cache`).
+
+### Commands
 
 ```bash
 cargo build                  # Build
