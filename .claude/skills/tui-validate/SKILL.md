@@ -417,7 +417,7 @@ curl -sSfL https://github.com/charmbracelet/freeze/releases/download/v0.1.6/free
 ### Coop fails to start in tmux
 
 - Check `ANTHROPIC_API_KEY` is set in the tmux environment
-- Verify `coop.yaml` exists in the working directory
+- Verify `coop.toml` exists in the working directory
 - Check: `tmux send-keys -t coop-test "" ""` to verify session is alive
 
 ### LLM judge too strict/lenient

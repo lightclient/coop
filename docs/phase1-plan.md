@@ -23,7 +23,7 @@ A running Coop gateway daemon that accepts messages from a terminal TUI, routes 
 ### M1: Skeleton Binary
 - [ ] `cargo init` with workspace layout
 - [ ] CLI with `clap`: `coop start`, `coop chat`
-- [ ] Config loading from `coop.yaml` (serde + basic validation)
+- [ ] Config loading from `coop.toml` (serde + basic validation)
 - [ ] Tokio runtime boots, logs "gateway started", shuts down on ctrl-c
 - [ ] Structured logging with `tracing` (stdout + optional file)
 
@@ -52,7 +52,7 @@ A running Coop gateway daemon that accepts messages from a terminal TUI, routes 
 - [ ] Markdown rendering in terminal (basic: bold, code blocks, lists)
 
 ### M5: Basic Config + Trust
-- [ ] Parse `coop.yaml` with agent config (model, personality file, instructions file)
+- [ ] Parse `coop.toml` with agent config (model, personality file, instructions file)
 - [ ] Single user (owner) with `trust: full`
 - [ ] Load personality + instructions into system prompt
 - [ ] Memory store paths defined in config (read-only for now)
@@ -79,7 +79,7 @@ A running Coop gateway daemon that accepts messages from a terminal TUI, routes 
 ```
 coop/
 ├── Cargo.toml              # workspace root
-├── coop.yaml               # default config location
+├── coop.toml               # default config location
 ├── crates/
 │   ├── coop-gateway/       # the daemon — owns the event loop, routing, CLI
 │   │   ├── Cargo.toml
@@ -166,7 +166,7 @@ Key rule: **coop-core has no external dependencies** beyond serde. It defines th
 **Decided:** Custom line-based engine on top of `crossterm`. Components return `Vec<String>` of ANSI-styled lines, a differential renderer writes them to the terminal. This avoids ratatui's 2D cell buffer paradigm which was a poor fit for the scrollback-based chat UI.
 
 ### 3. Config Format
-YAML with `serde_yaml`. Considered TOML but YAML handles nested structures (like the trust levels and user lists) more naturally.
+TOML via `toml` crate. TOML is the Rust ecosystem standard and aligns with Cargo, rustfmt, clippy, and other tooling.
 
 ## Dependencies (Phase 1)
 
@@ -175,7 +175,7 @@ YAML with `serde_yaml`. Considered TOML but YAML handles nested structures (like
 tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
-serde_yaml = "0.9"
+toml = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 crossterm = "0.28"
@@ -188,4 +188,4 @@ anyhow = "1"
 - Type a message, get a streamed response from Claude via Anthropic API
 - Agent can read/write files in its workspace
 - Ctrl-C shuts down cleanly
-- Config loads from `coop.yaml`
+- Config loads from `coop.toml`

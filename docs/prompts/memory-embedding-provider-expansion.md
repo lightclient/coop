@@ -40,7 +40,7 @@ Add at least one additional production provider. Preferred set:
 
 If implementing `openai-compatible`, extend config safely:
 
-```yaml
+```toml
 memory:
   embedding:
     provider: openai-compatible

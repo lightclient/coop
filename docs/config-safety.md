@@ -2,7 +2,7 @@
 
 ## Problem
 
-Coop's agent has bash, read_file, write_file, and edit_file tools. It can already edit `coop.yaml`. The danger:
+Coop's agent has bash, read_file, write_file, and edit_file tools. It can already edit `coop.toml`. The danger:
 
 1. Agent writes bad config (typo, invalid model, wrong path)
 2. Coop restarts (or a future hot-reload triggers)
@@ -17,7 +17,7 @@ This is the worst failure mode for an autonomous agent: a self-inflicted outage 
 Config is loaded once at startup in `cmd_start`:
 
 ```
-Config::load()           → parse YAML
+Config::load()           → parse TOML
 config.resolve_workspace → check workspace dir exists
 ensure provider == "anthropic"
 AnthropicProvider::from_env → check API key env var
@@ -26,7 +26,7 @@ Gateway::new             → scan workspace index, build prompt
 parse_cron               → validate cron expressions
 ```
 
-If any of these fail, coop exits with an error. There is no validation command, no dry-run, no rollback. The agent can freely write broken YAML and the next restart will fail.
+If any of these fail, coop exits with an error. There is no validation command, no dry-run, no rollback. The agent can freely write broken TOML and the next restart will fail.
 
 ## Design Space
 
@@ -70,7 +70,7 @@ $ echo $?
 
 | Check | What breaks without it |
 |-------|----------------------|
-| YAML parse | Nothing starts |
+| TOML parse | Nothing starts |
 | Required fields (agent.id, agent.model) | Panic or confusing error |
 | Workspace dir exists | Gateway::new fails |
 | Provider name supported | Hard bail in main.rs |
@@ -129,7 +129,7 @@ The tool:
 
 **Pros:**
 - Atomic: validation and write are one operation, can't skip validation
-- Structured: agent works with paths/values, not raw YAML editing
+- Structured: agent works with paths/values, not raw TOML editing
 - Informative: returns diffs, shows what changed
 - Safe: file is never written in an invalid state
 
@@ -137,25 +137,25 @@ The tool:
 - New tool to maintain — config schema changes require tool updates
 - Less flexible than direct file editing (complex nested changes are awkward)
 - Doesn't help if the agent uses edit_file directly (can't prevent that)
-- YAML path semantics for arrays are annoying (how do you reference "users[1].trust"?)
+- TOML path semantics for arrays are annoying (how do you reference "users[1].trust"?)
 
 ### Approach 3: Shadow Config + Promotion
 
-Agent writes to `coop.staging.yaml`. A separate `coop promote` command validates and atomically swaps:
+Agent writes to `coop.staging.toml`. A separate `coop promote` command validates and atomically swaps:
 
 ```
 $ coop promote
-Validating coop.staging.yaml...
+Validating coop.staging.toml...
 ✓ all checks passed
 Diff:
   agent.model: claude-sonnet-4-20250514 → claude-opus-4-5-20251101
-Backup: coop.yaml → coop.yaml.2026-02-07T22:30:00.bak
-Applied: coop.staging.yaml → coop.yaml
-Removed: coop.staging.yaml
+Backup: coop.toml → coop.toml.2026-02-07T22:30:00.bak
+Applied: coop.staging.toml → coop.toml
+Removed: coop.staging.toml
 ```
 
 The agent workflow:
-1. `edit_file coop.staging.yaml` — write proposed config
+1. `edit_file coop.staging.toml` — write proposed config
 2. `bash "coop promote --dry-run"` — see what would change
 3. `bash "coop promote"` — apply if satisfied
 
@@ -163,20 +163,20 @@ The agent workflow:
 - Live config is never directly modified by the agent
 - Dry-run shows exact diff before applying
 - Automatic backup on promotion
-- Clear separation: staging is a proposal, coop.yaml is truth
+- Clear separation: staging is a proposal, coop.toml is truth
 
 **Cons:**
 - Two-file mental model is more complex
 - Agent has to learn the staging workflow
-- Nothing prevents the agent from editing coop.yaml directly anyway
+- Nothing prevents the agent from editing coop.toml directly anyway
 - Promotion is still a cold check — doesn't verify the running server
 
 ### Approach 4: Hot Reload with Health Check
 
-The running server watches coop.yaml for changes. On change:
+The running server watches coop.toml for changes. On change:
 
 ```
-coop.yaml modified
+coop.toml modified
     │
     ▼
 Parse + validate new config
@@ -215,16 +215,16 @@ Health check = send a synthetic message through the full pipeline and verify a r
 Combine approaches 1 and 4 at a simpler level:
 
 - `coop check` exists as a standalone command
-- `coop.yaml` writes through a gateway-provided mechanism that auto-validates
+- `coop.toml` writes through a gateway-provided mechanism that auto-validates
 - No hot-reload — just prevent bad writes and require restart
 
-Implementation: a thin wrapper that intercepts writes to coop.yaml:
+Implementation: a thin wrapper that intercepts writes to coop.toml:
 
 ```rust
 /// Validate, backup, and write config atomically.
 pub fn safe_write_config(path: &Path, new_content: &str) -> Result<ConfigWriteResult> {
     // 1. Parse the new content
-    let new_config: Config = serde_yaml::from_str(new_content)?;
+    let new_config: Config = toml::from_str(new_content)?;
 
     // 2. Run full validation
     let report = validate_config(&new_config)?;
@@ -247,7 +247,7 @@ The agent uses this through a `config_write` tool or through `coop check --apply
 ```bash
 # Agent edits config, then:
 coop check                     # validate only
-coop check --apply proposed.yaml  # validate + swap if valid
+coop check --apply proposed.toml  # validate + swap if valid
 ```
 
 **Pros:**
@@ -259,14 +259,14 @@ coop check --apply proposed.yaml  # validate + swap if valid
 
 **Cons:**
 - Still requires restart to take effect (but restart is fast — under 2s)
-- Agent could still edit coop.yaml with edit_file, bypassing the tool
+- Agent could still edit coop.toml with edit_file, bypassing the tool
 
 ## Recommendation
 
 **Phase 1: `coop check` command (Approach 1)**
 
 This is the highest-value, lowest-cost option. It:
-- Catches the most common failures (bad YAML, missing workspace, invalid cron)
+- Catches the most common failures (bad TOML, missing workspace, invalid cron)
 - Gives the agent a clear way to verify its changes
 - Requires no architectural changes to the gateway
 - Is useful for humans too (CI, manual config changes)
@@ -277,7 +277,7 @@ Implementation is straightforward: extract the validation logic already in `cmd_
 **Phase 2: Automatic backup + atomic write**
 
 Before any config write (whether by the agent or a human), the system:
-- Copies `coop.yaml` → `coop.yaml.bak` (or timestamped)
+- Copies `coop.toml` → `coop.toml.bak` (or timestamped)
 - Writes new config via temp file + rename (no partial writes)
 
 This is a small addition to phase 1 that prevents the "I can't get back to the old config" failure.
@@ -286,7 +286,7 @@ This is a small addition to phase 1 that prevents the "I can't get back to the o
 
 Once `coop check` exists, wrap it in a tool:
 ```
-config_write(content: "<full yaml>")
+config_write(content: "<full toml>")
   → validates internally
   → backs up old config
   → writes atomically
@@ -315,7 +315,7 @@ pub struct CheckReport {
 }
 
 pub struct CheckResult {
-    name: String,         // "yaml_parse", "workspace", "provider", etc.
+    name: String,         // "toml_parse", "workspace", "provider", etc.
     passed: bool,
     message: String,      // "workspace exists: ./workspaces/default"
     severity: Severity,   // Error (blocks start) vs Warning (degraded)
@@ -326,7 +326,7 @@ pub struct CheckResult {
 
 | Check | Validation |
 |-------|-----------|
-| `yaml_parse` | `serde_yaml::from_str` succeeds |
+| `toml_parse` | `toml::from_str` succeeds |
 | `required_fields` | agent.id and agent.model present and non-empty |
 | `workspace_exists` | `config.resolve_workspace()` succeeds |
 | `provider_known` | provider.name is "anthropic" (or future supported) |
@@ -362,19 +362,19 @@ The agent's system prompt (AGENTS.md) should include instructions like:
 ```markdown
 ## Config Changes
 
-When modifying coop.yaml:
+When modifying coop.toml:
 1. Read the current config with read_file
 2. Make your changes with edit_file
 3. Run `coop check` via bash to validate
 4. If check fails, fix the errors and re-check
-5. Never leave coop.yaml in an invalid state
+5. Never leave coop.toml in an invalid state
 ```
 
 Example agent interaction:
 ```
 User: "Switch to opus"
 
-Agent: [reads coop.yaml]
+Agent: [reads coop.toml]
 Agent: [edit_file: changes model to anthropic/claude-opus-4-5-20251101]
 Agent: [bash: coop check]
 → ✓ all checks passed
@@ -389,7 +389,7 @@ Failed example:
 ```
 User: "Add a cron job that runs every potato"
 
-Agent: [reads coop.yaml]
+Agent: [reads coop.toml]
 Agent: [edit_file: adds cron entry with expr "every potato"]
 Agent: [bash: coop check]
 → ✓ config syntax valid
@@ -406,5 +406,5 @@ Agent: "I couldn't add that — 'every potato' isn't a valid cron
 
 - **Runtime config diffing.** We don't compare running config vs file config. The file is the source of truth, always.
 - **Remote config management.** No API endpoint for config changes. Config lives on disk, modified by the agent or human.
-- **Config encryption.** Secrets (API keys) stay in env vars, not in coop.yaml. The config file has no secrets to protect.
+- **Config encryption.** Secrets (API keys) stay in env vars, not in coop.toml. The config file has no secrets to protect.
 - **Schema versioning.** Config schema is simple enough that we don't need migration tooling. Breaking changes are handled by release notes.

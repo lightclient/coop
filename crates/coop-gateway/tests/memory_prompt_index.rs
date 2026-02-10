@@ -215,17 +215,17 @@ impl PromptHarness {
 }
 
 fn config_with_prompt_index(enabled: bool, limit: usize, max_tokens: usize) -> Config {
-    serde_yaml::from_str(&format!(
-        "
-agent:
-  id: coop
-  model: prompt-capture-model
-memory:
-  prompt_index:
-    enabled: {enabled}
-    limit: {limit}
-    max_tokens: {max_tokens}
-"
+    toml::from_str(&format!(
+        r#"
+[agent]
+id = "coop"
+model = "prompt-capture-model"
+
+[memory.prompt_index]
+enabled = {enabled}
+limit = {limit}
+max_tokens = {max_tokens}
+"#
     ))
     .unwrap()
 }

@@ -130,7 +130,7 @@ export TARGET="+1YYYYYYYYYY"  # coop's phone number (local signal-cli's account)
 
 ### coop
 
-**coop** must be built with the `signal` feature and configured with a linked Signal account. The config is at `coop.yaml` and the Signal DB at `./db/signal.db`.
+**coop** must be built with the `signal` feature and configured with a linked Signal account. The config is at `coop.toml` and the Signal DB at `./db/signal.db`.
 
 Verify:
 
@@ -139,7 +139,7 @@ Verify:
 cargo build --features signal
 
 # coop config has signal channel
-grep -A2 'signal:' coop.yaml
+grep -A2 'signal:' coop.toml
 ```
 
 ### Linking coop as a secondary device
@@ -165,15 +165,15 @@ After linking, coop can receive messages sent to the local signal-cli's phone nu
 
 ### Configuring the user match pattern
 
-The `coop.yaml` users section must contain the **remote sender's UUID** (not coop's UUID) so that incoming messages get matched to a user with the correct trust level.
+The `coop.toml` users section must contain the **remote sender's UUID** (not coop's UUID) so that incoming messages get matched to a user with the correct trust level.
 
 To discover the remote sender's UUID:
 
 1. Start coop and send a test message from the remote signal-cli
 2. Check traces for the sender UUID: `grep '"signal inbound dispatched"' traces.jsonl | jq -r '.fields."signal.sender"'`
-3. Update `coop.yaml`:
+3. Update `coop.toml`:
 
-```yaml
+```toml
 users:
   - name: alice
     trust: full
@@ -556,8 +556,8 @@ Wait 20 seconds.
 
 **Pass criteria:**
 - `tool_execute` with tool name `config_read`
-- Tool result contains the YAML config content
-- Reply mentions the model name from coop.yaml
+- Tool result contains the TOML config content
+- Reply mentions the model name from coop.toml
 - No `ERROR` entries
 
 ### Scenario 17: Multi-tool chain — investigate the workspace

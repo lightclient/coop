@@ -1146,10 +1146,6 @@ version = "1.0.149"
 criteria = "safe-to-deploy"
 version = "0.7.1"
 
-[[exemptions.serde_yaml]]
-criteria = "safe-to-deploy"
-version = "0.9.34+deprecated"
-
 [[exemptions.sha1]]
 criteria = "safe-to-deploy"
 version = "0.10.6"
@@ -1453,10 +1449,6 @@ version = "0.2.6"
 [[exemptions.universal-hash]]
 criteria = "safe-to-deploy"
 version = "0.5.1"
-
-[[exemptions.unsafe-libyaml]]
-criteria = "safe-to-deploy"
-version = "0.2.11"
 
 [[exemptions.untrusted]]
 criteria = "safe-to-deploy"

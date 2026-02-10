@@ -67,7 +67,7 @@ This function runs all checks in order, collecting results. It must never panic 
 
 **Checks to run (in order):**
 
-1. **`yaml_parse`** (Error): Try `Config::load(config_path)`. If it fails, record the error and return early — no point running further checks on an unparseable config.
+1. **`toml_parse`** (Error): Try `Config::load(config_path)`. If it fails, record the error and return early — no point running further checks on an unparseable config.
 
 2. **`required_fields`** (Error): Check `config.agent.id` is non-empty and `config.agent.model` is non-empty.
 
@@ -151,9 +151,9 @@ The `tui_helpers::resolve_config_path` function resolves relative paths against 
 
 Add tests in `crates/coop-gateway/src/config_check.rs` (inline `#[cfg(test)] mod tests`):
 
-- `test_valid_minimal_config` — Create a tempdir with a valid coop.yaml and workspace. Run `validate_config`. Assert no errors.
-- `test_invalid_yaml` — Write garbage to a file. Assert `yaml_parse` fails and report has errors.
-- `test_missing_workspace` — Valid YAML but workspace dir doesn't exist. Assert `workspace_exists` fails.
+- `test_valid_minimal_config` — Create a tempdir with a valid coop.toml and workspace. Run `validate_config`. Assert no errors.
+- `test_invalid_toml` — Write garbage to a file. Assert `toml_parse` fails and report has errors.
+- `test_missing_workspace` — Valid TOML but workspace dir doesn't exist. Assert `workspace_exists` fails.
 - `test_unknown_provider` — Config with `provider.name: "openai"`. Assert `provider_known` fails.
 - `test_invalid_cron` — Config with a bad cron expression. Assert the cron check fails as a warning.
 - `test_cron_user_not_in_config` — Cron references user "mallory" who isn't in users. Assert warning.
@@ -178,7 +178,7 @@ use anyhow::Result;
 /// Overwrites any existing .bak file.
 /// Returns the backup path.
 pub(crate) fn backup_config(path: &Path) -> Result<PathBuf> {
-    let backup = path.with_extension("yaml.bak");
+    let backup = path.with_extension("toml.bak");
     std::fs::copy(path, &backup)?;
     Ok(backup)
 }
@@ -186,7 +186,7 @@ pub(crate) fn backup_config(path: &Path) -> Result<PathBuf> {
 /// Write content to a file atomically: write to a .tmp sibling, then rename.
 /// This prevents partial/corrupt writes if the process crashes mid-write.
 pub(crate) fn atomic_write(path: &Path, content: &str) -> Result<()> {
-    let tmp = path.with_extension("yaml.tmp");
+    let tmp = path.with_extension("toml.tmp");
     std::fs::write(&tmp, content)?;
     std::fs::rename(&tmp, path)?;
     Ok(())
@@ -201,7 +201,7 @@ pub(crate) fn safe_write_config(
 ) -> (CheckReport, Option<PathBuf>) {
     // 1. Write new content to a temp file and validate it
     //    We need a file on disk for validate_config to read.
-    let staging = config_path.with_extension("yaml.staging");
+    let staging = config_path.with_extension("toml.staging");
     if let Err(e) = std::fs::write(&staging, new_content) {
         let mut report = CheckReport::default();
         report.push(CheckResult {
@@ -270,8 +270,8 @@ NOTE: The above is pseudocode showing intent. The actual implementation should b
 - `test_backup_config` — Write a config file, call `backup_config`, verify .bak exists with same content.
 - `test_atomic_write` — Call `atomic_write`, verify file has new content, verify no .tmp file remains.
 - `test_safe_write_valid_config` — Full roundtrip: write a valid config via `safe_write_config`, verify the file is updated and .bak exists.
-- `test_safe_write_invalid_config` — Pass broken YAML to `safe_write_config`, verify original file is unchanged.
-- `test_safe_write_invalid_provider` — Pass valid YAML with `provider.name: "openai"`, verify original file is unchanged.
+- `test_safe_write_invalid_config` — Pass broken TOML to `safe_write_config`, verify original file is unchanged.
+- `test_safe_write_invalid_provider` — Pass valid TOML with `provider.name: "openai"`, verify original file is unchanged.
 
 ---
 
@@ -311,7 +311,7 @@ impl ConfigWriteTool {
   "properties": {
     "content": {
       "type": "string",
-      "description": "Complete YAML content for coop.yaml. Must be the full file — not a patch or partial update. The content is validated before writing. If validation fails, the file is not modified."
+      "description": "Complete TOML content for coop.toml. Must be the full file — not a patch or partial update. The content is validated before writing. If validation fails, the file is not modified."
     }
   },
   "required": ["content"]
@@ -321,7 +321,7 @@ impl ConfigWriteTool {
 **`Tool` implementation:**
 
 - Tool name: `"config_write"`
-- Description: `"Validate and write coop.yaml. Backs up the current config before writing. Returns validation results. If any errors are found, the file is NOT modified."`
+- Description: `"Validate and write coop.toml. Backs up the current config before writing. Returns validation results. If any errors are found, the file is NOT modified."`
 - Trust gate: require `TrustLevel::Full` (only full-trust users can modify config). Return `ToolOutput::error("config_write requires Full trust level")` otherwise.
 - Extract `content` string from arguments.
 - Call `safe_write_config(&self.config_path, &content)`.
@@ -394,10 +394,10 @@ NOTE: `CompositeExecutor` is in `coop-core` (`coop_core::tools::CompositeExecuto
 
 Add tests in `crates/coop-gateway/src/config_tool.rs`:
 
-- `test_config_write_valid` — Construct a `ConfigWriteTool` pointing at a temp config file. Write valid YAML. Verify file is updated, .bak exists.
-- `test_config_write_invalid_yaml` — Write garbage. Verify file is unchanged, output contains error.
+- `test_config_write_valid` — Construct a `ConfigWriteTool` pointing at a temp config file. Write valid TOML. Verify file is updated, .bak exists.
+- `test_config_write_invalid_toml` — Write garbage. Verify file is unchanged, output contains error.
 - `test_config_write_trust_gate` — Call with `TrustLevel::Public`. Verify rejection.
-- `test_config_write_missing_workspace` — Write valid YAML that references a nonexistent workspace. Verify file is unchanged (workspace_exists is an Error-severity check).
+- `test_config_write_missing_workspace` — Write valid TOML that references a nonexistent workspace. Verify file is unchanged (workspace_exists is an Error-severity check).
 
 ---
 
@@ -443,8 +443,8 @@ Verify manually:
 cargo run -- check
 
 # Phase 1 — should fail:
-echo "garbage" > /tmp/bad.yaml
-cargo run -- -c /tmp/bad.yaml check
+echo "garbage" > /tmp/bad.toml
+cargo run -- -c /tmp/bad.toml check
 
 # Phase 3 — visible in tool list (grep for config_write in debug output)
 ```

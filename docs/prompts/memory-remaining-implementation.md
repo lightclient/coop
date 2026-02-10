@@ -40,7 +40,7 @@ Expected ranking:
 
 ### B) Embedding pipeline wiring
 - Use existing EmbeddingProvider trait in coop-memory.
-- Create concrete embedder implementation in gateway (configured from coop.yaml memory.embedding).
+- Create concrete embedder implementation in gateway (configured from coop.toml memory.embedding).
 - Instantiate SqliteMemory with embedder from gateway (open_with_embedder path).
 - Generate embeddings for:
   - query text during search (when text present and embedder available)

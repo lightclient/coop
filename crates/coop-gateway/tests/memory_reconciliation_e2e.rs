@@ -233,12 +233,12 @@ impl GatewayHarness {
 }
 
 fn test_config() -> Config {
-    serde_yaml::from_str(
-        "
-agent:
-  id: coop
-  model: scripted-model
-",
+    toml::from_str(
+        r#"
+[agent]
+id = "coop"
+model = "scripted-model"
+"#,
     )
     .unwrap()
 }

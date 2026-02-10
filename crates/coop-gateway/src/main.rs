@@ -1070,7 +1070,7 @@ async fn cmd_signal_enabled(config_path: Option<&str>, command: SignalCommands) 
     let signal = config
         .channels
         .signal
-        .ok_or_else(|| anyhow::anyhow!("signal channel is not configured in coop.yaml"))?;
+        .ok_or_else(|| anyhow::anyhow!("signal channel is not configured in coop.toml"))?;
     let db_path = tui_helpers::resolve_config_path(&config_dir, &signal.db_path);
 
     match command {
@@ -1317,19 +1317,22 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn test_config() -> Config {
-        serde_yaml::from_str(
-            "
-agent:
-  id: test
-  model: test-model
-users:
-  - name: alice
-    trust: full
-    match: ['terminal:default']
-  - name: bob
-    trust: full
-    match: ['signal:bob-uuid']
-",
+        toml::from_str(
+            r#"
+[agent]
+id = "test"
+model = "test-model"
+
+[[users]]
+name = "alice"
+trust = "full"
+match = ["terminal:default"]
+
+[[users]]
+name = "bob"
+trust = "full"
+match = ["signal:bob-uuid"]
+"#,
         )
         .unwrap()
     }
@@ -1420,12 +1423,12 @@ users:
 
     #[test]
     fn resolve_tui_user_defaults_to_root_with_empty_config() {
-        let config: Config = serde_yaml::from_str(
-            "
-agent:
-  id: test
-  model: test-model
-",
+        let config: Config = toml::from_str(
+            r#"
+[agent]
+id = "test"
+model = "test-model"
+"#,
         )
         .unwrap();
         let user = resolve_tui_user(&config, None);

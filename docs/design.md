@@ -72,8 +72,8 @@ Effective tool access = `tools_for(min(user.trust, situation.ceiling))`
 
 ## Configuration
 
-```yaml
-# coop.yaml
+```toml
+# coop.toml
 
 agent:
   id: reid
@@ -236,7 +236,7 @@ agent:
 - Layer 3 (on-demand): Full memory content via memory_search/memory_get tools
 
 ### Config System
-- YAML config with JSON Schema validation (generated from Rust structs)
+- TOML config with JSON Schema validation (generated from Rust structs)
 - Hot reload via file watcher
 - Patch merges arrays by key (not replace!)
 - Secrets in system keyring, never in config file

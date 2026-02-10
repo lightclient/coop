@@ -44,11 +44,11 @@ Config changes are the #1 cause of OpenClaw outages. Coop treats config as a dep
 Every config change goes through full validation before touching the running system:
 
 ```
-User edits coop.yaml
+User edits coop.toml
          │
          ▼
     ┌──────────┐
-    │ Parse    │ ← YAML syntax valid?
+    │ Parse    │ ← TOML syntax valid?
     │ Validate │ ← Schema valid? Required fields present?
     │ Verify   │ ← Can we connect to the provider? Do workspace files exist?
     │          │   Are channel credentials valid? Do trust levels parse?
@@ -60,13 +60,13 @@ User edits coop.yaml
          │ all checks pass
          ▼
     ┌──────────┐
-    │ Snapshot  │ ← Save current working config as .coop.yaml.bak
+    │ Snapshot  │ ← Save current working config as .coop.toml.bak
     │ Apply    │ ← Hot-swap the live config
     └────┬─────┘
          │
     ┌────▼─────┐
     │ Health   │ ← Can the agent respond? Can channels connect?
-    │ Check    │   If not → automatic rollback to .coop.yaml.bak
+    │ Check    │   If not → automatic rollback to .coop.toml.bak
     └──────────┘
 ```
 
@@ -82,7 +82,7 @@ Every config change is recorded in an append-only log:
 CREATE TABLE config_history (
     id          INTEGER PRIMARY KEY,
     timestamp   TEXT NOT NULL,
-    config      TEXT NOT NULL,        -- full YAML snapshot
+    config      TEXT NOT NULL,        -- full TOML snapshot
     source      TEXT NOT NULL,        -- "user_edit", "hot_reload", "rollback"
     valid       BOOLEAN NOT NULL,     -- did validation pass?
     applied     BOOLEAN NOT NULL,     -- was it actually applied?
@@ -125,7 +125,7 @@ The agent sees this as a system message in its session and can proactively tell 
 
 OpenClaw's `config.patch` replaces arrays, silently deleting data. Coop merges arrays by key:
 
-```yaml
+```toml
 # Existing config:
 users:
   - name: alice

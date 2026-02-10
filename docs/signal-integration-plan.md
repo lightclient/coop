@@ -311,8 +311,8 @@ This calls `Manager::link_secondary_device()`:
 
 After linking, the gateway uses `Manager::load_registered()` on startup.
 
-```yaml
-# coop.yaml
+```toml
+# coop.toml
 channels:
   signal:
     db_path: ./db/signal.db
@@ -414,8 +414,8 @@ For Signal, responses are collected into a single text message (no streaming). F
 
 ## Config Changes
 
-```yaml
-# coop.yaml additions
+```toml
+# coop.toml additions
 
 channels:
   signal:

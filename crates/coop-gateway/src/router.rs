@@ -381,19 +381,22 @@ mod tests {
     use tokio::sync::mpsc;
 
     fn test_config() -> Config {
-        serde_yaml::from_str(
-            "
-agent:
-  id: reid
-  model: test
-users:
-  - name: alice
-    trust: full
-    match: ['terminal:default', 'signal:alice-uuid']
-  - name: bob
-    trust: inner
-    match: ['signal:bob-uuid']
-",
+        toml::from_str(
+            r#"
+[agent]
+id = "reid"
+model = "test"
+
+[[users]]
+name = "alice"
+trust = "full"
+match = ["terminal:default", "signal:alice-uuid"]
+
+[[users]]
+name = "bob"
+trust = "inner"
+match = ["signal:bob-uuid"]
+"#,
         )
         .unwrap()
     }

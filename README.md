@@ -42,13 +42,10 @@ cargo run --bin coop -- chat
 
 For higher throughput, configure multiple API keys. Coop automatically rotates between them based on Anthropic's rate-limit headers — proactively when a key approaches 90% utilization, and reactively on 429 errors.
 
-```yaml
-provider:
-  name: anthropic
-  api_keys:
-    - env:ANTHROPIC_API_KEY
-    - env:ANTHROPIC_API_KEY_2
-    - env:ANTHROPIC_API_KEY_3
+```toml
+[provider]
+name = "anthropic"
+api_keys = ["env:ANTHROPIC_API_KEY", "env:ANTHROPIC_API_KEY_2", "env:ANTHROPIC_API_KEY_3"]
 ```
 
 Each entry uses an `env:` prefix referencing an environment variable. Keys are never stored in config files. Mixed pools of regular API keys and OAuth tokens work — each key auto-detects its auth type.
@@ -59,7 +56,7 @@ Key selection prefers the key whose rate-limit window resets soonest among keys 
 
 ## Memory
 
-Coop has a built-in structured memory system backed by SQLite. The agent can search, write, and browse observations across trust-gated stores. Memory works out of the box with zero config — add a `memory:` section to your `coop.yaml` to customise it.
+Coop has a built-in structured memory system backed by SQLite. The agent can search, write, and browse observations across trust-gated stores. Memory works out of the box with zero config — add a `[memory]` section to your `coop.toml` to customise it.
 
 ### Minimal setup (works immediately)
 
@@ -67,35 +64,35 @@ Memory is enabled by default. With no `memory:` section in your config, Coop sto
 
 ### Full config reference
 
-```yaml
-memory:
-  # Path to the SQLite database (relative to config dir or absolute).
-  # Default: ./db/memory.db
-  db_path: ./db/memory.db
+```toml
+[memory]
+# Path to the SQLite database (relative to config dir or absolute).
+# Default: ./db/memory.db
+db_path = "./db/memory.db"
 
-  # Prompt index: injects a compact summary of recent observations into the
-  # system prompt before each turn so the agent has context without searching.
-  prompt_index:
-    enabled: true       # default: true
-    limit: 12           # max observations to include (default: 12)
-    max_tokens: 1200    # token budget for the index block (default: 1200)
+# Prompt index: injects a compact summary of recent observations into the
+# system prompt before each turn so the agent has context without searching.
+[memory.prompt_index]
+enabled = true       # default: true
+limit = 12           # max observations to include (default: 12)
+max_tokens = 1200    # token budget for the index block (default: 1200)
 
-  # Retention: automatic compression, archiving, and cleanup of old observations.
-  # Runs once at startup and periodically in the background.
-  retention:
-    enabled: true                    # default: true
-    compress_after_days: 14          # cluster & merge stale observations (default: 14)
-    compression_min_cluster_size: 3  # minimum cluster size to trigger compression (default: 3)
-    archive_after_days: 30           # move expired observations to archive table (default: 30)
-    delete_archive_after_days: 365   # permanently delete old archive rows (default: 365)
-    max_rows_per_run: 200            # bound each maintenance stage (default: 200)
+# Retention: automatic compression, archiving, and cleanup of old observations.
+# Runs once at startup and periodically in the background.
+[memory.retention]
+enabled = true                     # default: true
+compress_after_days = 14           # cluster & merge stale observations (default: 14)
+compression_min_cluster_size = 3   # minimum cluster size to trigger compression (default: 3)
+archive_after_days = 30            # move expired observations to archive table (default: 30)
+delete_archive_after_days = 365    # permanently delete old archive rows (default: 365)
+max_rows_per_run = 200             # bound each maintenance stage (default: 200)
 
-  # Embedding: optional semantic vector search. Without this, retrieval is
-  # FTS-only (full-text search), which works well for most use cases.
-  embedding:
-    provider: openai               # openai | voyage | cohere | openai-compatible
-    model: text-embedding-3-small
-    dimensions: 1536
+# Embedding: optional semantic vector search. Without this, retrieval is
+# FTS-only (full-text search), which works well for most use cases.
+[memory.embedding]
+provider = "openai"                # openai | voyage | cohere | openai-compatible
+model = "text-embedding-3-small"
+dimensions = 1536
 ```
 
 ### Memory stores and trust
@@ -138,40 +135,40 @@ All mutations are recorded in `observation_history` for auditability.
 Embeddings are optional. Without them, search uses FTS5 (SQLite full-text search). Adding an embedding provider enables hybrid retrieval (FTS + vector similarity + recency ranking).
 
 **OpenAI** (default):
-```yaml
-embedding:
-  provider: openai
-  model: text-embedding-3-small
-  dimensions: 1536
+```toml
+[memory.embedding]
+provider = "openai"
+model = "text-embedding-3-small"
+dimensions = 1536
 ```
 Requires `OPENAI_API_KEY` in your environment.
 
 **Voyage AI**:
-```yaml
-embedding:
-  provider: voyage
-  model: voyage-3-lite
-  dimensions: 512
+```toml
+[memory.embedding]
+provider = "voyage"
+model = "voyage-3-lite"
+dimensions = 512
 ```
 Requires `VOYAGE_API_KEY`.
 
 **Cohere**:
-```yaml
-embedding:
-  provider: cohere
-  model: embed-english-v3.0
-  dimensions: 1024
+```toml
+[memory.embedding]
+provider = "cohere"
+model = "embed-english-v3.0"
+dimensions = 1024
 ```
 Requires `COHERE_API_KEY`.
 
 **OpenAI-compatible** (any endpoint that speaks the OpenAI embeddings API):
-```yaml
-embedding:
-  provider: openai-compatible
-  model: text-embedding-3-small
-  dimensions: 1536
-  base_url: https://your-endpoint.example/v1
-  api_key_env: YOUR_CUSTOM_KEY_ENV
+```toml
+[memory.embedding]
+provider = "openai-compatible"
+model = "text-embedding-3-small"
+dimensions = 1536
+base_url = "https://your-endpoint.example/v1"
+api_key_env = "YOUR_CUSTOM_KEY_ENV"
 ```
 Requires the env var named in `api_key_env`.
 
@@ -199,27 +196,30 @@ Coop supports scheduled tasks via cron expressions. The scheduler runs inside th
 
 When a cron entry has a `user` field, the agent's response is automatically delivered to all non-terminal channels the user is bound to (from their `match` patterns). An explicit `deliver` field overrides this with a specific target.
 
-```yaml
-cron:
-  # Auto-delivers to alice's Signal (from her match patterns)
-  - name: heartbeat
-    cron: "*/30 * * * *"
-    user: alice
-    message: check HEARTBEAT.md
+```toml
+# Auto-delivers to alice's Signal (from her match patterns)
+[[cron]]
+name = "heartbeat"
+cron = "*/30 * * * *"
+user = "alice"
+message = "check HEARTBEAT.md"
 
-  # Explicit delivery to a specific target
-  - name: morning-briefing
-    cron: "0 8 * * *"
-    user: alice
-    deliver:
-      channel: signal
-      target: alice-uuid
-    message: Morning briefing
+# Explicit delivery to a specific target
+[[cron]]
+name = "morning-briefing"
+cron = "0 8 * * *"
+user = "alice"
+message = "Morning briefing"
 
-  # Silent — no user, no delivery
-  - name: cleanup
-    cron: "0 3 * * *"
-    message: run cleanup
+[cron.deliver]
+channel = "signal"
+target = "alice-uuid"
+
+# Silent — no user, no delivery
+[[cron]]
+name = "cleanup"
+cron = "0 3 * * *"
+message = "run cleanup"
 ```
 
 ### HEARTBEAT_OK suppression

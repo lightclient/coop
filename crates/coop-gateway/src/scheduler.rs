@@ -1188,19 +1188,17 @@ mod tests {
 
     #[test]
     fn resolve_cron_delivery_targets_parses_match_patterns() {
-        let config: Config = serde_yaml::from_str(
-            "
-agent:
-  id: test
-  model: test
-users:
-  - name: alice
-    trust: full
-    match:
-      - 'signal:alice-uuid'
-      - 'terminal:default'
-      - 'signal:group:team-chat'
-",
+        let config: Config = toml::from_str(
+            r#"
+[agent]
+id = "test"
+model = "test"
+
+[[users]]
+name = "alice"
+trust = "full"
+match = ["signal:alice-uuid", "terminal:default", "signal:group:team-chat"]
+"#,
         )
         .unwrap();
 
@@ -1220,16 +1218,17 @@ users:
 
     #[test]
     fn resolve_cron_delivery_targets_explicit_deliver_overrides() {
-        let config: Config = serde_yaml::from_str(
-            "
-agent:
-  id: test
-  model: test
-users:
-  - name: alice
-    trust: full
-    match: ['signal:alice-uuid']
-",
+        let config: Config = toml::from_str(
+            r#"
+[agent]
+id = "test"
+model = "test"
+
+[[users]]
+name = "alice"
+trust = "full"
+match = ["signal:alice-uuid"]
+"#,
         )
         .unwrap();
 
@@ -1253,12 +1252,12 @@ users:
 
     #[test]
     fn resolve_cron_delivery_targets_no_user_returns_empty() {
-        let config: Config = serde_yaml::from_str(
-            "
-agent:
-  id: test
-  model: test
-",
+        let config: Config = toml::from_str(
+            r#"
+[agent]
+id = "test"
+model = "test"
+"#,
         )
         .unwrap();
 
@@ -1276,16 +1275,17 @@ agent:
 
     #[test]
     fn resolve_cron_delivery_targets_unknown_user_returns_empty() {
-        let config: Config = serde_yaml::from_str(
-            "
-agent:
-  id: test
-  model: test
-users:
-  - name: alice
-    trust: full
-    match: ['signal:alice-uuid']
-",
+        let config: Config = toml::from_str(
+            r#"
+[agent]
+id = "test"
+model = "test"
+
+[[users]]
+name = "alice"
+trust = "full"
+match = ["signal:alice-uuid"]
+"#,
         )
         .unwrap();
 
@@ -1314,6 +1314,15 @@ users:
         make_shared_config_and_router_with_provider(users, cron, provider)
     }
 
+    fn trust_as_str(trust: TrustLevel) -> &'static str {
+        match trust {
+            TrustLevel::Full => "full",
+            TrustLevel::Inner => "inner",
+            TrustLevel::Familiar => "familiar",
+            TrustLevel::Public => "public",
+        }
+    }
+
     /// Build with users that preserve their match patterns (unlike
     /// `make_shared_config_and_router` which resets match to `[]`).
     fn make_shared_config_and_router_with_users_and_match(
@@ -1326,47 +1335,41 @@ users:
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("SOUL.md"), "test").unwrap();
 
-        let mut yaml = format!(
-            "agent:\n  id: test\n  model: test\n  workspace: {}\n",
+        let mut toml_str = format!(
+            "[agent]\nid = \"test\"\nmodel = \"test\"\nworkspace = \"{}\"\n",
             dir.path().display()
         );
 
-        if !users.is_empty() {
-            yaml.push_str("users:\n");
-            for u in users {
-                let matches: Vec<String> = u.r#match.iter().map(|m| format!("'{m}'")).collect();
+        for u in users {
+            let matches: Vec<String> = u.r#match.iter().map(|m| format!("\"{m}\"")).collect();
+            let _ = write!(
+                toml_str,
+                "\n[[users]]\nname = \"{}\"\ntrust = \"{}\"\nmatch = [{}]\n",
+                u.name,
+                trust_as_str(u.trust),
+                matches.join(", "),
+            );
+        }
+
+        for entry in cron {
+            let _ = write!(
+                toml_str,
+                "\n[[cron]]\nname = \"{}\"\ncron = \"{}\"\nmessage = \"{}\"\n",
+                entry.name, entry.cron, entry.message,
+            );
+            if let Some(ref user) = entry.user {
+                let _ = writeln!(toml_str, "user = \"{user}\"");
+            }
+            if let Some(ref delivery) = entry.deliver {
                 let _ = write!(
-                    yaml,
-                    "  - name: {}\n    trust: {}\n    match: [{}]\n",
-                    u.name,
-                    serde_yaml::to_string(&u.trust).unwrap().trim(),
-                    matches.join(", "),
+                    toml_str,
+                    "\n[cron.deliver]\nchannel = \"{}\"\ntarget = \"{}\"\n",
+                    delivery.channel, delivery.target,
                 );
             }
         }
 
-        if !cron.is_empty() {
-            yaml.push_str("cron:\n");
-            for entry in cron {
-                let _ = write!(
-                    yaml,
-                    "  - name: {}\n    cron: '{}'\n    message: '{}'\n",
-                    entry.name, entry.cron, entry.message,
-                );
-                if let Some(ref user) = entry.user {
-                    let _ = writeln!(yaml, "    user: {user}");
-                }
-                if let Some(ref delivery) = entry.deliver {
-                    let _ = write!(
-                        yaml,
-                        "    deliver:\n      channel: {}\n      target: {}\n",
-                        delivery.channel, delivery.target,
-                    );
-                }
-            }
-        }
-
-        let config: Config = serde_yaml::from_str(&yaml).unwrap();
+        let config: Config = toml::from_str(&toml_str).unwrap();
         let provider: Arc<dyn coop_core::Provider> = Arc::new(FakeProvider::new(response));
         let executor = Arc::new(DefaultExecutor::new());
         let shared = shared_config(config);
@@ -1396,48 +1399,41 @@ users:
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("SOUL.md"), "test").unwrap();
 
-        let users_yaml = match users {
-            Some(users) => {
-                let mut s = "users:\n".to_owned();
-                for u in users {
-                    let _ = write!(
-                        s,
-                        "  - name: {}\n    trust: {}\n    match: []\n",
-                        u.name,
-                        serde_yaml::to_string(&u.trust).unwrap().trim()
-                    );
-                }
-                s
-            }
-            None => String::new(),
-        };
-
-        let mut yaml = format!(
-            "agent:\n  id: test\n  model: test\n  workspace: {}\n{users_yaml}",
-            dir.path().display()
-        );
-        if !cron.is_empty() {
-            yaml.push_str("cron:\n");
-            for entry in cron {
+        let mut users_toml = String::new();
+        if let Some(users) = users {
+            for u in users {
                 let _ = write!(
-                    yaml,
-                    "  - name: {}\n    cron: '{}'\n    message: '{}'\n",
-                    entry.name, entry.cron, entry.message,
+                    users_toml,
+                    "\n[[users]]\nname = \"{}\"\ntrust = \"{}\"\nmatch = []\n",
+                    u.name,
+                    trust_as_str(u.trust),
                 );
-                if let Some(ref user) = entry.user {
-                    let _ = writeln!(yaml, "    user: {user}");
-                }
-                if let Some(ref delivery) = entry.deliver {
-                    let _ = write!(
-                        yaml,
-                        "    deliver:\n      channel: {}\n      target: {}\n",
-                        delivery.channel, delivery.target,
-                    );
-                }
             }
         }
 
-        let config: Config = serde_yaml::from_str(&yaml).unwrap();
+        let mut toml_str = format!(
+            "[agent]\nid = \"test\"\nmodel = \"test\"\nworkspace = \"{}\"\n{users_toml}",
+            dir.path().display()
+        );
+        for entry in cron {
+            let _ = write!(
+                toml_str,
+                "\n[[cron]]\nname = \"{}\"\ncron = \"{}\"\nmessage = \"{}\"\n",
+                entry.name, entry.cron, entry.message,
+            );
+            if let Some(ref user) = entry.user {
+                let _ = writeln!(toml_str, "user = \"{user}\"");
+            }
+            if let Some(ref delivery) = entry.deliver {
+                let _ = write!(
+                    toml_str,
+                    "\n[cron.deliver]\nchannel = \"{}\"\ntarget = \"{}\"\n",
+                    delivery.channel, delivery.target,
+                );
+            }
+        }
+
+        let config: Config = toml::from_str(&toml_str).unwrap();
         let executor = Arc::new(DefaultExecutor::new());
         let shared = shared_config(config);
         let gateway = Arc::new(

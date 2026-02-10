@@ -63,7 +63,7 @@ Gateway prompt build now appends a compact DB memory index before each turn when
 
 Config:
 
-```yaml
+```toml
 memory:
   prompt_index:
     enabled: true
@@ -155,7 +155,7 @@ Maintenance API:
 
 Config:
 
-```yaml
+```toml
 memory:
   retention:
     enabled: true
@@ -196,7 +196,7 @@ Supported providers:
 
 `openai-compatible` example:
 
-```yaml
+```toml
 memory:
   embedding:
     provider: openai-compatible

@@ -1226,12 +1226,12 @@ mod tests {
     }
 
     fn test_config() -> Config {
-        serde_yaml::from_str(
-            "
-agent:
-  id: coop
-  model: test-model
-",
+        toml::from_str(
+            r#"
+[agent]
+id = "coop"
+model = "test-model"
+"#,
         )
         .unwrap()
     }

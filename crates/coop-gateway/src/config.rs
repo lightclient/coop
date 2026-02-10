@@ -399,11 +399,11 @@ const fn default_memory_max_rows_per_run() -> usize {
 }
 
 impl Config {
-    /// Load config from a YAML file.
+    /// Load config from a TOML file.
     pub(crate) fn load(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read config file: {}", path.display()))?;
-        let config: Config = serde_yaml::from_str(&content)
+        let config: Config = toml::from_str(&content)
             .with_context(|| format!("failed to parse config file: {}", path.display()))?;
         Ok(config)
     }
@@ -434,14 +434,14 @@ impl Config {
         }
 
         // Check current directory
-        let local = PathBuf::from("coop.yaml");
+        let local = PathBuf::from("coop.toml");
         if local.exists() {
             return local;
         }
 
         // Check XDG config
         if let Ok(config_dir) = std::env::var("XDG_CONFIG_HOME") {
-            let xdg = PathBuf::from(config_dir).join("coop/coop.yaml");
+            let xdg = PathBuf::from(config_dir).join("coop/coop.toml");
             if xdg.exists() {
                 return xdg;
             }
@@ -449,7 +449,7 @@ impl Config {
 
         // Check ~/.config/coop
         if let Ok(home) = std::env::var("HOME") {
-            let home_config = PathBuf::from(home).join(".config/coop/coop.yaml");
+            let home_config = PathBuf::from(home).join(".config/coop/coop.toml");
             if home_config.exists() {
                 return home_config;
             }
@@ -467,12 +467,12 @@ mod tests {
 
     #[test]
     fn parse_minimal_config() {
-        let yaml = "
-agent:
-  id: test
-  model: anthropic/claude-sonnet-4-20250514
-";
-        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let toml_str = r#"
+[agent]
+id = "test"
+model = "anthropic/claude-sonnet-4-20250514"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.agent.id, "test");
         assert_eq!(config.agent.model, "anthropic/claude-sonnet-4-20250514");
         assert!(config.users.is_empty());
@@ -492,28 +492,29 @@ agent:
 
     #[test]
     fn parse_full_config() {
-        let yaml = "
-agent:
-  id: reid
-  model: anthropic/claude-sonnet-4-20250514
-  workspace: ./workspaces/default
+        let toml_str = r#"
+[agent]
+id = "reid"
+model = "anthropic/claude-sonnet-4-20250514"
+workspace = "./workspaces/default"
 
-users:
-  - name: alice
-    trust: full
-    match: ['terminal:default']
-  - name: bob
-    trust: inner
-    match: ['signal:bob-uuid']
+[[users]]
+name = "alice"
+trust = "full"
+match = ["terminal:default"]
 
-channels:
-  signal:
-    db_path: ./db/signal.db
+[[users]]
+name = "bob"
+trust = "inner"
+match = ["signal:bob-uuid"]
 
-provider:
-  name: anthropic
-";
-        let config: Config = serde_yaml::from_str(yaml).unwrap();
+[channels.signal]
+db_path = "./db/signal.db"
+
+[provider]
+name = "anthropic"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.agent.id, "reid");
         assert_eq!(config.users.len(), 2);
         assert_eq!(config.users[0].trust, TrustLevel::Full);
@@ -533,20 +534,23 @@ provider:
 
     #[test]
     fn parse_config_with_cron() {
-        let yaml = "
-agent:
-  id: coop
-  model: test
-cron:
-  - name: heartbeat
-    cron: '*/30 * * * *'
-    user: alice
-    message: check HEARTBEAT.md
-  - name: cleanup
-    cron: '0 3 * * *'
-    message: run cleanup
-";
-        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let toml_str = r#"
+[agent]
+id = "coop"
+model = "test"
+
+[[cron]]
+name = "heartbeat"
+cron = "*/30 * * * *"
+user = "alice"
+message = "check HEARTBEAT.md"
+
+[[cron]]
+name = "cleanup"
+cron = "0 3 * * *"
+message = "run cleanup"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.cron.len(), 2);
         assert_eq!(config.cron[0].name, "heartbeat");
         assert_eq!(config.cron[0].cron, "*/30 * * * *");
@@ -560,20 +564,22 @@ cron:
 
     #[test]
     fn parse_config_with_cron_delivery() {
-        let yaml = "
-agent:
-  id: coop
-  model: test
-cron:
-  - name: morning-briefing
-    cron: '0 8 * * *'
-    user: alice
-    deliver:
-      channel: signal
-      target: alice-uuid
-    message: Morning briefing
-";
-        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let toml_str = r#"
+[agent]
+id = "coop"
+model = "test"
+
+[[cron]]
+name = "morning-briefing"
+cron = "0 8 * * *"
+user = "alice"
+message = "Morning briefing"
+
+[cron.deliver]
+channel = "signal"
+target = "alice-uuid"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.cron.len(), 1);
         let delivery = config.cron[0].deliver.as_ref().unwrap();
         assert_eq!(delivery.channel, "signal");
@@ -582,20 +588,22 @@ cron:
 
     #[test]
     fn parse_config_with_cron_delivery_group_target() {
-        let yaml = "
-agent:
-  id: coop
-  model: test
-cron:
-  - name: weekly-review
-    cron: '0 18 * * 5'
-    user: alice
-    deliver:
-      channel: signal
-      target: 'group:deadbeef00112233445566778899aabbccddeeff00112233445566778899aabb'
-    message: Weekly review
-";
-        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let toml_str = r#"
+[agent]
+id = "coop"
+model = "test"
+
+[[cron]]
+name = "weekly-review"
+cron = "0 18 * * 5"
+user = "alice"
+message = "Weekly review"
+
+[cron.deliver]
+channel = "signal"
+target = "group:deadbeef00112233445566778899aabbccddeeff00112233445566778899aabb"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
         let delivery = config.cron[0].deliver.as_ref().unwrap();
         assert_eq!(delivery.channel, "signal");
         assert!(delivery.target.starts_with("group:"));
@@ -603,29 +611,33 @@ cron:
 
     #[test]
     fn parse_config_with_memory_settings() {
-        let yaml = "
-agent:
-  id: coop
-  model: test
-memory:
-  db_path: ./state/memory.db
-  prompt_index:
-    enabled: false
-    limit: 5
-    max_tokens: 300
-  retention:
-    enabled: true
-    archive_after_days: 10
-    delete_archive_after_days: 20
-    compress_after_days: 4
-    compression_min_cluster_size: 2
-    max_rows_per_run: 50
-  embedding:
-    provider: voyage
-    model: voyage-3-large
-    dimensions: 1024
-";
-        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let toml_str = r#"
+[agent]
+id = "coop"
+model = "test"
+
+[memory]
+db_path = "./state/memory.db"
+
+[memory.prompt_index]
+enabled = false
+limit = 5
+max_tokens = 300
+
+[memory.retention]
+enabled = true
+archive_after_days = 10
+delete_archive_after_days = 20
+compress_after_days = 4
+compression_min_cluster_size = 2
+max_rows_per_run = 50
+
+[memory.embedding]
+provider = "voyage"
+model = "voyage-3-large"
+dimensions = 1024
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.memory.db_path, "./state/memory.db");
         assert!(!config.memory.prompt_index.enabled);
         assert_eq!(config.memory.prompt_index.limit, 5);
@@ -644,19 +656,19 @@ memory:
 
     #[test]
     fn parse_config_with_openai_compatible_embedding() {
-        let yaml = "
-agent:
-  id: coop
-  model: test
-memory:
-  embedding:
-    provider: openai-compatible
-    model: text-embedding-3-small
-    dimensions: 1536
-    base_url: https://example.test/v1
-    api_key_env: OPENAI_COMPAT_API_KEY
-";
-        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let toml_str = r#"
+[agent]
+id = "coop"
+model = "test"
+
+[memory.embedding]
+provider = "openai-compatible"
+model = "text-embedding-3-small"
+dimensions = 1536
+base_url = "https://example.test/v1"
+api_key_env = "OPENAI_COMPAT_API_KEY"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
         let embedding = config.memory.embedding.as_ref().unwrap();
         assert_eq!(embedding.provider, "openai-compatible");
         assert_eq!(
@@ -671,15 +683,13 @@ memory:
 
     #[test]
     fn resolve_workspace_fails_for_missing_dir() {
-        let config: Config = serde_yaml::from_str(
-            "
-agent:
-  id: test
-  model: test
-  workspace: ./does-not-exist
-",
-        )
-        .unwrap();
+        let toml_str = r#"
+[agent]
+id = "test"
+model = "test"
+workspace = "./does-not-exist"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
 
         let err = config.resolve_workspace(Path::new("/tmp")).unwrap_err();
         assert!(
@@ -691,11 +701,11 @@ agent:
     #[test]
     fn resolve_workspace_succeeds_for_existing_dir() {
         let dir = tempfile::tempdir().unwrap();
-        let config: Config = serde_yaml::from_str(&format!(
-            "agent:\n  id: test\n  model: test\n  workspace: {}",
+        let toml_str = format!(
+            "[agent]\nid = \"test\"\nmodel = \"test\"\nworkspace = \"{}\"",
             dir.path().display()
-        ))
-        .unwrap();
+        );
+        let config: Config = toml::from_str(&toml_str).unwrap();
 
         let resolved = config.resolve_workspace(Path::new("/unused")).unwrap();
         assert_eq!(resolved, dir.path());
@@ -703,12 +713,12 @@ agent:
 
     #[test]
     fn parse_minimal_config_gets_default_prompt() {
-        let yaml = "
-agent:
-  id: test
-  model: test-model
-";
-        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let toml_str = r#"
+[agent]
+id = "test"
+model = "test-model"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.prompt.shared_files.len(), 3);
         assert_eq!(config.prompt.shared_files[0].path, "SOUL.md");
         assert_eq!(config.prompt.shared_files[1].path, "IDENTITY.md");
@@ -721,19 +731,21 @@ agent:
 
     #[test]
     fn parse_custom_prompt_shared_files() {
-        let yaml = "
-agent:
-  id: test
-  model: test-model
-prompt:
-  shared_files:
-    - path: SOUL.md
-      trust: familiar
-      cache: stable
-    - path: CONTEXT.md
-      description: Project context
-";
-        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let toml_str = r#"
+[agent]
+id = "test"
+model = "test-model"
+
+[[prompt.shared_files]]
+path = "SOUL.md"
+trust = "familiar"
+cache = "stable"
+
+[[prompt.shared_files]]
+path = "CONTEXT.md"
+description = "Project context"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.prompt.shared_files.len(), 2);
         assert_eq!(config.prompt.shared_files[0].path, "SOUL.md");
         assert_eq!(config.prompt.shared_files[0].trust, TrustLevel::Familiar);
@@ -749,14 +761,15 @@ prompt:
 
     #[test]
     fn parse_empty_user_files() {
-        let yaml = "
-agent:
-  id: test
-  model: test-model
-prompt:
-  user_files: []
-";
-        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let toml_str = r#"
+[agent]
+id = "test"
+model = "test-model"
+
+[prompt]
+user_files = []
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
         assert!(config.prompt.user_files.is_empty());
         // shared_files should get defaults
         assert_eq!(config.prompt.shared_files.len(), 3);
@@ -790,40 +803,45 @@ prompt:
 
     #[test]
     fn prompt_config_roundtrip() {
-        let yaml = "
-agent:
-  id: test
-  model: test-model
-prompt:
-  shared_files:
-    - path: SOUL.md
-      trust: familiar
-      cache: stable
-      description: Agent personality
-    - path: TOOLS.md
-  user_files:
-    - path: AGENTS.md
-      cache: stable
-    - path: USER.md
-      trust: inner
-";
-        let config: Config = serde_yaml::from_str(yaml).unwrap();
-        let serialized = serde_yaml::to_string(&config).unwrap();
-        let config2: Config = serde_yaml::from_str(&serialized).unwrap();
+        let toml_str = r#"
+[agent]
+id = "test"
+model = "test-model"
+
+[[prompt.shared_files]]
+path = "SOUL.md"
+trust = "familiar"
+cache = "stable"
+description = "Agent personality"
+
+[[prompt.shared_files]]
+path = "TOOLS.md"
+
+[[prompt.user_files]]
+path = "AGENTS.md"
+cache = "stable"
+
+[[prompt.user_files]]
+path = "USER.md"
+trust = "inner"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let serialized = toml::to_string(&config).unwrap();
+        let config2: Config = toml::from_str(&serialized).unwrap();
         assert_eq!(config.prompt, config2.prompt);
     }
 
     #[test]
     fn prompt_file_entry_defaults() {
-        let yaml = "
-agent:
-  id: test
-  model: test-model
-prompt:
-  shared_files:
-    - path: CUSTOM.md
-";
-        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let toml_str = r#"
+[agent]
+id = "test"
+model = "test-model"
+
+[[prompt.shared_files]]
+path = "CUSTOM.md"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
         let entry = &config.prompt.shared_files[0];
         assert_eq!(entry.trust, TrustLevel::Full);
         assert_eq!(entry.cache, CacheHintConfig::Session);
@@ -832,17 +850,16 @@ prompt:
 
     #[test]
     fn parse_config_with_api_keys() {
-        let yaml = "
-agent:
-  id: test
-  model: test-model
-provider:
-  name: anthropic
-  api_keys:
-    - env:ANTHROPIC_API_KEY
-    - env:ANTHROPIC_API_KEY_2
-";
-        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let toml_str = r#"
+[agent]
+id = "test"
+model = "test-model"
+
+[provider]
+name = "anthropic"
+api_keys = ["env:ANTHROPIC_API_KEY", "env:ANTHROPIC_API_KEY_2"]
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.provider.api_keys.len(), 2);
         assert_eq!(config.provider.api_keys[0], "env:ANTHROPIC_API_KEY");
         assert_eq!(config.provider.api_keys[1], "env:ANTHROPIC_API_KEY_2");
@@ -850,14 +867,15 @@ provider:
 
     #[test]
     fn parse_config_without_api_keys() {
-        let yaml = "
-agent:
-  id: test
-  model: test-model
-provider:
-  name: anthropic
-";
-        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let toml_str = r#"
+[agent]
+id = "test"
+model = "test-model"
+
+[provider]
+name = "anthropic"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
         assert!(config.provider.api_keys.is_empty());
     }
 }

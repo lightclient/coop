@@ -178,15 +178,15 @@ mod tests {
     use crate::config::shared_config;
     use std::fs;
 
-    fn write_config(dir: &Path, yaml: &str) -> PathBuf {
-        let path = dir.join("coop.yaml");
-        fs::write(&path, yaml).unwrap();
+    fn write_config(dir: &Path, toml_str: &str) -> PathBuf {
+        let path = dir.join("coop.toml");
+        fs::write(&path, toml_str).unwrap();
         path
     }
 
-    fn minimal_yaml(id: &str, model: &str, workspace: &str) -> String {
+    fn minimal_toml(id: &str, model: &str, workspace: &str) -> String {
         format!(
-            "agent:\n  id: {id}\n  model: {model}\n  workspace: {workspace}\nprovider:\n  name: anthropic\n"
+            "[agent]\nid = \"{id}\"\nmodel = \"{model}\"\nworkspace = \"{workspace}\"\n\n[provider]\nname = \"anthropic\"\n"
         )
     }
 
@@ -200,28 +200,28 @@ mod tests {
     #[test]
     fn check_restart_only_rejects_agent_id_change() {
         let ws = "/tmp/ws";
-        let a: Config = serde_yaml::from_str(&minimal_yaml("a", "m", ws)).unwrap();
-        let b: Config = serde_yaml::from_str(&minimal_yaml("b", "m", ws)).unwrap();
+        let a: Config = toml::from_str(&minimal_toml("a", "m", ws)).unwrap();
+        let b: Config = toml::from_str(&minimal_toml("b", "m", ws)).unwrap();
         let reasons = check_restart_only_fields(&a, &b).unwrap();
         assert!(reasons.contains(&"agent.id"));
     }
 
     #[test]
     fn check_restart_only_rejects_workspace_change() {
-        let a: Config = serde_yaml::from_str(&minimal_yaml("a", "m", "/ws1")).unwrap();
-        let b: Config = serde_yaml::from_str(&minimal_yaml("a", "m", "/ws2")).unwrap();
+        let a: Config = toml::from_str(&minimal_toml("a", "m", "/ws1")).unwrap();
+        let b: Config = toml::from_str(&minimal_toml("a", "m", "/ws2")).unwrap();
         let reasons = check_restart_only_fields(&a, &b).unwrap();
         assert!(reasons.contains(&"agent.workspace"));
     }
 
     #[test]
     fn check_restart_only_allows_user_changes() {
-        let a: Config = serde_yaml::from_str(
-            "agent:\n  id: a\n  model: m\nusers:\n  - name: alice\n    trust: full\n    match: []\n",
+        let a: Config = toml::from_str(
+            "[agent]\nid = \"a\"\nmodel = \"m\"\n\n[[users]]\nname = \"alice\"\ntrust = \"full\"\nmatch = []\n",
         )
         .unwrap();
-        let b: Config = serde_yaml::from_str(
-            "agent:\n  id: a\n  model: m\nusers:\n  - name: bob\n    trust: inner\n    match: []\n",
+        let b: Config = toml::from_str(
+            "[agent]\nid = \"a\"\nmodel = \"m\"\n\n[[users]]\nname = \"bob\"\ntrust = \"inner\"\nmatch = []\n",
         )
         .unwrap();
         assert!(check_restart_only_fields(&a, &b).is_none());
@@ -229,19 +229,19 @@ mod tests {
 
     #[test]
     fn check_restart_only_allows_model_change() {
-        let a: Config = serde_yaml::from_str("agent:\n  id: a\n  model: model-a\n").unwrap();
-        let b: Config = serde_yaml::from_str("agent:\n  id: a\n  model: model-b\n").unwrap();
+        let a: Config = toml::from_str("[agent]\nid = \"a\"\nmodel = \"model-a\"\n").unwrap();
+        let b: Config = toml::from_str("[agent]\nid = \"a\"\nmodel = \"model-b\"\n").unwrap();
         assert!(check_restart_only_fields(&a, &b).is_none());
     }
 
     #[test]
     fn diff_sections_detects_user_changes() {
-        let a: Config = serde_yaml::from_str(
-            "agent:\n  id: a\n  model: m\nusers:\n  - name: alice\n    trust: full\n    match: []\n",
+        let a: Config = toml::from_str(
+            "[agent]\nid = \"a\"\nmodel = \"m\"\n\n[[users]]\nname = \"alice\"\ntrust = \"full\"\nmatch = []\n",
         )
         .unwrap();
-        let b: Config = serde_yaml::from_str(
-            "agent:\n  id: a\n  model: m\nusers:\n  - name: bob\n    trust: inner\n    match: []\n",
+        let b: Config = toml::from_str(
+            "[agent]\nid = \"a\"\nmodel = \"m\"\n\n[[users]]\nname = \"bob\"\ntrust = \"inner\"\nmatch = []\n",
         )
         .unwrap();
         let changed = diff_sections(&a, &b);
@@ -250,25 +250,25 @@ mod tests {
 
     #[test]
     fn diff_sections_detects_model_change() {
-        let a: Config = serde_yaml::from_str("agent:\n  id: a\n  model: model-a\n").unwrap();
-        let b: Config = serde_yaml::from_str("agent:\n  id: a\n  model: model-b\n").unwrap();
+        let a: Config = toml::from_str("[agent]\nid = \"a\"\nmodel = \"model-a\"\n").unwrap();
+        let b: Config = toml::from_str("[agent]\nid = \"a\"\nmodel = \"model-b\"\n").unwrap();
         let changed = diff_sections(&a, &b);
         assert!(changed.contains(&"agent.model"));
     }
 
     #[test]
     fn diff_sections_empty_when_identical() {
-        let a: Config = serde_yaml::from_str("agent:\n  id: a\n  model: m\n").unwrap();
-        let b: Config = serde_yaml::from_str("agent:\n  id: a\n  model: m\n").unwrap();
+        let a: Config = toml::from_str("[agent]\nid = \"a\"\nmodel = \"m\"\n").unwrap();
+        let b: Config = toml::from_str("[agent]\nid = \"a\"\nmodel = \"m\"\n").unwrap();
         let changed = diff_sections(&a, &b);
         assert!(changed.is_empty());
     }
 
     #[test]
     fn diff_sections_detects_prompt_change() {
-        let a: Config = serde_yaml::from_str("agent:\n  id: a\n  model: m\n").unwrap();
-        let b: Config = serde_yaml::from_str(
-            "agent:\n  id: a\n  model: m\nprompt:\n  shared_files:\n    - path: SOUL.md\n",
+        let a: Config = toml::from_str("[agent]\nid = \"a\"\nmodel = \"m\"\n").unwrap();
+        let b: Config = toml::from_str(
+            "[agent]\nid = \"a\"\nmodel = \"m\"\n\n[[prompt.shared_files]]\npath = \"SOUL.md\"\n",
         )
         .unwrap();
         let changed = diff_sections(&a, &b);
@@ -276,15 +276,15 @@ mod tests {
     }
 
     #[test]
-    fn try_reload_rejects_invalid_yaml() {
+    fn try_reload_rejects_invalid_toml() {
         let dir = tempfile::tempdir().unwrap();
         let ws = setup_workspace(dir.path());
-        let yaml = minimal_yaml("test", "test-model", &ws.display().to_string());
-        let path = write_config(dir.path(), &yaml);
+        let toml_str = minimal_toml("test", "test-model", &ws.display().to_string());
+        let path = write_config(dir.path(), &toml_str);
         let config = shared_config(Config::load(&path).unwrap());
 
         // Overwrite with garbage
-        fs::write(&path, "{{not yaml").unwrap();
+        fs::write(&path, "{{not toml").unwrap();
         try_reload(&path, &config);
 
         // Config should be unchanged
@@ -295,13 +295,13 @@ mod tests {
     fn try_reload_rejects_restart_only_change() {
         let dir = tempfile::tempdir().unwrap();
         let ws = setup_workspace(dir.path());
-        let yaml = minimal_yaml("test", "test-model", &ws.display().to_string());
-        let path = write_config(dir.path(), &yaml);
+        let toml_str = minimal_toml("test", "test-model", &ws.display().to_string());
+        let path = write_config(dir.path(), &toml_str);
         let config = shared_config(Config::load(&path).unwrap());
 
         // Change agent.id (restart-only)
-        let new_yaml = minimal_yaml("changed", "test-model", &ws.display().to_string());
-        fs::write(&path, &new_yaml).unwrap();
+        let new_toml = minimal_toml("changed", "test-model", &ws.display().to_string());
+        fs::write(&path, &new_toml).unwrap();
         try_reload(&path, &config);
 
         // Config should be unchanged
@@ -312,21 +312,21 @@ mod tests {
     fn try_reload_accepts_user_change() {
         let dir = tempfile::tempdir().unwrap();
         let ws = setup_workspace(dir.path());
-        let yaml = format!(
-            "agent:\n  id: test\n  model: test-model\n  workspace: {}\nprovider:\n  name: anthropic\nusers:\n  - name: alice\n    trust: full\n    match: []\n",
+        let toml_str = format!(
+            "[agent]\nid = \"test\"\nmodel = \"test-model\"\nworkspace = \"{}\"\n\n[provider]\nname = \"anthropic\"\n\n[[users]]\nname = \"alice\"\ntrust = \"full\"\nmatch = []\n",
             ws.display()
         );
-        let path = write_config(dir.path(), &yaml);
+        let path = write_config(dir.path(), &toml_str);
         let config = shared_config(Config::load(&path).unwrap());
         assert_eq!(config.load().users.len(), 1);
         assert_eq!(config.load().users[0].name, "alice");
 
         // Add a user
-        let new_yaml = format!(
-            "agent:\n  id: test\n  model: test-model\n  workspace: {}\nprovider:\n  name: anthropic\nusers:\n  - name: alice\n    trust: full\n    match: []\n  - name: bob\n    trust: inner\n    match: []\n",
+        let new_toml = format!(
+            "[agent]\nid = \"test\"\nmodel = \"test-model\"\nworkspace = \"{}\"\n\n[provider]\nname = \"anthropic\"\n\n[[users]]\nname = \"alice\"\ntrust = \"full\"\nmatch = []\n\n[[users]]\nname = \"bob\"\ntrust = \"inner\"\nmatch = []\n",
             ws.display()
         );
-        fs::write(&path, &new_yaml).unwrap();
+        fs::write(&path, &new_toml).unwrap();
         try_reload(&path, &config);
 
         // Config should be updated
@@ -338,12 +338,12 @@ mod tests {
     fn try_reload_skips_identical_content() {
         let dir = tempfile::tempdir().unwrap();
         let ws = setup_workspace(dir.path());
-        let yaml = minimal_yaml("test", "test-model", &ws.display().to_string());
-        let path = write_config(dir.path(), &yaml);
+        let toml_str = minimal_toml("test", "test-model", &ws.display().to_string());
+        let path = write_config(dir.path(), &toml_str);
         let config = shared_config(Config::load(&path).unwrap());
 
-        // "touch" the file but don't change content — re-write same yaml
-        fs::write(&path, &yaml).unwrap();
+        // "touch" the file but don't change content — re-write same toml
+        fs::write(&path, &toml_str).unwrap();
         // This should not log "config reloaded" (no way to assert that here,
         // but it exercises the identical-content code path)
         try_reload(&path, &config);
@@ -355,11 +355,11 @@ mod tests {
     async fn poll_loop_detects_change() {
         let dir = tempfile::tempdir().unwrap();
         let ws = setup_workspace(dir.path());
-        let yaml = format!(
-            "agent:\n  id: test\n  model: test-model\n  workspace: {}\nprovider:\n  name: anthropic\nusers:\n  - name: alice\n    trust: full\n    match: []\n",
+        let toml_str = format!(
+            "[agent]\nid = \"test\"\nmodel = \"test-model\"\nworkspace = \"{}\"\n\n[provider]\nname = \"anthropic\"\n\n[[users]]\nname = \"alice\"\ntrust = \"full\"\nmatch = []\n",
             ws.display()
         );
-        let path = write_config(dir.path(), &yaml);
+        let path = write_config(dir.path(), &toml_str);
         let config = shared_config(Config::load(&path).unwrap());
         let shutdown = CancellationToken::new();
 
@@ -370,11 +370,11 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Modify the config
-        let new_yaml = format!(
-            "agent:\n  id: test\n  model: test-model\n  workspace: {}\nprovider:\n  name: anthropic\nusers:\n  - name: alice\n    trust: full\n    match: []\n  - name: bob\n    trust: inner\n    match: []\n",
+        let new_toml = format!(
+            "[agent]\nid = \"test\"\nmodel = \"test-model\"\nworkspace = \"{}\"\n\n[provider]\nname = \"anthropic\"\n\n[[users]]\nname = \"alice\"\ntrust = \"full\"\nmatch = []\n\n[[users]]\nname = \"bob\"\ntrust = \"inner\"\nmatch = []\n",
             ws.display()
         );
-        fs::write(&path, &new_yaml).unwrap();
+        fs::write(&path, &new_toml).unwrap();
 
         // Wait for the poll + debounce
         tokio::time::sleep(Duration::from_secs(3)).await;
@@ -389,11 +389,11 @@ mod tests {
     async fn poll_loop_notifies_on_cron_change() {
         let dir = tempfile::tempdir().unwrap();
         let ws = setup_workspace(dir.path());
-        let yaml = format!(
-            "agent:\n  id: test\n  model: test-model\n  workspace: {}\nprovider:\n  name: anthropic\n",
+        let toml_str = format!(
+            "[agent]\nid = \"test\"\nmodel = \"test-model\"\nworkspace = \"{}\"\n\n[provider]\nname = \"anthropic\"\n",
             ws.display()
         );
-        let path = write_config(dir.path(), &yaml);
+        let path = write_config(dir.path(), &toml_str);
         let config = shared_config(Config::load(&path).unwrap());
         let shutdown = CancellationToken::new();
         let notify = Arc::new(tokio::sync::Notify::new());
@@ -408,11 +408,11 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Add a cron entry — should trigger the notify.
-        let new_yaml = format!(
-            "agent:\n  id: test\n  model: test-model\n  workspace: {}\nprovider:\n  name: anthropic\ncron:\n  - name: test\n    cron: '*/30 * * * *'\n    message: hello\n",
+        let new_toml = format!(
+            "[agent]\nid = \"test\"\nmodel = \"test-model\"\nworkspace = \"{}\"\n\n[provider]\nname = \"anthropic\"\n\n[[cron]]\nname = \"test\"\ncron = \"*/30 * * * *\"\nmessage = \"hello\"\n",
             ws.display()
         );
-        fs::write(&path, &new_yaml).unwrap();
+        fs::write(&path, &new_toml).unwrap();
 
         // The notify should fire within poll interval + debounce (~2.2s).
         let result = tokio::time::timeout(Duration::from_secs(5), notify.notified()).await;
@@ -429,11 +429,11 @@ mod tests {
     async fn poll_loop_does_not_notify_on_non_cron_change() {
         let dir = tempfile::tempdir().unwrap();
         let ws = setup_workspace(dir.path());
-        let yaml = format!(
-            "agent:\n  id: test\n  model: test-model\n  workspace: {}\nprovider:\n  name: anthropic\n",
+        let toml_str = format!(
+            "[agent]\nid = \"test\"\nmodel = \"test-model\"\nworkspace = \"{}\"\n\n[provider]\nname = \"anthropic\"\n",
             ws.display()
         );
-        let path = write_config(dir.path(), &yaml);
+        let path = write_config(dir.path(), &toml_str);
         let config = shared_config(Config::load(&path).unwrap());
         let shutdown = CancellationToken::new();
         let notify = Arc::new(tokio::sync::Notify::new());
@@ -448,11 +448,11 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Change users but NOT cron — should NOT trigger notify.
-        let new_yaml = format!(
-            "agent:\n  id: test\n  model: test-model\n  workspace: {}\nprovider:\n  name: anthropic\nusers:\n  - name: alice\n    trust: full\n    match: []\n",
+        let new_toml = format!(
+            "[agent]\nid = \"test\"\nmodel = \"test-model\"\nworkspace = \"{}\"\n\n[provider]\nname = \"anthropic\"\n\n[[users]]\nname = \"alice\"\ntrust = \"full\"\nmatch = []\n",
             ws.display()
         );
-        fs::write(&path, &new_yaml).unwrap();
+        fs::write(&path, &new_toml).unwrap();
 
         // Wait for poll + debounce to process the change.
         tokio::time::sleep(Duration::from_secs(3)).await;
@@ -475,8 +475,8 @@ mod tests {
     async fn poll_loop_stops_on_shutdown() {
         let dir = tempfile::tempdir().unwrap();
         let ws = setup_workspace(dir.path());
-        let yaml = minimal_yaml("test", "test-model", &ws.display().to_string());
-        let path = write_config(dir.path(), &yaml);
+        let toml_str = minimal_toml("test", "test-model", &ws.display().to_string());
+        let path = write_config(dir.path(), &toml_str);
         let config = shared_config(Config::load(&path).unwrap());
         let shutdown = CancellationToken::new();
 

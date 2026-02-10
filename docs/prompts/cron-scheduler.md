@@ -8,7 +8,7 @@ Read `AGENTS.md` at the project root before starting. Follow the development loo
 
 The design doc (`docs/design.md`) already specifies cron jobs in config:
 
-```yaml
+```toml
 cron:
   - name: heartbeat
     cron: "*/30 * * * *"
@@ -358,7 +358,7 @@ Normal sessions pass `include_send: false`. Cron routing passes `include_send: t
 
 With `signal_send` available in cron sessions, cron entries don't need a built-in delivery mechanism. The `message` field tells the agent who to contact:
 
-```yaml
+```toml
 message: |
   Morning briefing. Summarize overnight activity.
   Send the briefing to alice-uuid via signal_send.
@@ -464,13 +464,13 @@ Cron sessions should appear in `gateway.list_sessions()` so `coop attach` can vi
 
 9. **Add integration test** that creates a scheduler with a cron firing every second (`* * * * * * *` in 7-field), verifies the message is dispatched through the router, and the session receives a response. Use `FakeProvider` from `coop-core/src/fakes.rs`.
 
-10. **Update `coop.yaml`** example in this repo to show a commented-out cron section.
+10. **Update `coop.toml`** example in this repo to show a commented-out cron section.
 
 11. **Verify build times.** `touch crates/coop-gateway/src/main.rs && time cargo build` should stay under 1.5s. The `cron` crate is lightweight — it should not impact compile times significantly.
 
 ## Config Example
 
-```yaml
+```toml
 agent:
   id: coop
   model: anthropic/claude-sonnet-4-20250514
@@ -594,7 +594,7 @@ grep "cron_fired" traces.jsonl | jq .
 ## Not in Scope
 
 - **Persistent state.** No tracking of last fire time across restarts. Cron entries are stateless — they compute the next fire from now.
-- **Dynamic management.** No API to add/remove cron entries at runtime. Edit `coop.yaml` and restart.
+- **Dynamic management.** No API to add/remove cron entries at runtime. Edit `coop.toml` and restart.
 - **Retry on failure.** If a cron turn fails, it's logged and the next fire proceeds normally. No retry queue.
 - **Concurrent fire protection.** If a cron turn is still running when the next fire time arrives, the new fire waits or is skipped. Use a simple per-entry mutex or check if the session is busy.
 - **Sub-second scheduling.** The minimum granularity is 1 minute (standard cron). The 7-field second support is for testing only.

@@ -27,7 +27,7 @@ impl Tool for ConfigReadTool {
     fn definition(&self) -> ToolDef {
         ToolDef::new(
             "config_read",
-            "Read the current coop.yaml configuration file.",
+            "Read the current coop.toml configuration file.",
             serde_json::json!({
                 "type": "object",
                 "properties": {},
@@ -77,14 +77,14 @@ impl Tool for ConfigWriteTool {
     fn definition(&self) -> ToolDef {
         ToolDef::new(
             "config_write",
-            "Validate and write coop.yaml. Backs up the current config before writing. \
+            "Validate and write coop.toml. Backs up the current config before writing. \
              Returns validation results. If any errors are found, the file is NOT modified.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
                     "content": {
                         "type": "string",
-                        "description": "Complete YAML content for coop.yaml. Must be the full \
+                        "description": "Complete TOML content for coop.toml. Must be the full \
                             file — not a patch or partial update. The content is validated \
                             before writing. If validation fails, the file is not modified."
                     }
@@ -180,11 +180,11 @@ mod tests {
         std::fs::create_dir_all(&workspace).unwrap();
         std::fs::write(workspace.join("SOUL.md"), "test").unwrap();
 
-        let config_path = dir.join("coop.yaml");
+        let config_path = dir.join("coop.toml");
         std::fs::write(
             &config_path,
             format!(
-                "agent:\n  id: test\n  model: test-model\n  workspace: {}\nprovider:\n  name: anthropic\n",
+                "[agent]\nid = \"test\"\nmodel = \"test-model\"\nworkspace = \"{}\"\n\n[provider]\nname = \"anthropic\"\n",
                 workspace.display()
             ),
         )
@@ -226,7 +226,7 @@ mod tests {
     #[tokio::test]
     async fn test_config_read_missing_file() {
         let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("nonexistent.yaml");
+        let config_path = dir.path().join("nonexistent.toml");
 
         let tool = ConfigReadTool::new(config_path);
         let output = tool
@@ -245,14 +245,14 @@ mod tests {
 
         let tool = ConfigWriteTool::new(config_path.clone());
         let workspace = dir.path().join("workspace");
-        let new_yaml = format!(
-            "agent:\n  id: updated\n  model: test-model\n  workspace: {}\nprovider:\n  name: anthropic\n",
+        let new_toml = format!(
+            "[agent]\nid = \"updated\"\nmodel = \"test-model\"\nworkspace = \"{}\"\n\n[provider]\nname = \"anthropic\"\n",
             workspace.display()
         );
 
         let output = tool
             .execute(
-                serde_json::json!({"content": new_yaml}),
+                serde_json::json!({"content": new_toml}),
                 &tool_context(TrustLevel::Full),
             )
             .await
@@ -263,7 +263,7 @@ mod tests {
             // not a config tool issue. Verify the tool produced a report.
             assert!(output.content.contains("NOT modified"));
         } else {
-            assert!(config_path.with_extension("yaml.bak").exists());
+            assert!(config_path.with_extension("toml.bak").exists());
             assert!(
                 std::fs::read_to_string(&config_path)
                     .unwrap()
@@ -273,7 +273,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_config_write_invalid_yaml() {
+    async fn test_config_write_invalid_toml() {
         let dir = tempfile::tempdir().unwrap();
         let config_path = write_test_config(dir.path());
         let original = std::fs::read_to_string(&config_path).unwrap();
@@ -282,7 +282,7 @@ mod tests {
 
         let output = tool
             .execute(
-                serde_json::json!({"content": "{{garbage yaml"}),
+                serde_json::json!({"content": "{{garbage toml"}),
                 &tool_context(TrustLevel::Full),
             )
             .await
@@ -315,16 +315,21 @@ mod tests {
     #[tokio::test]
     async fn test_config_write_missing_workspace() {
         let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("coop.yaml");
-        std::fs::write(&config_path, "agent:\n  id: test\n  model: test-model\n").unwrap();
+        let config_path = dir.path().join("coop.toml");
+        std::fs::write(
+            &config_path,
+            "[agent]\nid = \"test\"\nmodel = \"test-model\"\n",
+        )
+        .unwrap();
         let original = std::fs::read_to_string(&config_path).unwrap();
 
         let tool = ConfigWriteTool::new(config_path.clone());
 
-        let new_yaml = "agent:\n  id: test\n  model: test-model\n  workspace: ./nonexistent\n";
+        let new_toml =
+            "[agent]\nid = \"test\"\nmodel = \"test-model\"\nworkspace = \"./nonexistent\"\n";
         let output = tool
             .execute(
-                serde_json::json!({"content": new_yaml}),
+                serde_json::json!({"content": new_toml}),
                 &tool_context(TrustLevel::Full),
             )
             .await

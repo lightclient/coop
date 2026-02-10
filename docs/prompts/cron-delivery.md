@@ -8,7 +8,7 @@ Read `AGENTS.md` at the project root before starting. Follow the development loo
 
 The current cron design relies on prompt engineering to get delivery right:
 
-```yaml
+```toml
 - name: morning-briefing
   cron: "0 8 * * *"
   user: alice
@@ -48,9 +48,9 @@ pub(crate) struct CronConfig {
 }
 ```
 
-YAML examples:
+TOML examples:
 
-```yaml
+```toml
 cron:
   # Delivers the agent's response to alice via Signal.
   - name: morning-briefing
@@ -298,7 +298,7 @@ This gives the agent context about its audience without relying on the prompt au
 
 ## Config Example (updated)
 
-```yaml
+```toml
 cron:
   # Delivers the agent's response to alice.
   - name: morning-briefing

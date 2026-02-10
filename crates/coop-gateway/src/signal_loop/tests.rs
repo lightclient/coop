@@ -144,16 +144,17 @@ impl Provider for ScriptedProvider {
 }
 
 fn test_config() -> Config {
-    serde_yaml::from_str(
-        "
-agent:
-  id: coop
-  model: test-model
-users:
-  - name: alice
-    trust: full
-    match: ['signal:alice-uuid']
-",
+    toml::from_str(
+        r#"
+[agent]
+id = "coop"
+model = "test-model"
+
+[[users]]
+name = "alice"
+trust = "full"
+match = ["signal:alice-uuid"]
+"#,
     )
     .unwrap()
 }
@@ -668,20 +669,21 @@ async fn only_final_text_is_sent_to_channel() {
 }
 
 fn test_config_verbose() -> Config {
-    serde_yaml::from_str(
-        "
-agent:
-  id: coop
-  model: test-model
-users:
-  - name: alice
-    trust: full
-    match: ['signal:alice-uuid']
-channels:
-  signal:
-    db_path: ./db/signal.db
-    verbose: true
-",
+    toml::from_str(
+        r#"
+[agent]
+id = "coop"
+model = "test-model"
+
+[[users]]
+name = "alice"
+trust = "full"
+match = ["signal:alice-uuid"]
+
+[channels.signal]
+db_path = "./db/signal.db"
+verbose = true
+"#,
     )
     .unwrap()
 }

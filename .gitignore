@@ -6,6 +6,6 @@
 workspace/
 data/
 db/
-dev.yaml
+dev.toml
 traces.jsonl
 *.jsonl

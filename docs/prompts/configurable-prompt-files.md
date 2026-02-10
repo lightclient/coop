@@ -1,6 +1,6 @@
 # Configurable Prompt File Injection
 
-Make the set of markdown files injected into the system prompt configurable via `coop.yaml`, with separate shared (workspace-level) and per-user file lists, sensible defaults, and auto-reloading on file change.
+Make the set of markdown files injected into the system prompt configurable via `coop.toml`, with separate shared (workspace-level) and per-user file lists, sensible defaults, and auto-reloading on file change.
 
 Read `AGENTS.md` at the project root before starting. Follow the development loop and code quality rules.
 
@@ -14,7 +14,7 @@ The system also has no concept of "shared workspace files" vs "per-user workspac
 
 ## Goals
 
-1. **Configurable file lists.** Operators can add, remove, or reorder prompt files via `coop.yaml` without code changes.
+1. **Configurable file lists.** Operators can add, remove, or reorder prompt files via `coop.toml` without code changes.
 2. **Two scopes.** Shared files live in the workspace root. Per-user files live in `users/{user}/`. Each scope has its own default set.
 3. **Sensible defaults.** When no `prompt` config is specified, the behavior matches what operators expect: shared SOUL.md, IDENTITY.md, TOOLS.md; per-user AGENTS.md, USER.md, TOOLS.md, HEARTBEAT.md.
 4. **Auto-reload.** File content changes are detected via the existing mtime-based `WorkspaceIndex::refresh()`. Config changes to the file list are picked up by the existing config watcher.
@@ -25,7 +25,7 @@ The system also has no concept of "shared workspace files" vs "per-user workspac
 
 Add a `prompt` section to the gateway `Config`:
 
-```yaml
+```toml
 prompt:
   shared_files:
     - path: SOUL.md
@@ -191,7 +191,7 @@ The auto-reload of *file lists* (adding/removing files from config) works throug
 
 Summary of the reload flow:
 1. **File content changes** → `WorkspaceIndex::refresh()` detects mtime change → re-indexes → next prompt build uses new content.
-2. **Config file list changes** → config watcher detects `coop.yaml` change → hot-swaps `SharedConfig` → next `build_prompt()` reads new file list → triggers `WorkspaceIndex::scan()` for full re-index.
+2. **Config file list changes** → config watcher detects `coop.toml` change → hot-swaps `SharedConfig` → next `build_prompt()` reads new file list → triggers `WorkspaceIndex::scan()` for full re-index.
 3. **New user file appears** → `WorkspaceIndex::refresh()` detects the file on next call (was absent, now present) → indexes it → included in next prompt.
 
 ### Tracing
@@ -222,14 +222,14 @@ MEMORY.md and HEARTBEAT.md are no longer in the default list. If an operator was
 ## Example Configs
 
 ### Minimal (uses all defaults)
-```yaml
+```toml
 agent:
   id: reid
   model: claude-sonnet-4-20250514
 ```
 
 ### Custom shared files only
-```yaml
+```toml
 agent:
   id: reid
   model: claude-sonnet-4-20250514
@@ -243,7 +243,7 @@ prompt:
 ```
 
 ### Full customization
-```yaml
+```toml
 agent:
   id: reid
   model: claude-sonnet-4-20250514
@@ -270,7 +270,7 @@ prompt:
 ```
 
 ### Empty user files (no per-user injection)
-```yaml
+```toml
 prompt:
   user_files: []
 ```

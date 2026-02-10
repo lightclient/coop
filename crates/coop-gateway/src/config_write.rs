@@ -5,13 +5,13 @@ use anyhow::Result;
 use crate::config_check::{CheckReport, CheckResult, Severity, validate_config};
 
 pub(crate) fn backup_config(path: &Path) -> Result<PathBuf> {
-    let backup = path.with_extension("yaml.bak");
+    let backup = path.with_extension("toml.bak");
     std::fs::copy(path, &backup)?;
     Ok(backup)
 }
 
 pub(crate) fn atomic_write(path: &Path, content: &str) -> Result<()> {
-    let tmp = path.with_extension("yaml.tmp");
+    let tmp = path.with_extension("toml.tmp");
     std::fs::write(&tmp, content)?;
     std::fs::rename(&tmp, path)?;
     Ok(())
@@ -22,7 +22,7 @@ pub(crate) fn safe_write_config(
     new_content: &str,
 ) -> (CheckReport, Option<PathBuf>) {
     // 1. Write to staging file and validate
-    let staging = config_path.with_extension("yaml.staging");
+    let staging = config_path.with_extension("toml.staging");
     if let Err(e) = std::fs::write(&staging, new_content) {
         let mut report = CheckReport::default();
         report.push(CheckResult {
@@ -85,11 +85,11 @@ mod tests {
         std::fs::create_dir_all(&workspace).unwrap();
         std::fs::write(workspace.join("SOUL.md"), "test").unwrap();
 
-        let config_path = dir.join("coop.yaml");
+        let config_path = dir.join("coop.toml");
         std::fs::write(
             &config_path,
             format!(
-                "agent:\n  id: test\n  model: test-model\n  workspace: {}\nprovider:\n  name: anthropic\n",
+                "[agent]\nid = \"test\"\nmodel = \"test-model\"\nworkspace = \"{}\"\n\n[provider]\nname = \"anthropic\"\n",
                 workspace.display()
             ),
         )
@@ -113,7 +113,7 @@ mod tests {
     #[test]
     fn test_backup_config() {
         let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("coop.yaml");
+        let config_path = dir.path().join("coop.toml");
         std::fs::write(&config_path, "original content").unwrap();
 
         let backup = backup_config(&config_path).unwrap();
@@ -127,7 +127,7 @@ mod tests {
     #[test]
     fn test_atomic_write() {
         let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("coop.yaml");
+        let config_path = dir.path().join("coop.toml");
         std::fs::write(&config_path, "old").unwrap();
 
         atomic_write(&config_path, "new content").unwrap();
@@ -135,7 +135,7 @@ mod tests {
             std::fs::read_to_string(&config_path).unwrap(),
             "new content"
         );
-        assert!(!config_path.with_extension("yaml.tmp").exists());
+        assert!(!config_path.with_extension("toml.tmp").exists());
     }
 
     #[test]
@@ -144,12 +144,12 @@ mod tests {
         let config_path = write_test_config(dir.path());
 
         let workspace = dir.path().join("workspace");
-        let new_yaml = format!(
-            "agent:\n  id: updated\n  model: test-model\n  workspace: {}\nprovider:\n  name: anthropic\n",
+        let new_toml = format!(
+            "[agent]\nid = \"updated\"\nmodel = \"test-model\"\nworkspace = \"{}\"\n\n[provider]\nname = \"anthropic\"\n",
             workspace.display()
         );
 
-        let (report, backup) = safe_write_config(&config_path, &new_yaml);
+        let (report, backup) = safe_write_config(&config_path, &new_toml);
 
         if report.has_errors() {
             // If ANTHROPIC_API_KEY is not set, the write is rejected.
@@ -175,7 +175,7 @@ mod tests {
         let config_path = write_test_config(dir.path());
         let original = std::fs::read_to_string(&config_path).unwrap();
 
-        let (report, _backup) = safe_write_config(&config_path, "{{not valid yaml");
+        let (report, _backup) = safe_write_config(&config_path, "{{not valid toml");
         assert!(report.has_errors());
 
         let current = std::fs::read_to_string(&config_path).unwrap();
@@ -189,12 +189,12 @@ mod tests {
         let original = std::fs::read_to_string(&config_path).unwrap();
 
         let workspace = dir.path().join("workspace");
-        let bad_yaml = format!(
-            "agent:\n  id: test\n  model: test-model\n  workspace: {}\nprovider:\n  name: openai\n",
+        let bad_toml = format!(
+            "[agent]\nid = \"test\"\nmodel = \"test-model\"\nworkspace = \"{}\"\n\n[provider]\nname = \"openai\"\n",
             workspace.display()
         );
 
-        let (report, _backup) = safe_write_config(&config_path, &bad_yaml);
+        let (report, _backup) = safe_write_config(&config_path, &bad_toml);
         assert!(report.has_errors());
 
         let current = std::fs::read_to_string(&config_path).unwrap();

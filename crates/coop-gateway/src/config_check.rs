@@ -133,11 +133,11 @@ impl CheckReport {
 pub(crate) fn validate_config(config_path: &Path, config_dir: &Path) -> CheckReport {
     let mut report = CheckReport::default();
 
-    // 1. yaml_parse
+    // 1. toml_parse
     let config = match Config::load(config_path) {
         Ok(c) => {
             report.push(CheckResult {
-                name: "yaml_parse",
+                name: "toml_parse",
                 severity: Severity::Error,
                 passed: true,
                 message: "config syntax valid".to_owned(),
@@ -146,7 +146,7 @@ pub(crate) fn validate_config(config_path: &Path, config_dir: &Path) -> CheckRep
         }
         Err(e) => {
             report.push(CheckResult {
-                name: "yaml_parse",
+                name: "toml_parse",
                 severity: Severity::Error,
                 passed: false,
                 message: format!("{e:#}"),
@@ -701,11 +701,11 @@ mod tests {
         std::fs::create_dir_all(&workspace).unwrap();
         std::fs::write(workspace.join("SOUL.md"), "test soul").unwrap();
 
-        let config_path = dir.join("coop.yaml");
+        let config_path = dir.join("coop.toml");
         std::fs::write(
             &config_path,
             format!(
-                "agent:\n  id: test\n  model: test-model\n  workspace: {}\nprovider:\n  name: anthropic\n",
+                "[agent]\nid = \"test\"\nmodel = \"test-model\"\nworkspace = \"{}\"\n\n[provider]\nname = \"anthropic\"\n",
                 workspace.display()
             ),
         )
@@ -738,18 +738,18 @@ mod tests {
     }
 
     #[test]
-    fn test_invalid_yaml() {
+    fn test_invalid_toml() {
         let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("coop.yaml");
-        std::fs::write(&config_path, "{{not valid yaml").unwrap();
+        let config_path = dir.path().join("coop.toml");
+        std::fs::write(&config_path, "{{not valid toml").unwrap();
 
         let report = validate_config(&config_path, dir.path());
-        let yaml_check = report
+        let toml_check = report
             .results
             .iter()
-            .find(|r| r.name == "yaml_parse")
+            .find(|r| r.name == "toml_parse")
             .unwrap();
-        assert!(!yaml_check.passed);
+        assert!(!toml_check.passed);
         assert!(report.has_errors());
         assert_eq!(
             report.results.len(),
@@ -761,10 +761,10 @@ mod tests {
     #[test]
     fn test_missing_workspace() {
         let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("coop.yaml");
+        let config_path = dir.path().join("coop.toml");
         std::fs::write(
             &config_path,
-            "agent:\n  id: test\n  model: test-model\n  workspace: ./nonexistent\n",
+            "[agent]\nid = \"test\"\nmodel = \"test-model\"\nworkspace = \"./nonexistent\"\n",
         )
         .unwrap();
 
@@ -783,11 +783,11 @@ mod tests {
         let workspace = dir.path().join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
 
-        let config_path = dir.path().join("coop.yaml");
+        let config_path = dir.path().join("coop.toml");
         std::fs::write(
             &config_path,
             format!(
-                "agent:\n  id: test\n  model: test-model\n  workspace: {}\nprovider:\n  name: openai\n",
+                "[agent]\nid = \"test\"\nmodel = \"test-model\"\nworkspace = \"{}\"\n\n[provider]\nname = \"openai\"\n",
                 workspace.display()
             ),
         )
@@ -809,11 +809,11 @@ mod tests {
         let workspace = dir.path().join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
 
-        let config_path = dir.path().join("coop.yaml");
+        let config_path = dir.path().join("coop.toml");
         std::fs::write(
             &config_path,
             format!(
-                "agent:\n  id: test\n  model: test-model\n  workspace: {}\nmemory:\n  db_path: ./db/memory.db\n  embedding:\n    provider: ''\n    model: ''\n    dimensions: 0\n",
+                "[agent]\nid = \"test\"\nmodel = \"test-model\"\nworkspace = \"{}\"\n\n[memory]\ndb_path = \"./db/memory.db\"\n\n[memory.embedding]\nprovider = \"\"\nmodel = \"\"\ndimensions = 0\n",
                 workspace.display()
             ),
         )
@@ -834,11 +834,11 @@ mod tests {
         let workspace = dir.path().join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
 
-        let config_path = dir.path().join("coop.yaml");
+        let config_path = dir.path().join("coop.toml");
         std::fs::write(
             &config_path,
             format!(
-                "agent:\n  id: test\n  model: test-model\n  workspace: {}\nmemory:\n  embedding:\n    provider: openai\n    model: text-embedding-3-small\n    dimensions: 99999\n",
+                "[agent]\nid = \"test\"\nmodel = \"test-model\"\nworkspace = \"{}\"\n\n[memory.embedding]\nprovider = \"openai\"\nmodel = \"text-embedding-3-small\"\ndimensions = 99999\n",
                 workspace.display()
             ),
         )
@@ -859,11 +859,11 @@ mod tests {
         let workspace = dir.path().join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
 
-        let config_path = dir.path().join("coop.yaml");
+        let config_path = dir.path().join("coop.toml");
         std::fs::write(
             &config_path,
             format!(
-                "agent:\n  id: test\n  model: test-model\n  workspace: {}\nmemory:\n  embedding:\n    provider: openai-compatible\n    model: text-embedding-3-small\n    dimensions: 1536\n",
+                "[agent]\nid = \"test\"\nmodel = \"test-model\"\nworkspace = \"{}\"\n\n[memory.embedding]\nprovider = \"openai-compatible\"\nmodel = \"text-embedding-3-small\"\ndimensions = 1536\n",
                 workspace.display()
             ),
         )
@@ -884,11 +884,11 @@ mod tests {
         let workspace = dir.path().join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
 
-        let config_path = dir.path().join("coop.yaml");
+        let config_path = dir.path().join("coop.toml");
         std::fs::write(
             &config_path,
             format!(
-                "agent:\n  id: test\n  model: test-model\n  workspace: {}\nmemory:\n  db_path: ./db/memory.db\n  embedding:\n    provider: openai\n    model: text-embedding-3-small\n    dimensions: 8\n",
+                "[agent]\nid = \"test\"\nmodel = \"test-model\"\nworkspace = \"{}\"\n\n[memory]\ndb_path = \"./db/memory.db\"\n\n[memory.embedding]\nprovider = \"openai\"\nmodel = \"text-embedding-3-small\"\ndimensions = 8\n",
                 workspace.display()
             ),
         )
@@ -912,11 +912,11 @@ mod tests {
         let workspace = dir.path().join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
 
-        let config_path = dir.path().join("coop.yaml");
+        let config_path = dir.path().join("coop.toml");
         std::fs::write(
             &config_path,
             format!(
-                "agent:\n  id: test\n  model: test-model\n  workspace: {}\nmemory:\n  prompt_index:\n    enabled: true\n    limit: 0\n    max_tokens: 0\n",
+                "[agent]\nid = \"test\"\nmodel = \"test-model\"\nworkspace = \"{}\"\n\n[memory.prompt_index]\nenabled = true\nlimit = 0\nmax_tokens = 0\n",
                 workspace.display()
             ),
         )
@@ -937,11 +937,11 @@ mod tests {
         let workspace = dir.path().join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
 
-        let config_path = dir.path().join("coop.yaml");
+        let config_path = dir.path().join("coop.toml");
         std::fs::write(
             &config_path,
             format!(
-                "agent:\n  id: test\n  model: test-model\n  workspace: {}\nmemory:\n  retention:\n    enabled: true\n    archive_after_days: 30\n    delete_archive_after_days: 10\n    compress_after_days: 0\n    compression_min_cluster_size: 1\n    max_rows_per_run: 0\n",
+                "[agent]\nid = \"test\"\nmodel = \"test-model\"\nworkspace = \"{}\"\n\n[memory.retention]\nenabled = true\narchive_after_days = 30\ndelete_archive_after_days = 10\ncompress_after_days = 0\ncompression_min_cluster_size = 1\nmax_rows_per_run = 0\n",
                 workspace.display()
             ),
         )
@@ -962,11 +962,11 @@ mod tests {
         let workspace = dir.path().join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
 
-        let config_path = dir.path().join("coop.yaml");
+        let config_path = dir.path().join("coop.toml");
         std::fs::write(
             &config_path,
             format!(
-                "agent:\n  id: test\n  model: test-model\n  workspace: {}\ncron:\n  - name: bad\n    cron: 'not a cron'\n    message: test\n",
+                "[agent]\nid = \"test\"\nmodel = \"test-model\"\nworkspace = \"{}\"\n\n[[cron]]\nname = \"bad\"\ncron = \"not a cron\"\nmessage = \"test\"\n",
                 workspace.display()
             ),
         )
@@ -988,11 +988,11 @@ mod tests {
         let workspace = dir.path().join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
 
-        let config_path = dir.path().join("coop.yaml");
+        let config_path = dir.path().join("coop.toml");
         std::fs::write(
             &config_path,
             format!(
-                "agent:\n  id: test\n  model: test-model\n  workspace: {}\ncron:\n  - name: test\n    cron: '*/30 * * * *'\n    user: mallory\n    message: test\n",
+                "[agent]\nid = \"test\"\nmodel = \"test-model\"\nworkspace = \"{}\"\n\n[[cron]]\nname = \"test\"\ncron = \"*/30 * * * *\"\nuser = \"mallory\"\nmessage = \"test\"\n",
                 workspace.display()
             ),
         )
@@ -1015,13 +1015,11 @@ mod tests {
         std::fs::create_dir_all(&workspace).unwrap();
         std::fs::write(workspace.join("SOUL.md"), "test soul").unwrap();
 
-        let config_path = dir.path().join("coop.yaml");
+        let config_path = dir.path().join("coop.toml");
         std::fs::write(
             &config_path,
             format!(
-                "agent:\n  id: test\n  model: test-model\n  workspace: {}\n\
-                 users:\n  - name: alice\n    trust: full\n    match: ['terminal:default']\n\
-                 cron:\n  - name: heartbeat\n    cron: '*/30 * * * *'\n    user: alice\n    message: check\n",
+                "[agent]\nid = \"test\"\nmodel = \"test-model\"\nworkspace = \"{}\"\n\n[[users]]\nname = \"alice\"\ntrust = \"full\"\nmatch = [\"terminal:default\"]\n\n[[cron]]\nname = \"heartbeat\"\ncron = \"*/30 * * * *\"\nuser = \"alice\"\nmessage = \"check\"\n",
                 workspace.display()
             ),
         )
@@ -1044,13 +1042,11 @@ mod tests {
         std::fs::create_dir_all(&workspace).unwrap();
         std::fs::write(workspace.join("SOUL.md"), "test soul").unwrap();
 
-        let config_path = dir.path().join("coop.yaml");
+        let config_path = dir.path().join("coop.toml");
         std::fs::write(
             &config_path,
             format!(
-                "agent:\n  id: test\n  model: test-model\n  workspace: {}\n\
-                 users:\n  - name: alice\n    trust: full\n    match: ['signal:alice-uuid']\n\
-                 cron:\n  - name: heartbeat\n    cron: '*/30 * * * *'\n    user: alice\n    message: check\n",
+                "[agent]\nid = \"test\"\nmodel = \"test-model\"\nworkspace = \"{}\"\n\n[[users]]\nname = \"alice\"\ntrust = \"full\"\nmatch = [\"signal:alice-uuid\"]\n\n[[cron]]\nname = \"heartbeat\"\ncron = \"*/30 * * * *\"\nuser = \"alice\"\nmessage = \"check\"\n",
                 workspace.display()
             ),
         )
@@ -1141,11 +1137,11 @@ mod tests {
         std::fs::create_dir_all(&workspace).unwrap();
         std::fs::write(workspace.join("SOUL.md"), "test").unwrap();
 
-        let config_path = dir.path().join("coop.yaml");
+        let config_path = dir.path().join("coop.toml");
         std::fs::write(
             &config_path,
             format!(
-                "agent:\n  id: test\n  model: test-model\n  workspace: {}\nprovider:\n  name: anthropic\nprompt:\n  shared_files:\n    - path: ''\n",
+                "[agent]\nid = \"test\"\nmodel = \"test-model\"\nworkspace = \"{}\"\n\n[provider]\nname = \"anthropic\"\n\n[[prompt.shared_files]]\npath = \"\"\n",
                 workspace.display()
             ),
         )
@@ -1167,11 +1163,11 @@ mod tests {
         std::fs::create_dir_all(&workspace).unwrap();
         std::fs::write(workspace.join("SOUL.md"), "test").unwrap();
 
-        let config_path = dir.path().join("coop.yaml");
+        let config_path = dir.path().join("coop.toml");
         std::fs::write(
             &config_path,
             format!(
-                "agent:\n  id: test\n  model: test-model\n  workspace: {}\nprovider:\n  name: anthropic\nprompt:\n  shared_files:\n    - path: /etc/passwd\n",
+                "[agent]\nid = \"test\"\nmodel = \"test-model\"\nworkspace = \"{}\"\n\n[provider]\nname = \"anthropic\"\n\n[[prompt.shared_files]]\npath = \"/etc/passwd\"\n",
                 workspace.display()
             ),
         )
@@ -1192,11 +1188,11 @@ mod tests {
         std::fs::create_dir_all(&workspace).unwrap();
         std::fs::write(workspace.join("SOUL.md"), "test").unwrap();
 
-        let config_path = dir.path().join("coop.yaml");
+        let config_path = dir.path().join("coop.toml");
         std::fs::write(
             &config_path,
             format!(
-                "agent:\n  id: test\n  model: test-model\n  workspace: {}\nprovider:\n  name: anthropic\nprompt:\n  user_files:\n    - path: ../../etc/passwd\n",
+                "[agent]\nid = \"test\"\nmodel = \"test-model\"\nworkspace = \"{}\"\n\n[provider]\nname = \"anthropic\"\n\n[[prompt.user_files]]\npath = \"../../etc/passwd\"\n",
                 workspace.display()
             ),
         )
@@ -1217,11 +1213,11 @@ mod tests {
         std::fs::create_dir_all(&workspace).unwrap();
         std::fs::write(workspace.join("SOUL.md"), "test").unwrap();
 
-        let config_path = dir.path().join("coop.yaml");
+        let config_path = dir.path().join("coop.toml");
         std::fs::write(
             &config_path,
             format!(
-                "agent:\n  id: test\n  model: test-model\n  workspace: {}\nprovider:\n  name: anthropic\nprompt:\n  shared_files:\n    - path: SOUL.md\n    - path: SOUL.md\n",
+                "[agent]\nid = \"test\"\nmodel = \"test-model\"\nworkspace = \"{}\"\n\n[provider]\nname = \"anthropic\"\n\n[[prompt.shared_files]]\npath = \"SOUL.md\"\n\n[[prompt.shared_files]]\npath = \"SOUL.md\"\n",
                 workspace.display()
             ),
         )
@@ -1243,11 +1239,11 @@ mod tests {
         std::fs::create_dir_all(&workspace).unwrap();
         std::fs::write(workspace.join("SOUL.md"), "test").unwrap();
 
-        let config_path = dir.path().join("coop.yaml");
+        let config_path = dir.path().join("coop.toml");
         std::fs::write(
             &config_path,
             format!(
-                "agent:\n  id: test\n  model: test-model\n  workspace: {}\nprovider:\n  name: anthropic\n  api_keys:\n    - ANTHROPIC_API_KEY\n",
+                "[agent]\nid = \"test\"\nmodel = \"test-model\"\nworkspace = \"{}\"\n\n[provider]\nname = \"anthropic\"\napi_keys = [\"ANTHROPIC_API_KEY\"]\n",
                 workspace.display()
             ),
         )
@@ -1269,11 +1265,11 @@ mod tests {
         std::fs::create_dir_all(&workspace).unwrap();
         std::fs::write(workspace.join("SOUL.md"), "test").unwrap();
 
-        let config_path = dir.path().join("coop.yaml");
+        let config_path = dir.path().join("coop.toml");
         std::fs::write(
             &config_path,
             format!(
-                "agent:\n  id: test\n  model: test-model\n  workspace: {}\nprovider:\n  name: anthropic\n  api_keys:\n    - env:COOP_TEST_MISSING_KEY_A\n    - env:COOP_TEST_MISSING_KEY_B\n",
+                "[agent]\nid = \"test\"\nmodel = \"test-model\"\nworkspace = \"{}\"\n\n[provider]\nname = \"anthropic\"\napi_keys = [\"env:COOP_TEST_MISSING_KEY_A\", \"env:COOP_TEST_MISSING_KEY_B\"]\n",
                 workspace.display()
             ),
         )
@@ -1298,11 +1294,11 @@ mod tests {
         std::fs::create_dir_all(&workspace).unwrap();
         std::fs::write(workspace.join("SOUL.md"), "test").unwrap();
 
-        let config_path = dir.path().join("coop.yaml");
+        let config_path = dir.path().join("coop.toml");
         std::fs::write(
             &config_path,
             format!(
-                "agent:\n  id: test\n  model: test-model\n  workspace: {}\nprovider:\n  name: anthropic\n  api_keys:\n    - env:HOME\n",
+                "[agent]\nid = \"test\"\nmodel = \"test-model\"\nworkspace = \"{}\"\n\n[provider]\nname = \"anthropic\"\napi_keys = [\"env:HOME\"]\n",
                 workspace.display()
             ),
         )

@@ -65,7 +65,7 @@ The channel "family" is extracted from the channel identifier by taking everythi
 
 Each workspace file has a minimum trust level. Files are only injected when `effective_trust >= file.trust`:
 
-```yaml
+```toml
 prompt:
   files:
     - path: MEMORY.md
@@ -124,7 +124,7 @@ This is the **progressive disclosure** model: the agent always knows what's avai
 
 Instead of one massive AGENTS.md with conditional sections, situation-specific rules live in separate files referenced by config:
 
-```yaml
+```toml
 situations:
   dm:
     ceiling: full

@@ -45,9 +45,9 @@ Do not include full narratives/facts in the index block.
 
 ### B) Add configurable index budget
 
-Extend config (`coop.yaml`) with optional memory prompt index settings:
+Extend config (`coop.toml`) with optional memory prompt index settings:
 
-```yaml
+```toml
 memory:
   prompt_index:
     enabled: true

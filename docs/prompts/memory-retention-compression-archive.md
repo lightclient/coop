@@ -31,7 +31,7 @@ Implement a first practical pipeline (deterministic, no LLM dependency required)
 
 Extend `memory` config with retention settings and sensible defaults:
 
-```yaml
+```toml
 memory:
   retention:
     enabled: true

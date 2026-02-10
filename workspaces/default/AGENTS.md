@@ -36,7 +36,7 @@ Five workspace crates under `crates/`:
 
 - **coop-core** — Domain types (`Message`, `Role`, `Content`, `SessionKey`, `TrustLevel`), trait boundaries (`Provider`, `Channel`, `Tool`, `ToolExecutor`, `SessionStore`), prompt builder with token counting, and testing fakes for all traits
 - **coop-agent** — LLM provider integration: direct Anthropic API client with OAuth support, multi-key rotation on rate limits
-- **coop-gateway** — Main binary entry point, CLI (Start/Chat/Version), TUI event loop, gateway message routing, YAML config parsing
+- **coop-gateway** — Main binary entry point, CLI (Start/Chat/Version), TUI event loop, gateway message routing, TOML config parsing
 - **coop-channels** — Channel adapters (currently terminal only)
 - **coop-tui** — Terminal UI built on crossterm
 
@@ -52,7 +52,7 @@ Five workspace crates under `crates/`:
 - Matching fake implementations in `coop-core/fakes.rs` (`FakeProvider`, `FakeChannel`, `FakeTool`, `MemorySessionStore`) for testing without real dependencies
 - System prompts assembled via layered `PromptBuilder` with token budgeting and Anthropic cache hints
 - Trust model uses Bell-LaPadula ordering: `Full < Inner < Familiar < Public`
-- Config loaded from YAML (`coop.yaml`) with hierarchical path resolution
+- Config loaded from TOML (`coop.toml`) with hierarchical path resolution
 
 ## Code Conventions
 

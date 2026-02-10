@@ -1,0 +1,19 @@
+[agent]
+id = "coop"
+model = "anthropic/claude-opus-4-5-20251101"
+workspace = "./workspaces/default"
+
+[[users]]
+match = ["terminal:default", "signal:alice-uuid"]
+name = "alice"
+trust = "full"
+
+[channels.signal]
+db_path = "./db/signal.db"
+
+[provider]
+name = "anthropic"
+# API key from env: ANTHROPIC_API_KEY
+
+[memory]
+db_path = "./db/memory.db"
