@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use coop_core::{Tool, ToolContext, ToolDef, ToolExecutor, ToolOutput};
 use serde::Deserialize;
 use tokio::sync::mpsc;
-use tracing::{Instrument, debug, info, info_span};
+use tracing::{Instrument, debug, info_span};
 
 use crate::signal::{SignalAction, SignalQuery, SignalTarget};
 
@@ -92,7 +92,7 @@ impl Tool for SignalReactTool {
             let args: ReactArgs = serde_json::from_value(arguments)?;
             let target = SignalTarget::parse(&args.chat_id)?;
 
-            info!(
+            debug!(
                 tool.name = "signal_react",
                 signal.action = "react",
                 signal.chat_id = %args.chat_id.as_str(),
@@ -165,7 +165,7 @@ impl Tool for SignalReplyTool {
             let args: ReplyArgs = serde_json::from_value(arguments)?;
             let target = SignalTarget::parse(&args.chat_id)?;
 
-            info!(
+            debug!(
                 tool.name = "signal_reply",
                 signal.action = "reply",
                 signal.chat_id = %args.chat_id.as_str(),
@@ -274,7 +274,7 @@ impl Tool for SignalHistoryTool {
 
             let limit = args.limit.min(50);
 
-            info!(
+            debug!(
                 tool.name = "signal_history",
                 signal.limit = limit,
                 signal.before = ?args.before,
@@ -372,7 +372,7 @@ impl Tool for SignalSendTool {
                 anyhow::anyhow!("signal_send is only available in Signal chat sessions")
             })?;
 
-            info!(
+            debug!(
                 tool.name = "signal_send",
                 signal.action = "send",
                 signal.raw_content = %args.text.as_str(),

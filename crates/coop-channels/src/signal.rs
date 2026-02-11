@@ -637,7 +637,7 @@ async fn send_action_with_trace(
     async {
         let result = send_content_to_target(manager, target, message, timestamp).await;
         match &result {
-            Ok(()) => info!("signal action sent"),
+            Ok(()) => debug!("signal action sent"),
             Err(error) => warn!(error = %error, "signal action send failed"),
         }
         result

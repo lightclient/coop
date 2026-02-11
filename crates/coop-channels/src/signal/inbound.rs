@@ -5,7 +5,7 @@ use presage::proto::data_message::Quote;
 use presage::proto::{
     AttachmentPointer, EditMessage, Preview, ReceiptMessage, TypingMessage, receipt_message,
 };
-use tracing::{field, info, info_span};
+use tracing::{debug, field, info_span};
 
 /// Parse a Signal Content into an InboundMessage without tracing.
 /// Used by the history query path to avoid trace noise.
@@ -95,7 +95,7 @@ pub(super) fn inbound_from_content(content: &Content) -> Option<InboundMessage> 
         }
         span.record("signal.raw_content", field::display(&inbound.content));
 
-        info!(
+        debug!(
             signal.inbound_kind = signal_inbound_kind_name(&inbound.kind),
             signal.chat_id = ?inbound.chat_id,
             signal.is_group = inbound.is_group,
@@ -111,9 +111,9 @@ pub(super) fn inbound_from_content(content: &Content) -> Option<InboundMessage> 
             body_name,
             "data_message" | "edit_message" | "synchronize_message"
         ) {
-            info!("signal inbound dropped/empty");
+            debug!("signal inbound dropped/empty");
         } else {
-            info!("signal inbound unsupported body variant");
+            debug!("signal inbound unsupported body variant");
         }
         None
     }

@@ -67,7 +67,7 @@ impl TypingGuard {
             loop {
                 tokio::select! {
                     () = tokio::time::sleep(TYPING_REFRESH_INTERVAL) => {
-                        info!(
+                        debug!(
                             session = %session_key,
                             "typing notifier refresh",
                         );
@@ -100,7 +100,7 @@ fn emit_typing_notifier_event(session_key: &SessionKey, started: bool) {
     };
 
     if let Some((target_kind, target)) = signal_target_from_session(session_key) {
-        info!(
+        debug!(
             session = %session_key,
             signal.started = started,
             signal.target_kind = target_kind,
@@ -108,7 +108,7 @@ fn emit_typing_notifier_event(session_key: &SessionKey, started: bool) {
             "{event_name}"
         );
     } else {
-        info!(
+        debug!(
             session = %session_key,
             signal.started = started,
             "{event_name}"
@@ -224,7 +224,7 @@ impl Gateway {
             .await
             {
                 Ok(Some(memory_index)) => {
-                    info!(
+                    debug!(
                         trust = ?trust,
                         index_len = memory_index.len(),
                         "memory prompt index injected"
@@ -413,7 +413,7 @@ impl Gateway {
                         .send(TurnEvent::AssistantMessage(response.clone()))
                         .await;
 
-                    info!(
+                    debug!(
                         has_tool_requests = response.has_tool_requests(),
                         response_text_len = response.text().len(),
                         "iteration complete"
@@ -489,7 +489,7 @@ impl Gateway {
                             .await
                         {
                             Ok(output) => {
-                                info!(
+                                debug!(
                                     output_len = output.content.len(),
                                     is_error = output.is_error,
                                     output_preview =
@@ -585,7 +585,7 @@ impl Gateway {
                         .send(TurnEvent::AssistantMessage(response.clone()))
                         .await;
 
-                    info!(
+                    debug!(
                         response_text_len = response.text().len(),
                         "limit completion done"
                     );
@@ -595,7 +595,7 @@ impl Gateway {
                 .await;
 
                 if let Err(e) = final_result {
-                    warn!(error = %e, "limit completion failed");
+                    error!(error = %e, "limit completion failed");
                     let _ = event_tx
                         .send(TurnEvent::Error(
                             "Hit iteration limit and failed to generate summary.".to_owned(),
@@ -1038,7 +1038,7 @@ impl Gateway {
             }
         }
 
-        info!(
+        debug!(
             input_tokens = usage.input_tokens,
             output_tokens = usage.output_tokens,
             cache_read_tokens = usage.cache_read_tokens,
@@ -1067,7 +1067,7 @@ impl Gateway {
             let _ = event_tx.send(TurnEvent::TextDelta(text)).await;
         }
 
-        info!(
+        debug!(
             input_tokens = usage.input_tokens,
             output_tokens = usage.output_tokens,
             cache_read_tokens = usage.cache_read_tokens,

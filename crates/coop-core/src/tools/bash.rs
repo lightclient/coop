@@ -4,7 +4,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use std::time::Duration;
 use tokio::process::Command;
-use tracing::info;
+use tracing::debug;
 
 const TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_OUTPUT_BYTES: usize = 100_000;
@@ -68,7 +68,7 @@ impl Tool for BashTool {
             Ok(Ok(output)) => {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                info!(
+                debug!(
                     exit_code = output.status.code().unwrap_or(-1),
                     stdout_len = stdout.len(),
                     stderr_len = stderr.len(),

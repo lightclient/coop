@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use coop_core::traits::{Tool, ToolContext, ToolExecutor};
 use coop_core::types::{ToolDef, ToolOutput, TrustLevel};
 use std::path::PathBuf;
-use tracing::info;
+use tracing::{debug, info, warn};
 
 use crate::config_write::safe_write_config;
 
@@ -46,7 +46,7 @@ impl Tool for ConfigReadTool {
 
         match std::fs::read_to_string(&self.config_path) {
             Ok(content) => {
-                info!(config = %self.config_path.display(), "config_read");
+                debug!(config = %self.config_path.display(), "config_read");
                 Ok(ToolOutput::success(content))
             }
             Err(e) => Ok(ToolOutput::error(format!(
@@ -108,7 +108,7 @@ impl Tool for ConfigWriteTool {
         let summary = report.to_summary_string();
 
         if report.has_errors() {
-            info!(config = %self.config_path.display(), "config_write rejected: validation failed");
+            warn!(config = %self.config_path.display(), "config_write rejected: validation failed");
             Ok(ToolOutput::error(format!(
                 "Config validation failed. File was NOT modified.\n\n{summary}"
             )))

@@ -319,7 +319,7 @@ fn should_dispatch_signal_message(inbound: &InboundMessage) -> bool {
 }
 
 fn trace_signal_inbound(message: &'static str, inbound: &InboundMessage) {
-    tracing::info!(
+    tracing::debug!(
         signal.inbound_kind = signal_inbound_kind_name(&inbound.kind),
         signal.sender = %inbound.sender,
         signal.chat_id = ?inbound.chat_id,

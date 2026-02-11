@@ -1,7 +1,7 @@
 use anyhow::Result;
 use rusqlite::{OptionalExtension, params};
 use std::collections::{HashMap, HashSet};
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 use crate::types::{MemoryQuery, Observation, ObservationIndex};
 
@@ -43,7 +43,7 @@ pub(super) fn search(
                     "memory vector candidate retrieval complete"
                 );
             } else {
-                info!("memory vector retrieval unavailable, using FTS-only path");
+                warn!("memory vector retrieval unavailable, using FTS-only path");
             }
         } else if memory.embedder.is_some() {
             warn!("memory query embedding missing, using FTS-only path");

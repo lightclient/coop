@@ -368,7 +368,7 @@ async fn fire_cron(
 
                 match strip_heartbeat_token(&response) {
                     HeartbeatResult::Suppress => {
-                        info!(cron.name = %cfg.name, "heartbeat suppressed: HEARTBEAT_OK token detected");
+                        debug!(cron.name = %cfg.name, "heartbeat suppressed: HEARTBEAT_OK token detected");
                     }
                     HeartbeatResult::Deliver(content) => {
                         for (channel, target) in &delivery_targets {
@@ -577,7 +577,7 @@ pub(crate) async fn announce_to_session(
     );
 
     async {
-        info!(
+        debug!(
             dm_session = %dm_session_key,
             "injecting cron output into DM session"
         );
