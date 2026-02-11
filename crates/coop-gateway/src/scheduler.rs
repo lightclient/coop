@@ -332,7 +332,7 @@ async fn fire_cron(
             cfg.message.clone()
         } else {
             format!(
-                "[Your response will be delivered to the user via {}. Reply HEARTBEAT_OK if nothing needs attention. Do not use signal_send — your response is delivered automatically.]\n\n{}",
+                "[Your response will be delivered to the user via {}. Reply HEARTBEAT_OK if nothing needs attention. Your response is delivered automatically.]\n\n{}",
                 prompt_channel.as_deref().unwrap_or("messaging"),
                 cfg.message
             )

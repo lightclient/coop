@@ -370,6 +370,18 @@ impl Gateway {
             self.append_message(session_key, Message::user().with_text(user_input));
 
             let tool_defs = self.executor.tools();
+            // Cron sessions don't need channel-specific tools like signal_send;
+            // delivery is handled by the scheduler after the turn completes.
+            let tool_defs = if matches!(session_key.kind, SessionKind::Cron(_)) {
+                tool_defs
+                    .into_iter()
+                    .filter(|t| t.name != "signal_send")
+                    .filter(|t| t.name != "signal_react")
+                    .filter(|t| t.name != "signal_reply")
+                    .collect()
+            } else {
+                tool_defs
+            };
             let ctx = self.tool_context(session_key, trust, user_name);
             let turn_config = TurnConfig::default();
 
