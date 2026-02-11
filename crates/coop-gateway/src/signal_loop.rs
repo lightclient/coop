@@ -1,6 +1,7 @@
 use anyhow::Result;
 use coop_channels::{SignalChannel, SignalTarget};
-use coop_core::{Channel, InboundKind, InboundMessage, OutboundMessage, TurnEvent};
+use coop_core::{Channel, InboundKind, InboundMessage, OutboundMessage, SessionKey, TurnEvent};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -17,8 +18,9 @@ pub(crate) async fn run_signal_loop(
 ) -> Result<()> {
     tracing::info!("signal loop listening");
 
-    // Track the active turn task so we can await it before starting another.
-    let mut active_turn: Option<JoinHandle<Result<()>>> = None;
+    // Per-session turn tracking: each session can have one active turn.
+    // Different sessions run concurrently.
+    let mut active_turns: HashMap<SessionKey, JoinHandle<Result<()>>> = HashMap::new();
 
     loop {
         let inbound = Channel::recv(&mut signal_channel).await?;
@@ -42,15 +44,24 @@ pub(crate) async fn run_signal_loop(
 
         trace_signal_inbound("signal inbound dispatched", &inbound);
 
-        // Wait for any previous turn to finish before starting a new one.
-        if let Some(task) = active_turn.take()
-            && let Err(error) = task.await
-        {
-            warn!(error = %error, "previous signal turn task failed");
+        // Clean up completed turns (finished or panicked)
+        active_turns.retain(|_, task| !task.is_finished());
+
+        // Route to determine the target session
+        let decision = router.route(&inbound);
+
+        // If this session already has an active turn, skip.
+        // The gateway's try_lock would reject it anyway, but we avoid the
+        // spawn overhead and log a clearer message.
+        if active_turns.contains_key(&decision.session_key) {
+            tracing::debug!(
+                session = %decision.session_key,
+                "skipping message: session already has an active turn"
+            );
+            continue;
         }
 
         // Bootstrap: seed session with recent Signal history if this is a new session
-        let decision = router.route(&inbound);
         if router.session_is_empty(&decision.session_key)
             && let Ok(signal_target) = SignalTarget::parse(&target)
         {
@@ -74,15 +85,19 @@ pub(crate) async fn run_signal_loop(
         let inbound_clone = inbound.clone();
         let target_clone = target.clone();
         let action_tx = signal_channel.action_sender();
-        active_turn = Some(tokio::spawn(async move {
-            dispatch_signal_turn_background(
-                &action_tx,
-                router_clone.as_ref(),
-                &inbound_clone,
-                &target_clone,
-            )
-            .await
-        }));
+        let session_key = decision.session_key.clone();
+        active_turns.insert(
+            session_key,
+            tokio::spawn(async move {
+                dispatch_signal_turn_background(
+                    &action_tx,
+                    router_clone.as_ref(),
+                    &inbound_clone,
+                    &target_clone,
+                )
+                .await
+            }),
+        );
     }
 }
 

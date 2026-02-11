@@ -779,6 +779,133 @@ fn build_router_with_gateway(
     (router, gateway)
 }
 
+fn test_config_two_users() -> Config {
+    toml::from_str(
+        r#"
+[agent]
+id = "coop"
+model = "test-model"
+
+[[users]]
+name = "alice"
+trust = "full"
+match = ["signal:alice-uuid"]
+
+[[users]]
+name = "bob"
+trust = "full"
+match = ["signal:bob-uuid"]
+"#,
+    )
+    .unwrap()
+}
+
+fn build_router_with_typing(
+    config: Config,
+    provider: Arc<dyn Provider>,
+    action_tx: mpsc::Sender<SignalAction>,
+) -> (MessageRouter, Arc<Gateway>) {
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::write(workspace.path().join("SOUL.md"), "You are a test agent.").unwrap();
+    let typing: Arc<dyn TypingNotifier> = Arc::new(SignalTypingNotifier::new(action_tx));
+    let shared = shared_config(config);
+    let gateway = Arc::new(
+        Gateway::new(
+            Arc::clone(&shared),
+            workspace.path().to_path_buf(),
+            provider,
+            Arc::new(DefaultExecutor::new()) as Arc<dyn ToolExecutor>,
+            Some(typing),
+            None,
+        )
+        .unwrap(),
+    );
+    (MessageRouter::new(shared, Arc::clone(&gateway)), gateway)
+}
+
+fn has_typing_start(actions: &[SignalAction], uuid: &str) -> bool {
+    actions.iter().any(|a| {
+        matches!(
+            a,
+            SignalAction::Typing { target: SignalTarget::Direct(t), started: true } if t == uuid
+        )
+    })
+}
+
+/// Two users messaging on Signal simultaneously should get responses in
+/// parallel, not serialized. Uses a slow provider (200ms) and asserts both
+/// complete in ~1x the delay, proving concurrency.
+#[tokio::test]
+async fn concurrent_turns_for_different_sessions_run_in_parallel() {
+    use coop_core::fakes::SlowFakeProvider;
+    use std::time::{Duration, Instant};
+
+    let delay = Duration::from_millis(200);
+    let provider: Arc<dyn Provider> = Arc::new(SlowFakeProvider::new("slow reply", delay));
+    let mut channel = MockSignalChannel::new();
+    let (router, gateway) =
+        build_router_with_typing(test_config_two_users(), provider, channel.action_sender());
+
+    let alice_msg = inbound_message(
+        InboundKind::Text,
+        "alice-uuid",
+        None,
+        false,
+        Some("alice-uuid"),
+    );
+    let bob_msg = inbound_message(InboundKind::Text, "bob-uuid", None, false, Some("bob-uuid"));
+
+    // Dispatch both concurrently — this is what run_signal_loop now enables
+    // by tracking per-session instead of a single global active_turn.
+    let start = Instant::now();
+    let alice_task = tokio::spawn({
+        let (r, m) = (router.clone(), alice_msg.clone());
+        async move { r.dispatch_collect_text(&m).await }
+    });
+    let bob_task = tokio::spawn({
+        let (r, m) = (router.clone(), bob_msg.clone());
+        async move { r.dispatch_collect_text(&m).await }
+    });
+
+    let (ar, br) = tokio::join!(alice_task, bob_task);
+    let elapsed = start.elapsed();
+    let (alice_d, alice_text) = ar.unwrap().unwrap();
+    let (bob_d, bob_text) = br.unwrap().unwrap();
+
+    // Both complete in ~1x delay, not 2x (proves concurrency).
+    assert!(
+        elapsed < delay * 2,
+        "took {:?}, want <{:?}",
+        elapsed,
+        delay * 2
+    );
+    assert_eq!(alice_text, "slow reply");
+    assert_eq!(bob_text, "slow reply");
+
+    // Different sessions, each with user + assistant messages
+    assert_eq!(
+        alice_d.session_key.kind,
+        SessionKind::Dm("signal:alice-uuid".into())
+    );
+    assert_eq!(
+        bob_d.session_key.kind,
+        SessionKind::Dm("signal:bob-uuid".into())
+    );
+    assert_eq!(gateway.session_message_count(&alice_d.session_key), 2);
+    assert_eq!(gateway.session_message_count(&bob_d.session_key), 2);
+
+    // Both users received independent typing indicators
+    let actions = wait_for_actions(&mut channel, 4).await;
+    assert!(
+        has_typing_start(&actions, "alice-uuid"),
+        "alice needs typing start"
+    );
+    assert!(
+        has_typing_start(&actions, "bob-uuid"),
+        "bob needs typing start"
+    );
+}
+
 /// Simulate a crash that left dangling tool_use blocks in the session, then
 /// verify that a subsequent Signal message succeeds because the gateway
 /// repairs the session before sending to the provider.
