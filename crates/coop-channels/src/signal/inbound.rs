@@ -291,7 +291,7 @@ fn format_reply_context(quote: &Quote) -> String {
     format!("[reply to \"{quoted_text}\" (at {quote_timestamp})]")
 }
 
-fn format_attachment_metadata(attachment: &AttachmentPointer) -> String {
+pub(super) fn format_attachment_metadata(attachment: &AttachmentPointer) -> String {
     let file_name = attachment.file_name.as_deref().unwrap_or("unnamed");
     let content_type = attachment
         .content_type

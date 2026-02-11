@@ -144,6 +144,21 @@ fn create_provider(config: &Config) -> Result<AnthropicProvider> {
     }
 }
 
+/// Extract Signal sender UUIDs that have at least inner trust.
+/// Used to gate attachment downloads — only trusted senders' files are saved.
+#[cfg(feature = "signal")]
+fn trusted_signal_senders(config: &Config) -> std::collections::HashSet<String> {
+    use coop_core::TrustLevel;
+    config
+        .users
+        .iter()
+        .filter(|u| u.trust <= TrustLevel::Inner)
+        .flat_map(|u| u.r#match.iter())
+        .filter_map(|pattern| pattern.strip_prefix("signal:"))
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // cmd_check — validate config without starting
 // ---------------------------------------------------------------------------
@@ -352,7 +367,9 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
             let db_path = tui_helpers::resolve_config_path(&config_dir, &signal.db_path);
             info!(db_path = %db_path.display(), "signal channel configured");
 
-            match SignalChannel::connect(&db_path).await {
+            let attachments_dir = workspace.join("attachments");
+            let trusted_senders = trusted_signal_senders(&config);
+            match SignalChannel::connect(&db_path, attachments_dir, trusted_senders).await {
                 Ok(channel) => {
                     signal_action_tx = Some(channel.action_sender());
                     signal_query_tx = Some(channel.query_sender());

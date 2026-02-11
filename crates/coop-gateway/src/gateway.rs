@@ -412,6 +412,7 @@ impl Gateway {
                         ),
                         None => all_messages,
                     };
+                    let messages = coop_core::images::inject_images_for_provider(&messages);
                     let (response, usage) = self
                         .assistant_response(&system_prompt, &messages, &tool_defs, &event_tx)
                         .await?;
@@ -583,6 +584,7 @@ impl Gateway {
                         ),
                         None => all_messages,
                     };
+                    let messages = coop_core::images::inject_images_for_provider(&messages);
 
                     let (response, usage) = self
                         .assistant_response(&system_prompt, &messages, &[], &event_tx)

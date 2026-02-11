@@ -15,7 +15,7 @@ use coop_core::{
     TypingNotifier,
 };
 use futures::StreamExt;
-use inbound::inbound_from_content;
+use inbound::{format_attachment_metadata, inbound_from_content};
 use presage::libsignal_service::content::{ContentBody, DataMessage, GroupContextV2};
 use presage::libsignal_service::prelude::Uuid;
 use presage::libsignal_service::protocol::ServiceId;
@@ -23,10 +23,11 @@ use presage::manager::Registered;
 use presage::model::identity::OnNewIdentity;
 use presage::model::messages::Received;
 use presage::proto::data_message::{Quote, Reaction};
-use presage::proto::{TypingMessage, typing_message};
+use presage::proto::{AttachmentPointer, TypingMessage, typing_message};
 use presage::{Manager, store::StateStore};
 use presage_store_sqlite::{SqliteConnectOptions, SqliteStore};
-use std::path::Path;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, UNIX_EPOCH};
 use tokio::sync::mpsc;
@@ -146,7 +147,16 @@ impl TypingNotifier for SignalTypingNotifier {
 }
 
 impl SignalChannel {
-    pub async fn connect(db_path: impl AsRef<Path>) -> Result<Self> {
+    /// Connect to Signal.
+    ///
+    /// `trusted_senders` is the set of Signal sender UUIDs with at least
+    /// inner trust. Attachments are only downloaded and saved for senders
+    /// in this set.
+    pub async fn connect(
+        db_path: impl AsRef<Path>,
+        attachments_dir: impl Into<PathBuf>,
+        trusted_senders: HashSet<String>,
+    ) -> Result<Self> {
         let manager = load_registered_manager(db_path.as_ref()).await?;
 
         let (inbound_tx, inbound_rx) = mpsc::channel(64);
@@ -161,6 +171,8 @@ impl SignalChannel {
             action_rx,
             query_rx,
             Arc::clone(&health),
+            attachments_dir.into(),
+            trusted_senders,
         );
 
         Ok(Self {
@@ -263,6 +275,7 @@ impl SignalChannel {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn start_signal_runtime(
     manager: SignalManager,
     inbound_tx: mpsc::Sender<InboundMessage>,
@@ -270,6 +283,8 @@ fn start_signal_runtime(
     action_rx: mpsc::Receiver<SignalAction>,
     query_rx: mpsc::Receiver<SignalQuery>,
     health: HealthState,
+    attachments_dir: PathBuf,
+    trusted_senders: HashSet<String>,
 ) {
     std::thread::Builder::new()
         .name("signal-runtime".to_owned())
@@ -305,6 +320,8 @@ fn start_signal_runtime(
                     inbound_tx,
                     action_tx,
                     receive_health,
+                    attachments_dir,
+                    trusted_senders,
                 )));
                 let send_task =
                     tokio::task::spawn_local(Box::pin(send_task(manager, action_rx, send_health)));
@@ -348,7 +365,13 @@ async fn receive_task(
     inbound_tx: mpsc::Sender<InboundMessage>,
     action_tx: mpsc::Sender<SignalAction>,
     health: HealthState,
+    attachments_dir: PathBuf,
+    trusted_senders: HashSet<String>,
 ) {
+    // Separate manager clone for downloading attachments. The receive stream
+    // holds `&mut manager`, so we can't call `get_attachment` on the same
+    // instance while iterating.
+    let attachment_manager = manager.clone();
     let mut backoff = Duration::from_secs(1);
 
     loop {
@@ -384,7 +407,7 @@ async fn receive_task(
                         inbound_from_content(&content)
                     };
 
-                    if let Some(ref inbound) = inbound {
+                    if let Some(mut inbound) = inbound {
                         if needs_receipt && inbound.message_timestamp.is_some() {
                             let _ = action_tx
                                 .send(SignalAction::SendReceipt {
@@ -402,6 +425,20 @@ async fn receive_task(
                                 .await;
                         }
 
+                        // Download and save attachments only from senders
+                        // with at least inner trust.
+                        let pointers = extract_attachment_pointers(&content);
+                        if !pointers.is_empty() && trusted_senders.contains(&sender) {
+                            download_and_rewrite_attachments(
+                                &attachment_manager,
+                                &pointers,
+                                &attachments_dir,
+                                timestamp,
+                                &mut inbound,
+                            )
+                            .await;
+                        }
+
                         debug!(
                             signal.inbound_kind = ?inbound.kind,
                             signal.sender = %inbound.sender,
@@ -411,7 +448,7 @@ async fn receive_task(
                             "received signal inbound"
                         );
 
-                        if inbound_tx.send(inbound.clone()).await.is_err() {
+                        if inbound_tx.send(inbound).await.is_err() {
                             return;
                         }
                     }
@@ -710,6 +747,108 @@ async fn send_content_to_target(
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Attachment download helpers
+// ---------------------------------------------------------------------------
+
+/// Extract `AttachmentPointer`s from any Signal content body variant.
+fn extract_attachment_pointers(
+    content: &presage::libsignal_service::content::Content,
+) -> Vec<&AttachmentPointer> {
+    match &content.body {
+        ContentBody::DataMessage(dm) => dm.attachments.iter().collect(),
+        ContentBody::EditMessage(em) => em
+            .data_message
+            .as_ref()
+            .map(|dm| dm.attachments.iter().collect())
+            .unwrap_or_default(),
+        ContentBody::SynchronizeMessage(sync) => {
+            if let Some(sent) = &sync.sent {
+                if let Some(dm) = &sent.message {
+                    return dm.attachments.iter().collect();
+                }
+                if let Some(em) = &sent.edit_message {
+                    return em
+                        .data_message
+                        .as_ref()
+                        .map(|dm| dm.attachments.iter().collect())
+                        .unwrap_or_default();
+                }
+            }
+            vec![]
+        }
+        _ => vec![],
+    }
+}
+
+/// Download each attachment, save to disk, and rewrite the inbound message
+/// content to include the saved file paths so the agent can access them.
+async fn download_and_rewrite_attachments(
+    manager: &SignalManager,
+    pointers: &[&AttachmentPointer],
+    attachments_dir: &Path,
+    timestamp: u64,
+    inbound: &mut InboundMessage,
+) {
+    if let Err(e) = std::fs::create_dir_all(attachments_dir) {
+        warn!(error = %e, dir = %attachments_dir.display(), "failed to create attachments directory");
+        return;
+    }
+
+    for pointer in pointers {
+        let original_meta = format_attachment_metadata(pointer);
+        let file_name = pointer.file_name.as_deref().unwrap_or("unnamed");
+        let sanitized = sanitize_filename(file_name);
+        let save_name = format!("{timestamp}_{sanitized}");
+        let save_path = attachments_dir.join(&save_name);
+
+        match manager.get_attachment(pointer).await {
+            Ok(data) => match std::fs::write(&save_path, &data) {
+                Ok(()) => {
+                    info!(
+                        path = %save_path.display(),
+                        size = data.len(),
+                        file_name,
+                        "saved signal attachment"
+                    );
+                    let replacement =
+                        format!("{original_meta}\n[file saved: {}]", save_path.display());
+                    inbound.content = inbound.content.replace(&original_meta, &replacement);
+                }
+                Err(e) => {
+                    warn!(error = %e, path = %save_path.display(), "failed to write attachment");
+                    let replacement = format!("{original_meta}\n[file save failed: {e}]");
+                    inbound.content = inbound.content.replace(&original_meta, &replacement);
+                }
+            },
+            Err(e) => {
+                warn!(error = %e, file_name, "failed to download signal attachment");
+                let replacement = format!("{original_meta}\n[download failed: {e}]");
+                inbound.content = inbound.content.replace(&original_meta, &replacement);
+            }
+        }
+    }
+}
+
+/// Sanitize a filename for safe filesystem storage.
+fn sanitize_filename(name: &str) -> String {
+    let sanitized: String = name
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if sanitized.is_empty() {
+        "unnamed".to_owned()
+    } else {
+        sanitized
+    }
 }
 
 fn now_epoch_millis() -> u64 {

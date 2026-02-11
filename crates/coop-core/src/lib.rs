@@ -1,4 +1,5 @@
 pub mod fakes;
+pub mod images;
 pub mod prompt;
 pub mod tools;
 pub mod traits;

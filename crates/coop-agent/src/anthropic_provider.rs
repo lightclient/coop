@@ -396,7 +396,15 @@ impl AnthropicProvider {
                         "content": output,
                         "is_error": is_error
                     })),
-                    _ => None, // Skip Image, Thinking for now
+                    Content::Image { data, mime_type } => Some(json!({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": mime_type,
+                            "data": data
+                        }
+                    })),
+                    Content::Thinking { .. } => None,
                 })
                 .collect();
 
@@ -1221,6 +1229,29 @@ mod tests {
         // Same model — should be a no-op (no panic, no change).
         provider.set_model("claude-sonnet-4-20250514");
         assert_eq!(provider.model_info().name, "claude-sonnet-4-20250514");
+    }
+
+    #[test]
+    fn format_messages_serializes_image_content() {
+        let messages = vec![
+            Message::user()
+                .with_text("What's in this image?")
+                .with_image("aW1hZ2VkYXRh", "image/png"),
+        ];
+
+        let formatted = AnthropicProvider::format_messages(&messages, false, None);
+
+        assert_eq!(formatted.len(), 1);
+        let content = formatted[0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2);
+
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "What's in this image?");
+
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["source"]["type"], "base64");
+        assert_eq!(content[1]["source"]["media_type"], "image/png");
+        assert_eq!(content[1]["source"]["data"], "aW1hZ2VkYXRh");
     }
 
     #[test]
