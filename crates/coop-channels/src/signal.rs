@@ -1,3 +1,6 @@
+#[allow(clippy::unwrap_used)]
+#[cfg(test)]
+mod image_ext_tests;
 mod inbound;
 mod query;
 #[allow(clippy::unwrap_used)]
@@ -802,6 +805,7 @@ async fn download_and_rewrite_attachments(
         let file_name = pointer.file_name.as_deref().unwrap_or("unnamed");
         let sanitized = sanitize_filename(file_name);
         let save_name = format!("{timestamp}_{sanitized}");
+        let save_name = ensure_image_extension(&save_name, pointer.content_type.as_deref());
         let save_path = attachments_dir.join(&save_name);
 
         match manager.get_attachment(pointer).await {
@@ -830,6 +834,31 @@ async fn download_and_rewrite_attachments(
             }
         }
     }
+}
+
+/// Append an image file extension when the filename lacks one and the
+/// content-type is a recognized image MIME type. This ensures downloaded
+/// Signal attachments are discoverable by the image-injection pipeline in
+/// `coop_core::images`, which requires a recognized extension.
+fn ensure_image_extension(name: &str, content_type: Option<&str>) -> String {
+    let lower = name.to_lowercase();
+    let image_extensions = ["jpg", "jpeg", "png", "gif", "webp"];
+    if image_extensions
+        .iter()
+        .any(|ext| lower.ends_with(&format!(".{ext}")))
+    {
+        return name.to_owned();
+    }
+
+    let ext = match content_type {
+        Some("image/jpeg") => ".jpg",
+        Some("image/png") => ".png",
+        Some("image/gif") => ".gif",
+        Some("image/webp") => ".webp",
+        _ => return name.to_owned(),
+    };
+
+    format!("{name}{ext}")
 }
 
 /// Sanitize a filename for safe filesystem storage.
