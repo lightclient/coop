@@ -1,11 +1,10 @@
+use crate::tools::truncate;
 use crate::traits::{Tool, ToolContext};
 use crate::types::{ToolDef, ToolOutput};
 use anyhow::Result;
 use async_trait::async_trait;
 use std::path::PathBuf;
 use tracing::debug;
-
-const MAX_OUTPUT_BYTES: usize = 100_000;
 
 #[derive(Debug)]
 pub struct ReadFileTool;
@@ -125,14 +124,19 @@ impl Tool for ReadFileTool {
             content
         };
 
-        if output.len() > MAX_OUTPUT_BYTES {
-            let mut truncated = output;
-            let boundary = truncated.floor_char_boundary(MAX_OUTPUT_BYTES);
-            truncated.truncate(boundary);
-            truncated.push_str("\n... [output truncated]");
-            Ok(ToolOutput::success(truncated))
+        let r = truncate::truncate_head(&output);
+        if r.was_truncated {
+            let kept_lines = r.output.lines().count();
+            let notice = format!(
+                "{content}\n[Showing first {kept} of {total} lines (50KB limit). Use offset={next} to continue.]",
+                content = r.output,
+                kept = kept_lines,
+                total = r.total_lines,
+                next = kept_lines + 1,
+            );
+            Ok(ToolOutput::success(notice))
         } else {
-            Ok(ToolOutput::success(output))
+            Ok(ToolOutput::success(r.output))
         }
     }
 }

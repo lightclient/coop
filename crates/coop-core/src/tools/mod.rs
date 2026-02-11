@@ -1,6 +1,7 @@
 pub mod bash;
 pub mod edit_file;
 pub mod read_file;
+pub mod truncate;
 pub mod write_file;
 
 use crate::traits::{Tool, ToolContext, ToolExecutor};

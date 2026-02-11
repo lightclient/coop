@@ -1,3 +1,4 @@
+use crate::tools::truncate;
 use crate::traits::{Tool, ToolContext};
 use crate::types::{ToolDef, ToolOutput, TrustLevel};
 use anyhow::Result;
@@ -7,7 +8,6 @@ use tokio::process::Command;
 use tracing::debug;
 
 const TIMEOUT: Duration = Duration::from_secs(120);
-const MAX_OUTPUT_BYTES: usize = 100_000;
 
 #[derive(Debug)]
 pub struct BashTool;
@@ -83,21 +83,33 @@ impl Tool for BashTool {
                     combined.push_str(&stderr);
                 }
 
-                if combined.len() > MAX_OUTPUT_BYTES {
-                    let boundary = combined.floor_char_boundary(MAX_OUTPUT_BYTES);
-                    combined.truncate(boundary);
-                    combined.push_str("\n... [output truncated]");
-                }
+                let r = truncate::truncate_tail(&combined);
+                let final_output = if r.was_truncated {
+                    let temp_note = truncate::spill_to_temp_file(&combined)
+                        .map(|p| format!(" Full output: {p}"))
+                        .unwrap_or_default();
+                    let kept_lines = r.output.lines().count();
+                    format!(
+                        "... [output truncated: {total} lines, showing last {kept}.{temp_note}]\n{content}",
+                        total = r.total_lines,
+                        kept = kept_lines,
+                        content = r.output,
+                    )
+                } else {
+                    r.output
+                };
 
                 if output.status.success() {
-                    if combined.is_empty() {
+                    if final_output.is_empty() {
                         Ok(ToolOutput::success("(no output)"))
                     } else {
-                        Ok(ToolOutput::success(combined))
+                        Ok(ToolOutput::success(final_output))
                     }
                 } else {
                     let code = output.status.code().unwrap_or(-1);
-                    Ok(ToolOutput::error(format!("exit code {code}\n{combined}")))
+                    Ok(ToolOutput::error(format!(
+                        "exit code {code}\n{final_output}"
+                    )))
                 }
             }
         }
@@ -169,24 +181,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn truncation_respects_char_boundaries() {
+    async fn truncation_uses_tail_strategy() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = test_ctx(dir.path());
         let tool = BashTool;
 
-        // Generate output with multi-byte UTF-8 chars that exceeds MAX_OUTPUT_BYTES.
-        // Each '🦀' is 4 bytes. We need enough to exceed 100_000 bytes.
-        let repeat = MAX_OUTPUT_BYTES / 4 + 100;
-        let cmd = format!("python3 -c \"print('🦀' * {repeat})\"");
+        // Generate 3000 lines — exceeds the 2000 line limit.
+        let cmd = "seq 1 3000";
         let output = tool
             .execute(serde_json::json!({"command": cmd}), &ctx)
             .await
             .unwrap();
 
         assert!(!output.is_error);
-        assert!(output.content.contains("[output truncated]"));
-        // Verify it's valid UTF-8 (would have panicked otherwise)
-        assert!(output.content.len() <= MAX_OUTPUT_BYTES + 50);
+        assert!(output.content.contains("[output truncated"));
+        assert!(output.content.contains("showing last"));
+        // Tail strategy: should contain the last line, not the first.
+        assert!(output.content.contains("3000"));
+        // First line should be truncated away
+        assert!(!output.content.starts_with("1\n"));
     }
 
     #[tokio::test]

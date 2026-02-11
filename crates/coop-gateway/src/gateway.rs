@@ -786,9 +786,10 @@ impl Gateway {
 
         // If we already have a compaction state and no new messages have been
         // added since, there's nothing to re-compact.
-        if let Some((_, msg_count_at_compaction)) = self.get_compaction(session_key) {
+        let previous_compaction = self.get_compaction(session_key);
+        if let Some((_, msg_count_at_compaction)) = &previous_compaction {
             let current_count = self.messages(session_key).len();
-            if current_count <= msg_count_at_compaction {
+            if current_count <= *msg_count_at_compaction {
                 return Ok(false);
             }
         }
@@ -798,22 +799,35 @@ impl Gateway {
         let all_messages = self.messages(session_key);
         let msg_count = all_messages.len();
 
+        let previous_state = previous_compaction.as_ref().map(|(state, _)| state);
+
         info!(
             session = %session_key,
             input_tokens,
             message_count = msg_count,
+            is_iterative = previous_state.is_some(),
             "compaction triggered"
         );
 
-        match compaction::compact(&all_messages, self.provider.as_ref(), system_prompt).await {
-            Ok(mut state) => {
+        match compaction::compact(
+            &all_messages,
+            self.provider.as_ref(),
+            system_prompt,
+            previous_state,
+        )
+        .await
+        {
+            Ok(state) => {
+                let cut_point = state.messages_at_compaction.unwrap_or(msg_count);
                 info!(
                     session = %session_key,
                     summary_len = state.summary.len(),
+                    compaction_count = state.compaction_count,
+                    files_tracked = state.files_touched.len(),
+                    cut_point,
                     "session compacted"
                 );
-                state.messages_at_compaction = Some(msg_count);
-                self.set_compaction(session_key, state, msg_count);
+                self.set_compaction(session_key, state, cut_point);
                 Ok(true)
             }
             Err(e) => {

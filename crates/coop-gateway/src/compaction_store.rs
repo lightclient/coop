@@ -82,6 +82,8 @@ mod tests {
 
         let state = CompactionState {
             summary: "<summary>test</summary>".into(),
+            files_touched: vec![],
+            compaction_count: 1,
             tokens_at_compaction: 100_000,
             created_at: chrono::Utc::now(),
             messages_at_compaction: Some(42),
@@ -92,6 +94,7 @@ mod tests {
         assert_eq!(loaded.summary, state.summary);
         assert_eq!(loaded.tokens_at_compaction, state.tokens_at_compaction);
         assert_eq!(loaded.messages_at_compaction, Some(42));
+        assert_eq!(loaded.compaction_count, 1);
     }
 
     #[test]
@@ -111,6 +114,8 @@ mod tests {
 
         let state = CompactionState {
             summary: "test".into(),
+            files_touched: vec![],
+            compaction_count: 0,
             tokens_at_compaction: 100_000,
             created_at: chrono::Utc::now(),
             messages_at_compaction: Some(10),
