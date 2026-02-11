@@ -193,11 +193,15 @@ impl PromptHarness {
     }
 
     async fn run_turn(&self, trust: TrustLevel) -> Vec<TurnEvent> {
+        self.run_turn_with_input("hello", trust).await
+    }
+
+    async fn run_turn_with_input(&self, input: &str, trust: TrustLevel) -> Vec<TurnEvent> {
         let (event_tx, mut event_rx) = mpsc::channel(32);
         self.gateway
             .run_turn_with_trust(
                 &self.session_key,
-                "hello",
+                input,
                 trust,
                 Some("alice"),
                 None,
@@ -479,4 +483,49 @@ async fn prompt_index_failures_do_not_break_turn_creation() {
 
     let prompt = harness.provider.last_system_prompt();
     assert!(!prompt.contains("## Memory Index (DB)"));
+}
+
+#[tokio::test]
+async fn query_aware_index_surfaces_relevant_non_recent_observation() {
+    let config = config_with_prompt_index(true, 12, 2400);
+    let (harness, memory) = PromptHarness::with_sqlite(config);
+
+    // Seed an old observation about "deployment pipeline" first.
+    seed(
+        &memory,
+        "shared",
+        "deployment pipeline uses blue-green strategy",
+    )
+    .await;
+    // Sleep briefly so subsequent observations have a later updated_at.
+    sleep(Duration::from_millis(20)).await;
+
+    // Seed many recent but unrelated observations to push the first one
+    // out of a pure recency-based top-12.
+    for i in 0..14 {
+        seed(
+            &memory,
+            "shared",
+            &format!("unrelated daily standup note {i}"),
+        )
+        .await;
+        sleep(Duration::from_millis(5)).await;
+    }
+
+    // Ask about deployment — the query-aware search should surface the
+    // matching observation even though it's not in the top-12 by recency.
+    harness.provider.queue_text_response("ok");
+    let _ = harness
+        .run_turn_with_input("tell me about the deployment pipeline", TrustLevel::Full)
+        .await;
+
+    let prompt = harness.provider.last_system_prompt();
+    assert!(
+        prompt.contains("## Memory Index (DB)"),
+        "prompt index should be present"
+    );
+    assert!(
+        prompt.contains("deployment pipeline"),
+        "query-relevant observation should appear in prompt index\nprompt:\n{prompt}"
+    );
 }

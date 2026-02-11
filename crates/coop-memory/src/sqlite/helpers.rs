@@ -55,7 +55,7 @@ pub(super) fn score_row(
 ) -> f32 {
     let recency_days = ((now_ms - row.updated_at).max(0) as f32) / DAY_MS;
     let recency_score = 1.0 / (1.0 + recency_days);
-    let mention_score = (row.mention_count as f32 / 10.0).min(1.0);
+    let mention_score = (1.0 + row.mention_count as f32).ln() / (1.0_f32 + 10.0).ln();
 
     if has_text_query {
         let fts_score = 1.0 / (1.0 + row.fts_raw.abs() as f32);

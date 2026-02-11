@@ -4,7 +4,7 @@ use coop_core::{
     InboundMessage, Message, Provider, Role, SessionKey, SessionKind, ToolContext, ToolDef,
     ToolExecutor, TrustLevel, TurnConfig, TurnEvent, TurnResult, TypingNotifier, Usage,
 };
-use coop_memory::{Memory, NewObservation, min_trust_for_store, trust_to_store};
+use coop_memory::Memory;
 use futures::StreamExt;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -179,6 +179,7 @@ impl Gateway {
         trust: TrustLevel,
         user_name: Option<&str>,
         channel: Option<&str>,
+        user_input: &str,
     ) -> Result<String> {
         let cfg = self.config.load();
         let shared_configs = cfg.prompt.shared_core_configs();
@@ -218,6 +219,7 @@ impl Gateway {
                 memory.as_ref(),
                 trust,
                 &cfg.memory.prompt_index,
+                user_input,
             )
             .await
             {
@@ -281,76 +283,6 @@ impl Gateway {
             workspace: self.workspace.clone(),
             user_name: user_name.map(str::to_owned),
         }
-    }
-
-    fn capture_tool_observation(
-        &self,
-        session_key: &SessionKey,
-        trust: TrustLevel,
-        tool_name: &str,
-        arguments: &serde_json::Value,
-        output: &coop_core::ToolOutput,
-    ) {
-        let Some(memory) = self.memory.as_ref().map(Arc::clone) else {
-            return;
-        };
-
-        if tool_name.starts_with("memory_") {
-            return;
-        }
-
-        let args = serde_json::to_string(arguments).unwrap_or_default();
-        let mut output_text = output.content.clone();
-        if output_text.len() > 1200 {
-            let boundary = output_text.floor_char_boundary(1200);
-            output_text.truncate(boundary);
-            output_text.push_str("... [truncated]");
-        }
-
-        let mut related_files = Vec::new();
-        for key in ["path", "file", "target", "from", "to"] {
-            if let Some(path) = arguments.get(key).and_then(serde_json::Value::as_str) {
-                related_files.push(path.to_owned());
-            }
-        }
-
-        let store = trust_to_store(trust).to_owned();
-        let min_trust = min_trust_for_store(&store);
-
-        let tool_name_owned = tool_name.to_owned();
-        let obs = NewObservation {
-            session_key: Some(session_key.to_string()),
-            store,
-            obs_type: "technical".to_owned(),
-            title: format!("Tool run: {tool_name}"),
-            narrative: format!("arguments={args}\noutput={output_text}"),
-            facts: vec![
-                format!("tool={tool_name}"),
-                format!("error={}", output.is_error),
-            ],
-            tags: vec!["tool".to_owned(), tool_name.to_owned()],
-            source: "auto".to_owned(),
-            related_files,
-            related_people: Vec::new(),
-            token_count: None,
-            expires_at: None,
-            min_trust,
-        };
-
-        tokio::spawn(async move {
-            match memory.write(obs).await {
-                Ok(outcome) => {
-                    debug!(?outcome, tool = %tool_name_owned, "auto-captured tool observation");
-                }
-                Err(err) => {
-                    warn!(
-                        error = %err,
-                        tool = %tool_name_owned,
-                        "failed to auto-capture tool observation"
-                    );
-                }
-            }
-        });
     }
 
     #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
@@ -421,7 +353,7 @@ impl Gateway {
             // Sync provider model with config (picks up hot-reloaded agent.model).
             self.sync_provider_model();
 
-            let system_prompt = self.build_prompt(trust, user_name, channel).await?;
+            let system_prompt = self.build_prompt(trust, user_name, channel, user_input).await?;
 
             // Repair corrupt session state: if the last message is an assistant
             // with tool_use blocks but no following tool_result message, append
@@ -589,13 +521,6 @@ impl Gateway {
                         })
                         .await;
 
-                    self.capture_tool_observation(
-                        session_key,
-                        trust,
-                        &req.name,
-                        &req.arguments,
-                        &output,
-                    );
                 }
 
                 if turn_cancel.is_cancelled() {
