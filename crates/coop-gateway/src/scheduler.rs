@@ -12,6 +12,7 @@ use tracing::{Instrument, debug, error, info, info_span, warn};
 
 use crate::config::{Config, CronConfig, SharedConfig};
 use crate::heartbeat::{HeartbeatResult, is_heartbeat_content_empty, strip_heartbeat_token};
+use crate::reminder::{Reminder, ReminderStore};
 use crate::router::MessageRouter;
 
 /// Sender for delivering cron output to channels.
@@ -81,7 +82,7 @@ pub(crate) async fn run_scheduler(
     deliver_tx: Option<DeliverySender>,
     shutdown: CancellationToken,
 ) {
-    run_scheduler_with_notify(config, router, deliver_tx, shutdown, None).await;
+    run_scheduler_with_notify(config, router, deliver_tx, shutdown, None, None).await;
 }
 
 pub(crate) async fn run_scheduler_with_notify(
@@ -90,6 +91,7 @@ pub(crate) async fn run_scheduler_with_notify(
     deliver_tx: Option<DeliverySender>,
     shutdown: CancellationToken,
     cron_notify: Option<Arc<tokio::sync::Notify>>,
+    reminders: Option<ReminderStore>,
 ) {
     info!("scheduler started");
 
@@ -118,15 +120,40 @@ pub(crate) async fn run_scheduler_with_notify(
         // Drop the config snapshot so it isn't held across the sleep.
         drop(snapshot);
 
+        // Fire any due reminders before computing the next sleep.
+        if let Some(ref store) = reminders {
+            let due = store.take_due();
+            for reminder in due {
+                let deliver_tx = deliver_tx.clone();
+                let router = Arc::clone(&router);
+                let config = Arc::clone(&config);
+                tokio::spawn(async move {
+                    fire_reminder(&reminder, &router, deliver_tx.as_ref(), &config).await;
+                });
+            }
+        }
+
         let now = Utc::now();
-        let next = parsed
+
+        // Next cron fire time.
+        let next_cron = parsed
             .iter()
             .filter_map(|(cfg, sched)| sched.upcoming(Utc).next().map(|t| (cfg, t)))
             .min_by_key(|(_, t)| *t);
 
-        let Some((cfg, fire_time)) = next else {
-            // No cron entries or all schedules exhausted — wait for config
-            // change or shutdown.
+        // Next reminder fire time.
+        let next_reminder = reminders.as_ref().and_then(ReminderStore::next_fire_time);
+
+        // Compute the earlier of cron vs reminder.
+        let next_cron_time = next_cron.as_ref().map(|(_, t)| *t);
+        let next_fire = match (next_cron_time, next_reminder) {
+            (Some(c), Some(r)) => Some(c.min(r)),
+            (Some(c), None) => Some(c),
+            (None, Some(r)) => Some(r),
+            (None, None) => None,
+        };
+
+        let Some(fire_time) = next_fire else {
             tokio::select! {
                 () = notify.notified() => continue,
                 () = shutdown.cancelled() => {
@@ -138,26 +165,35 @@ pub(crate) async fn run_scheduler_with_notify(
 
         let delay = (fire_time - now).to_std().unwrap_or(Duration::ZERO);
 
-        debug!(
-            cron.name = %cfg.name,
-            fire_time = %fire_time,
-            delay_secs = delay.as_secs(),
-            "scheduler waiting for next cron"
-        );
+        // Only log cron waits (reminders are handled at loop top).
+        if let Some((cfg, _)) = &next_cron {
+            debug!(
+                cron.name = %cfg.name,
+                fire_time = %fire_time,
+                delay_secs = delay.as_secs(),
+                "scheduler waiting for next fire"
+            );
+        }
 
         tokio::select! {
             () = tokio::time::sleep(delay) => {
-                let cfg = cfg.clone();
-                let router = Arc::clone(&router);
-                let deliver_tx = deliver_tx.clone();
-                let sched_config = Arc::clone(&config);
-                tokio::spawn(async move {
-                    fire_cron(&cfg, &router, deliver_tx.as_ref(), &sched_config).await;
-                });
+                // Check if a cron is due at this fire_time.
+                if let Some((cfg, _)) = &next_cron
+                    && next_cron_time == Some(fire_time)
+                {
+                    let cfg = (*cfg).clone();
+                    let router = Arc::clone(&router);
+                    let deliver_tx = deliver_tx.clone();
+                    let sched_config = Arc::clone(&config);
+                    tokio::spawn(async move {
+                        fire_cron(&cfg, &router, deliver_tx.as_ref(), &sched_config).await;
+                    });
+                }
+                // Reminders are checked at the top of the next iteration
+                // via take_due(), so we just loop.
             }
             () = notify.notified() => {
-                // Config changed — re-evaluate cron entries on next iteration.
-                debug!("scheduler woken by config change");
+                debug!("scheduler woken by config/reminder change");
             }
             () = shutdown.cancelled() => {
                 info!("scheduler shutting down");
@@ -360,8 +396,158 @@ async fn fire_cron(
     .await;
 }
 
+async fn fire_reminder(
+    reminder: &Reminder,
+    router: &MessageRouter,
+    deliver_tx: Option<&DeliverySender>,
+    shared_config: &SharedConfig,
+) {
+    let span = info_span!(
+        "reminder_fired",
+        reminder.id = %reminder.id,
+        user = ?reminder.user,
+    );
+
+    async {
+        let lateness = Utc::now() - reminder.fire_at;
+        if lateness > chrono::Duration::seconds(60) {
+            warn!(
+                reminder.id = %reminder.id,
+                late_by_secs = lateness.num_seconds(),
+                "firing late reminder (gateway was likely down)"
+            );
+        }
+
+        info!(
+            message = %reminder.message,
+            fire_at = %reminder.fire_at,
+            delivery_count = reminder.delivery.len(),
+            "reminder firing"
+        );
+
+        if reminder.delivery.is_empty() {
+            warn!(reminder.id = %reminder.id, "reminder has no delivery targets");
+            return;
+        }
+
+        let inbound = build_reminder_inbound(reminder);
+        let prompt_channel = reminder
+            .delivery
+            .first()
+            .map(|(channel, _)| channel.clone());
+
+        dispatch_reminder(
+            reminder,
+            &inbound,
+            prompt_channel,
+            router,
+            deliver_tx,
+            shared_config,
+        )
+        .await;
+    }
+    .instrument(span)
+    .await;
+}
+
+fn build_reminder_inbound(reminder: &Reminder) -> InboundMessage {
+    let sender = match &reminder.user {
+        Some(user) => format!("cron:reminder-{}:{}", reminder.id, user),
+        None => format!("cron:reminder-{}", reminder.id),
+    };
+
+    let prompt_channel = reminder
+        .delivery
+        .first()
+        .map(|(channel, _)| channel.clone());
+
+    let session_slug = reminder.source_session.replace(['/', ':'], "_");
+    let session_file = format!("sessions/{session_slug}.jsonl");
+
+    let content = format!(
+        "[This is a scheduled reminder set by the user. Execute the request \
+         and respond with the result. Your response will be delivered to the \
+         user via {channel}. Keep it conversational.\n\
+         \n\
+         If you need more context about what the user meant, read the \
+         conversation where this reminder was created: {session_file}]\n\n\
+         {message}",
+        channel = prompt_channel.as_deref().unwrap_or("messaging"),
+        session_file = session_file,
+        message = reminder.message,
+    );
+
+    InboundMessage {
+        channel: "cron".to_owned(),
+        sender,
+        content,
+        chat_id: None,
+        is_group: false,
+        timestamp: Utc::now(),
+        reply_to: None,
+        kind: InboundKind::Text,
+        message_timestamp: None,
+    }
+}
+
+async fn dispatch_reminder(
+    reminder: &Reminder,
+    inbound: &InboundMessage,
+    prompt_channel: Option<String>,
+    router: &MessageRouter,
+    deliver_tx: Option<&DeliverySender>,
+    shared_config: &SharedConfig,
+) {
+    let agent_id = shared_config.load().agent.id.clone();
+
+    match router
+        .dispatch_collect_text_with_channel(inbound, prompt_channel)
+        .await
+    {
+        Ok((_decision, response)) => {
+            if response.trim().is_empty() {
+                debug!(reminder.id = %reminder.id, "reminder produced empty response");
+                return;
+            }
+
+            for (channel, target) in &reminder.delivery {
+                announce_to_session(
+                    &format!("reminder:{}", reminder.id),
+                    &reminder.message,
+                    &response,
+                    channel,
+                    target,
+                    &agent_id,
+                    router,
+                    deliver_tx,
+                )
+                .await;
+            }
+
+            info!(reminder.id = %reminder.id, "reminder completed and delivered");
+        }
+        Err(e) => {
+            error!(
+                reminder.id = %reminder.id,
+                error = %e,
+                "reminder dispatch failed"
+            );
+
+            for (channel, target) in &reminder.delivery {
+                deliver_to_target(
+                    channel,
+                    target,
+                    &format!("Reminder: {}", reminder.message),
+                    deliver_tx,
+                )
+                .await;
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
-async fn announce_to_session(
+pub(crate) async fn announce_to_session(
     cron_name: &str,
     cron_message: &str,
     cron_output: &str,
@@ -449,7 +635,7 @@ fn check_heartbeat_file(workspace: &Path) -> bool {
     }
 }
 
-async fn deliver_to_target(
+pub(crate) async fn deliver_to_target(
     channel: &str,
     target: &str,
     content: &str,
@@ -1250,8 +1436,15 @@ mod tests {
         let sched_cancel = cancel.clone();
         let sched_notify = Arc::clone(&notify);
         let handle = tokio::spawn(async move {
-            run_scheduler_with_notify(sched_shared, router, None, sched_cancel, Some(sched_notify))
-                .await;
+            run_scheduler_with_notify(
+                sched_shared,
+                router,
+                None,
+                sched_cancel,
+                Some(sched_notify),
+                None,
+            )
+            .await;
         });
 
         // Give the scheduler time to start and enter its wait.
@@ -1306,8 +1499,15 @@ mod tests {
         let sched_cancel = cancel.clone();
         let sched_notify = Arc::clone(&notify);
         let handle = tokio::spawn(async move {
-            run_scheduler_with_notify(sched_shared, router, None, sched_cancel, Some(sched_notify))
-                .await;
+            run_scheduler_with_notify(
+                sched_shared,
+                router,
+                None,
+                sched_cancel,
+                Some(sched_notify),
+                None,
+            )
+            .await;
         });
 
         // Give scheduler time to enter its long sleep.
@@ -1352,7 +1552,8 @@ mod tests {
         let sched_cancel = cancel.clone();
         let sched_notify = Arc::clone(&notify);
         let handle = tokio::spawn(async move {
-            run_scheduler_with_notify(shared, router, None, sched_cancel, Some(sched_notify)).await;
+            run_scheduler_with_notify(shared, router, None, sched_cancel, Some(sched_notify), None)
+                .await;
         });
 
         tokio::time::sleep(Duration::from_millis(50)).await;

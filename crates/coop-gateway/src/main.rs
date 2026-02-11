@@ -17,6 +17,7 @@ mod memory_embedding;
 mod memory_prompt_index;
 mod memory_reconcile;
 mod memory_tools;
+mod reminder;
 mod router;
 mod scheduler;
 mod session_store;
@@ -395,15 +396,24 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
     #[cfg(not(feature = "signal"))]
     let deliver_tx: Option<scheduler::DeliverySender> = None;
 
+    let reminder_store = reminder::ReminderStore::new(workspace.join("sessions"))?;
+    let scheduler_notify = Arc::new(tokio::sync::Notify::new());
+
     let default_executor = DefaultExecutor::new();
     let config_executor = config_tool::ConfigToolExecutor::new(config_file.clone());
     let memory_executor = MemoryToolExecutor::new(Arc::clone(&memory));
+    let reminder_executor = reminder::ReminderToolExecutor::new(
+        reminder_store.clone(),
+        Arc::clone(&shared),
+        Arc::clone(&scheduler_notify),
+    );
 
     #[allow(unused_mut)]
     let mut executors: Vec<Box<dyn coop_core::ToolExecutor>> = vec![
         Box::new(default_executor),
         Box::new(config_executor),
         Box::new(memory_executor),
+        Box::new(reminder_executor),
     ];
 
     #[cfg(feature = "signal")]
@@ -456,13 +466,11 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
         shutdown_token.clone(),
     );
 
-    let cron_notify = Arc::new(tokio::sync::Notify::new());
-
     let _config_watcher = config_watcher::spawn_config_watcher(
         config_file,
         Arc::clone(&shared),
         shutdown_token.clone(),
-        Some(Arc::clone(&cron_notify)),
+        Some(Arc::clone(&scheduler_notify)),
     );
 
     #[cfg(feature = "signal")]
@@ -499,7 +507,8 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
         let sched_config = Arc::clone(&shared);
         let sched_router = Arc::clone(&router);
         let sched_token = shutdown_token.clone();
-        let sched_notify = Arc::clone(&cron_notify);
+        let sched_notify = Arc::clone(&scheduler_notify);
+        let sched_reminders = reminder_store;
         tokio::spawn(async move {
             scheduler::run_scheduler_with_notify(
                 sched_config,
@@ -507,6 +516,7 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
                 deliver_tx,
                 sched_token,
                 Some(sched_notify),
+                Some(sched_reminders),
             )
             .await;
         });
