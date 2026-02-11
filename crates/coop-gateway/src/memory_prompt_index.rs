@@ -4,7 +4,7 @@ use anyhow::Result;
 use coop_core::TrustLevel;
 use coop_core::prompt::count_tokens;
 use coop_memory::{Memory, MemoryQuery, ObservationIndex, accessible_stores};
-use tracing::{debug, info, instrument};
+use tracing::{debug, instrument};
 
 use crate::config::MemoryPromptIndexConfig;
 
@@ -24,13 +24,13 @@ pub(crate) async fn build_prompt_index(
     user_input: &str,
 ) -> Result<Option<String>> {
     if !settings.enabled {
-        info!(reason = "disabled", "memory prompt index skipped");
+        debug!(reason = "disabled", "memory prompt index skipped");
         return Ok(None);
     }
 
     let stores = accessible_stores(trust);
     if stores.is_empty() {
-        info!(
+        debug!(
             reason = "no_accessible_stores",
             "memory prompt index skipped"
         );
@@ -76,17 +76,17 @@ pub(crate) async fn build_prompt_index(
     let results = merge_results(recency_results, query_results, limit);
 
     if results.is_empty() {
-        info!(reason = "no_results", "memory prompt index skipped");
+        debug!(reason = "no_results", "memory prompt index skipped");
         return Ok(None);
     }
 
     let rendered = render_prompt_index(&results, settings.max_tokens.max(1));
     if rendered.rendered_count == 0 {
-        info!(reason = "budget_exhausted", "memory prompt index skipped");
+        debug!(reason = "budget_exhausted", "memory prompt index skipped");
         return Ok(None);
     }
 
-    info!(
+    debug!(
         accessible_store_count = stores.len(),
         result_count = results.len(),
         rendered_count = rendered.rendered_count,

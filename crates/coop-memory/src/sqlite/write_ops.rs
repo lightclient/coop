@@ -1,7 +1,7 @@
 use anyhow::Result;
 use coop_core::{SessionKey, prompt::count_tokens};
 use rusqlite::{OptionalExtension, params};
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 use crate::types::{
     MemoryQuery, NewObservation, Observation, ObservationHistoryEntry, Person, ReconcileCandidate,
@@ -122,7 +122,7 @@ pub(super) async fn write(memory: &SqliteMemory, obs: NewObservation) -> Result<
     let incoming = ObservationPayload::from_new(obs);
 
     if bump_exact_duplicate(memory, &incoming.hash, now)? {
-        info!("memory write exact duplicate");
+        debug!("memory write exact duplicate");
         return Ok(WriteOutcome::ExactDup);
     }
 
@@ -217,12 +217,12 @@ async fn resolve_reconciliation(
     candidates: &[CandidateMatch],
 ) -> ReconcileDecision {
     if candidates.is_empty() {
-        info!("memory reconciliation skipped: no similar candidates");
+        debug!("memory reconciliation skipped: no similar candidates");
         return ReconcileDecision::Add;
     }
 
     let Some(reconciler) = memory.reconciler.as_ref() else {
-        info!("memory reconciliation skipped: no reconciler configured");
+        debug!("memory reconciliation skipped: no reconciler configured");
         return ReconcileDecision::Add;
     };
 
@@ -250,7 +250,7 @@ async fn resolve_reconciliation(
             .collect(),
     };
 
-    info!(
+    debug!(
         candidate_count = request.candidates.len(),
         "memory reconciliation request"
     );
@@ -272,7 +272,7 @@ async fn resolve_reconciliation(
         return ReconcileDecision::Add;
     }
 
-    info!(?decision, "memory reconciliation decision");
+    debug!(?decision, "memory reconciliation decision");
     decision
 }
 
@@ -287,7 +287,7 @@ async fn apply_reconciliation_decision(
         ReconcileDecision::Add => {
             let id = insert_observation(memory, &incoming, now)?;
             embed_and_persist(memory, id, &incoming, now, "write_add").await;
-            info!(observation_id = id, "memory reconciliation applied: ADD");
+            debug!(observation_id = id, "memory reconciliation applied: ADD");
             Ok(WriteOutcome::Added(id))
         }
         ReconcileDecision::Update {
@@ -311,7 +311,7 @@ async fn apply_reconciliation_decision(
                 return Ok(WriteOutcome::Skipped);
             };
             bump_candidate_mention(memory, candidate.id, now)?;
-            info!(
+            debug!(
                 observation_id = candidate.id,
                 "memory reconciliation applied: NONE"
             );
@@ -410,7 +410,7 @@ async fn apply_update(
     }
 
     embed_and_persist(memory, candidate.id, merged, now, "write_update").await;
-    info!(
+    debug!(
         observation_id = candidate.id,
         "memory reconciliation applied: UPDATE"
     );
@@ -473,7 +473,7 @@ async fn apply_delete(
     let new_id = insert_observation(memory, replacement, now)?;
     embed_and_persist(memory, new_id, replacement, now, "write_add_after_delete").await;
 
-    info!(
+    debug!(
         deleted_observation_id = candidate.id,
         replacement_observation_id = new_id,
         "memory reconciliation applied: DELETE"

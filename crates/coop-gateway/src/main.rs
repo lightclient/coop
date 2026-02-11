@@ -359,7 +359,7 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
                     signal_channel = Some(channel);
                 }
                 Err(error) => {
-                    tracing::warn!(
+                    tracing::error!(
                         error = format!("{error:#}"),
                         db_path = %db_path.display(),
                         "failed to initialize signal channel",
@@ -484,7 +484,7 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
         let router = Arc::clone(&router);
         tokio::spawn(async move {
             if let Err(error) = run_signal_loop(signal_channel, router).await {
-                tracing::warn!(error = %error, "signal loop stopped");
+                tracing::error!(error = %error, "signal loop stopped");
             }
         });
     }
@@ -541,12 +541,12 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
                         let agent_id = agent_id.clone();
                         tokio::spawn(async move {
                             if let Err(error) = handle_client(connection, router, gateway, agent_id).await {
-                                tracing::warn!(error = %error, "ipc client disconnected with error");
+                                tracing::debug!(error = %error, "ipc client disconnected with error");
                             }
                         });
                     }
                     Err(error) => {
-                        tracing::warn!(error = %error, "failed to accept IPC client");
+                        tracing::error!(error = %error, "failed to accept IPC client");
                     }
                 }
             }

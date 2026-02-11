@@ -565,7 +565,7 @@ impl Provider for AnthropicProvider {
             let message = Self::parse_response(&api_response, is_oauth);
             let usage = Self::parse_usage(&api_response);
 
-            info!(
+            debug!(
                 input_tokens = usage.input_tokens,
                 output_tokens = usage.output_tokens,
                 stop_reason = %api_response.stop_reason.as_deref().unwrap_or("unknown"),

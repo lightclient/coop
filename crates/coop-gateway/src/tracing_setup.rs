@@ -215,7 +215,11 @@ pub(crate) fn init(console: bool) -> TracingGuard {
         let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
             EnvFilter::new("info,libsignal_service=warn,libsignal_service::websocket=error,libsignal_protocol=warn,presage=warn,presage_store_sqlite=warn,sqlx=warn,hyper_util=warn,reqwest_websocket=warn")
         });
-        fmt::layer().with_target(false).with_filter(filter)
+        fmt::layer()
+            .compact()
+            .without_time()
+            .with_target(false)
+            .with_filter(filter)
     });
 
     let jsonl_layer = if let Ok(trace_file) = std::env::var("COOP_TRACE_FILE") {

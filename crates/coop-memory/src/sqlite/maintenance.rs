@@ -78,7 +78,7 @@ pub(super) fn run(
     config: &MemoryMaintenanceConfig,
 ) -> Result<MaintenanceResult> {
     let started = Instant::now();
-    info!(
+    debug!(
         archive_after_days = config.archive_after_days,
         delete_archive_after_days = config.delete_archive_after_days,
         compress_after_days = config.compress_after_days,
@@ -90,7 +90,7 @@ pub(super) fn run(
     let now_ms = helpers::now_ms();
 
     let compression = compress_stale_observations(memory, config, now_ms)?;
-    info!(
+    debug!(
         scanned_rows = compression.scanned,
         compressed_rows = compression.compressed,
         summary_rows = compression.summaries,
@@ -98,14 +98,14 @@ pub(super) fn run(
     );
 
     let archive = archive_observations(memory, config, now_ms)?;
-    info!(
+    debug!(
         scanned_rows = archive.scanned,
         archived_rows = archive.archived,
         "memory maintenance archive stage complete"
     );
 
     let cleanup = cleanup_archive(memory, config, now_ms)?;
-    info!(
+    debug!(
         scanned_rows = cleanup.scanned,
         deleted_rows = cleanup.deleted,
         "memory maintenance archive cleanup stage complete"

@@ -5,7 +5,7 @@ use coop_memory::{ReconcileDecision, ReconcileObservation, ReconcileRequest, Rec
 use serde::Deserialize;
 use serde_json::Value;
 use std::sync::Arc;
-use tracing::{info, instrument};
+use tracing::{debug, instrument};
 
 pub(crate) struct ProviderReconciler {
     provider: Arc<dyn Provider>,
@@ -32,7 +32,7 @@ impl Reconciler for ProviderReconciler {
         let system = reconciliation_system_prompt();
         let user_prompt = reconciliation_user_prompt(request)?;
 
-        info!(
+        debug!(
             candidate_count = request.candidates.len(),
             "memory reconciliation provider request"
         );
@@ -50,7 +50,7 @@ impl Reconciler for ProviderReconciler {
         let response_text = response.text();
         let decision = parse_reconciliation_response(&response_text)?;
 
-        info!(?decision, "memory reconciliation provider decision");
+        debug!(?decision, "memory reconciliation provider decision");
         Ok(decision)
     }
 }

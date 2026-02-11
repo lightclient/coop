@@ -8,7 +8,7 @@
 use anyhow::Result;
 use coop_core::traits::Provider;
 use coop_core::types::{Content, Message, Role};
-use tracing::{Instrument, info, info_span};
+use tracing::{Instrument, debug, info_span};
 
 /// Compact when total tokens exceeds this.
 /// Matches Anthropic SDK's `DEFAULT_TOKEN_THRESHOLD`.
@@ -107,7 +107,7 @@ pub(crate) async fn compact(
     async {
         let msgs = prepare_compaction_messages(messages);
 
-        info!(
+        debug!(
             prepared_message_count = msgs.len(),
             "sending compaction request"
         );
@@ -129,7 +129,7 @@ pub(crate) async fn compact(
             + usage.cache_write_tokens.unwrap_or(0)
             + usage.output_tokens.unwrap_or(0);
 
-        info!(
+        debug!(
             summary_len = summary.len(),
             compaction_tokens = total_tokens,
             "compaction complete"
