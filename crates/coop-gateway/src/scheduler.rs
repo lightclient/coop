@@ -1,8 +1,6 @@
 use anyhow::Result;
 use chrono::Utc;
-use coop_core::{
-    InboundKind, InboundMessage, OutboundMessage, SessionKey, SessionKind, TrustLevel,
-};
+use coop_core::{InboundKind, InboundMessage, Message, OutboundMessage, SessionKey, SessionKind};
 use cron::Schedule;
 use std::path::Path;
 use std::str::FromStr;
@@ -14,7 +12,6 @@ use tracing::{Instrument, debug, error, info, info_span, warn};
 
 use crate::config::{Config, CronConfig, SharedConfig};
 use crate::heartbeat::{HeartbeatResult, is_heartbeat_content_empty, strip_heartbeat_token};
-use crate::injection::{InjectionSource, SessionInjection};
 use crate::router::MessageRouter;
 
 /// Sender for delivering cron output to channels.
@@ -341,6 +338,7 @@ async fn fire_cron(
                         for (channel, target) in &delivery_targets {
                             announce_to_session(
                                 &cfg.name,
+                                &cfg.message,
                                 &content,
                                 channel,
                                 target,
@@ -365,6 +363,7 @@ async fn fire_cron(
 #[allow(clippy::too_many_arguments)]
 async fn announce_to_session(
     cron_name: &str,
+    cron_message: &str,
     cron_output: &str,
     channel: &str,
     target: &str,
@@ -372,25 +371,15 @@ async fn announce_to_session(
     router: &MessageRouter,
     deliver_tx: Option<&DeliverySender>,
 ) {
+    // Groups: direct delivery (no DM session for groups)
     if target.starts_with("group:") {
         deliver_to_target(channel, target, cron_output, deliver_tx).await;
         return;
     }
 
-    let announce_content = format!(
-        "[Scheduled task \"{cron_name}\" completed. Summarize the findings naturally for the user. Keep it brief — this is a push notification. If nothing important, you can reply with just \"noted\" or similar. Do not mention that this was a scheduled task unless relevant.]\n\n{cron_output}"
-    );
-
-    let injection = SessionInjection {
-        target: SessionKey {
-            agent_id: agent_id.to_owned(),
-            kind: SessionKind::Dm(format!("{channel}:{target}")),
-        },
-        content: announce_content,
-        trust: TrustLevel::Full,
-        user_name: None,
-        prompt_channel: Some(channel.to_owned()),
-        source: InjectionSource::Cron(cron_name.to_owned()),
+    let dm_session_key = SessionKey {
+        agent_id: agent_id.to_owned(),
+        kind: SessionKind::Dm(format!("{channel}:{target}")),
     };
 
     let span = info_span!(
@@ -398,23 +387,26 @@ async fn announce_to_session(
         cron.name = %cron_name,
         channel = %channel,
         target = %target,
-        session = %injection.target,
+        session = %dm_session_key,
     );
 
     async {
-        match router.inject_collect_text(&injection).await {
-            Ok((_decision, response)) => {
-                if response.trim().is_empty() {
-                    debug!(cron.name = %cron_name, channel = %channel, target = %target, "cron announce response empty, skipping delivery");
-                    return;
-                }
-                deliver_to_target(channel, target, &response, deliver_tx).await;
-            }
-            Err(e) => {
-                error!(error = %e, "cron announce dispatch failed");
-                deliver_to_target(channel, target, cron_output, deliver_tx).await;
-            }
-        }
+        info!(
+            dm_session = %dm_session_key,
+            "injecting cron output into DM session"
+        );
+
+        // 1. Append context: user message with cron task
+        let context_msg =
+            Message::user().with_text(format!("[Scheduled: {cron_name}]\n{cron_message}"));
+        router.append_to_session(&dm_session_key, context_msg);
+
+        // 2. Append cron output as assistant message
+        let output_msg = Message::assistant().with_text(cron_output);
+        router.append_to_session(&dm_session_key, output_msg);
+
+        // 3. Deliver to channel
+        deliver_to_target(channel, target, cron_output, deliver_tx).await;
     }
     .instrument(span)
     .await;
@@ -910,15 +902,26 @@ mod tests {
             kind: SessionKind::Dm("signal:alice-uuid".to_owned()),
         };
 
+        // Cron session: 2 messages from the LLM call (user + assistant)
         assert_eq!(gateway.session_message_count(&cron_key), 2);
+        // DM session: 2 injected messages (user context + assistant output), no LLM call
         assert_eq!(gateway.session_message_count(&dm_key), 2);
+
+        let dm_messages = gateway.messages(&dm_key);
+        assert_eq!(dm_messages[0].role, coop_core::Role::User);
+        assert!(dm_messages[0].text().contains("[Scheduled: heartbeat]"));
+        assert!(dm_messages[0].text().contains("check tasks"));
+        assert_eq!(dm_messages[1].role, coop_core::Role::Assistant);
+        assert_eq!(dm_messages[1].text(), "cron response ok");
     }
 
     #[tokio::test]
-    async fn fire_cron_announce_fallback_on_dm_error() {
+    async fn fire_cron_delivers_without_second_llm_call() {
+        // With direct injection, delivery works even if the provider would
+        // fail on a second call — because there is no second LLM call.
         let provider: Arc<dyn Provider> = Arc::new(FailOnSecondCallProvider::new(
             "raw cron output",
-            "announce dispatch failed",
+            "should never be called",
         ));
         let (shared, router, _gateway) =
             make_shared_config_and_router_with_provider(None, &[], provider);
@@ -1008,6 +1011,142 @@ mod tests {
     #[tokio::test]
     async fn deliver_to_target_with_no_sender_does_not_panic() {
         deliver_to_target("email", "alice@example.com", "hello", None).await;
+    }
+
+    #[tokio::test]
+    async fn fire_cron_injects_context_into_dm_session() {
+        let (shared, router, gateway) =
+            make_shared_config_and_router(None, &[], "cron response ok");
+        let (tx, _rx) = mpsc::channel::<OutboundMessage>(8);
+        let deliver_tx = DeliverySender::new(tx);
+
+        let cfg = CronConfig {
+            name: "humidifier-check".to_owned(),
+            cron: "0 7 * * *".to_owned(),
+            message: "Read WEATHER.md for the current temperature.".to_owned(),
+            user: None,
+            deliver: Some(CronDelivery {
+                channel: "signal".to_owned(),
+                target: "alice-uuid".to_owned(),
+            }),
+        };
+
+        fire_cron(&cfg, &router, Some(&deliver_tx), &shared).await;
+
+        let dm_key = SessionKey {
+            agent_id: "test".to_owned(),
+            kind: SessionKind::Dm("signal:alice-uuid".to_owned()),
+        };
+        let messages = gateway.messages(&dm_key);
+        assert!(!messages.is_empty());
+        assert_eq!(messages[0].role, coop_core::Role::User);
+        let text = messages[0].text();
+        assert!(
+            text.starts_with("[Scheduled: humidifier-check]"),
+            "context message should start with [Scheduled: name], got: {text}"
+        );
+        assert!(
+            text.contains("Read WEATHER.md for the current temperature."),
+            "context message should contain original cron message"
+        );
+    }
+
+    #[tokio::test]
+    async fn fire_cron_injects_output_as_assistant_message() {
+        let (shared, router, gateway) =
+            make_shared_config_and_router(None, &[], "Hey! It's 22F out there.");
+        let (tx, _rx) = mpsc::channel::<OutboundMessage>(8);
+        let deliver_tx = DeliverySender::new(tx);
+
+        let cfg = CronConfig {
+            name: "humidifier-check".to_owned(),
+            cron: "0 7 * * *".to_owned(),
+            message: "Read WEATHER.md".to_owned(),
+            user: None,
+            deliver: Some(CronDelivery {
+                channel: "signal".to_owned(),
+                target: "alice-uuid".to_owned(),
+            }),
+        };
+
+        fire_cron(&cfg, &router, Some(&deliver_tx), &shared).await;
+
+        let dm_key = SessionKey {
+            agent_id: "test".to_owned(),
+            kind: SessionKind::Dm("signal:alice-uuid".to_owned()),
+        };
+        let messages = gateway.messages(&dm_key);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1].role, coop_core::Role::Assistant);
+        assert_eq!(messages[1].text(), "Hey! It's 22F out there.");
+    }
+
+    #[tokio::test]
+    async fn fire_cron_does_not_inject_on_heartbeat_ok() {
+        let (shared, router, gateway) = make_shared_config_and_router(None, &[], "HEARTBEAT_OK");
+        let (tx, mut rx) = mpsc::channel::<OutboundMessage>(8);
+        let deliver_tx = DeliverySender::new(tx);
+
+        let cfg = CronConfig {
+            name: "humidifier-check".to_owned(),
+            cron: "0 7 * * *".to_owned(),
+            message: "Read WEATHER.md".to_owned(),
+            user: None,
+            deliver: Some(CronDelivery {
+                channel: "signal".to_owned(),
+                target: "alice-uuid".to_owned(),
+            }),
+        };
+
+        fire_cron(&cfg, &router, Some(&deliver_tx), &shared).await;
+
+        let dm_key = SessionKey {
+            agent_id: "test".to_owned(),
+            kind: SessionKind::Dm("signal:alice-uuid".to_owned()),
+        };
+        assert_eq!(
+            gateway.session_message_count(&dm_key),
+            0,
+            "HEARTBEAT_OK should not inject into DM session"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "HEARTBEAT_OK should not trigger delivery"
+        );
+    }
+
+    #[tokio::test]
+    async fn fire_cron_does_not_inject_on_empty_output() {
+        let (shared, router, gateway) = make_shared_config_and_router(None, &[], "   ");
+        let (tx, mut rx) = mpsc::channel::<OutboundMessage>(8);
+        let deliver_tx = DeliverySender::new(tx);
+
+        let cfg = CronConfig {
+            name: "briefing".to_owned(),
+            cron: "0 8 * * *".to_owned(),
+            message: "Morning briefing".to_owned(),
+            user: None,
+            deliver: Some(CronDelivery {
+                channel: "signal".to_owned(),
+                target: "alice-uuid".to_owned(),
+            }),
+        };
+
+        fire_cron(&cfg, &router, Some(&deliver_tx), &shared).await;
+
+        let dm_key = SessionKey {
+            agent_id: "test".to_owned(),
+            kind: SessionKind::Dm("signal:alice-uuid".to_owned()),
+        };
+        assert_eq!(
+            gateway.session_message_count(&dm_key),
+            0,
+            "empty output should not inject into DM session"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "empty output should not trigger delivery"
+        );
     }
 
     #[tokio::test]

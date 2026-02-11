@@ -55,6 +55,10 @@ impl MessageRouter {
             .is_some_and(|s| s.verbose)
     }
 
+    pub(crate) fn append_to_session(&self, session_key: &SessionKey, message: coop_core::Message) {
+        self.gateway.append_message(session_key, message);
+    }
+
     pub(crate) async fn dispatch(
         &self,
         msg: &InboundMessage,
@@ -63,6 +67,7 @@ impl MessageRouter {
         self.dispatch_inner(msg, event_tx, None).await
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn dispatch_injection(
         &self,
         injection: &SessionInjection,
@@ -322,6 +327,7 @@ impl MessageRouter {
         Ok((decision, text))
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn inject_collect_text(
         &self,
         injection: &SessionInjection,

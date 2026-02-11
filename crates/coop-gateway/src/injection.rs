@@ -2,6 +2,7 @@ use coop_core::{SessionKey, TrustLevel};
 
 /// An internally-generated message injected directly into a session.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub(crate) struct SessionInjection {
     pub target: SessionKey,
     pub content: String,
