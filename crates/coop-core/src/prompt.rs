@@ -210,9 +210,13 @@ fn parse_skill_frontmatter(content: &str) -> Option<(String, String)> {
     Some((name?, description?))
 }
 
-/// Scan `{workspace}/skills/*/SKILL.md` for skill entries.
-pub fn scan_skills(workspace: &Path) -> Vec<SkillEntry> {
-    let skills_dir = workspace.join("skills");
+/// Scan `{root}/skills/*/SKILL.md` for skill entries.
+///
+/// `path_prefix` is prepended to relative paths in the returned entries.
+/// For workspace-level skills, pass `""` to get `skills/tmux/SKILL.md`.
+/// For per-user skills, pass `"users/alice/"` to get `users/alice/skills/tmux/SKILL.md`.
+pub fn scan_skills_with_prefix(root: &Path, path_prefix: &str) -> Vec<SkillEntry> {
+    let skills_dir = root.join("skills");
     let Ok(entries) = std::fs::read_dir(&skills_dir) else {
         return Vec::new();
     };
@@ -233,7 +237,10 @@ pub fn scan_skills(workspace: &Path) -> Vec<SkillEntry> {
             );
             continue;
         };
-        let rel_path = format!("skills/{}/SKILL.md", entry.file_name().to_string_lossy());
+        let rel_path = format!(
+            "{path_prefix}skills/{}/SKILL.md",
+            entry.file_name().to_string_lossy()
+        );
         debug!(skill = %name, path = %rel_path, "discovered skill");
         skills.push(SkillEntry {
             name,
@@ -244,6 +251,11 @@ pub fn scan_skills(workspace: &Path) -> Vec<SkillEntry> {
 
     skills.sort_by(|a, b| a.name.cmp(&b.name));
     skills
+}
+
+/// Scan `{workspace}/skills/*/SKILL.md` for skill entries.
+pub fn scan_skills(workspace: &Path) -> Vec<SkillEntry> {
+    scan_skills_with_prefix(workspace, "")
 }
 
 // ---------------------------------------------------------------------------
@@ -640,9 +652,30 @@ impl PromptBuilder {
             cache: CacheHint::Volatile,
         });
 
-        // Skills index.
-        if !self.skills.is_empty() {
-            let skills_layer = Self::render_skills(&self.skills);
+        // Skills index: workspace skills + per-user skills (deduplicated).
+        let mut all_skills = self.skills.clone();
+        if let Some(user) = &self.user {
+            let user_dir = self.workspace.join(format!("users/{user}"));
+            let prefix = format!("users/{user}/");
+            let user_skills = scan_skills_with_prefix(&user_dir, &prefix);
+            // User skills override workspace skills with the same name.
+            for us in user_skills {
+                if let Some(existing) = all_skills.iter_mut().find(|s| s.name == us.name) {
+                    debug!(
+                        skill = %us.name,
+                        workspace_path = %existing.path,
+                        user_path = %us.path,
+                        "user skill overrides workspace skill"
+                    );
+                    *existing = us;
+                } else {
+                    all_skills.push(us);
+                }
+            }
+            all_skills.sort_by(|a, b| a.name.cmp(&b.name));
+        }
+        if !all_skills.is_empty() {
+            let skills_layer = Self::render_skills(&all_skills);
             used_tokens += skills_layer.tokens;
             layers.push(PromptLayer {
                 name: "skills",
@@ -1625,6 +1658,143 @@ mod tests {
         assert!(
             !layer_names.contains(&"skills"),
             "should not have skills layer when no skills"
+        );
+    }
+
+    // -- Per-user skill tests --
+
+    #[test]
+    fn per_user_skills_included_in_prompt() {
+        let dir = setup_workspace(&[("SOUL.md", "I am an agent.")]);
+        fs::create_dir_all(dir.path().join("users/alice/skills/my-tool")).unwrap();
+        fs::write(
+            dir.path().join("users/alice/skills/my-tool/SKILL.md"),
+            "---\nname: my-tool\ndescription: \"Alice's custom tool\"\n---\n# my-tool",
+        )
+        .unwrap();
+
+        let index = WorkspaceIndex::scan(dir.path(), &default_file_configs()).unwrap();
+        let prompt = PromptBuilder::new(dir.path().to_path_buf(), "reid".into())
+            .trust(TrustLevel::Full)
+            .user("alice")
+            .build(&index)
+            .unwrap();
+
+        let flat = prompt.to_flat_string();
+        assert!(flat.contains("my-tool"), "should list user skill");
+        assert!(
+            flat.contains("Alice's custom tool"),
+            "should include user skill description"
+        );
+        assert!(
+            flat.contains("users/alice/skills/my-tool/SKILL.md"),
+            "should include user-prefixed skill path"
+        );
+    }
+
+    #[test]
+    fn per_user_skills_merged_with_workspace_skills() {
+        let dir = setup_workspace(&[("SOUL.md", "I am an agent.")]);
+        // Workspace-level skill.
+        fs::create_dir_all(dir.path().join("skills/tmux")).unwrap();
+        fs::write(
+            dir.path().join("skills/tmux/SKILL.md"),
+            "---\nname: tmux\ndescription: \"Control tmux sessions\"\n---\n# tmux",
+        )
+        .unwrap();
+        // User-level skill (different name).
+        fs::create_dir_all(dir.path().join("users/alice/skills/my-tool")).unwrap();
+        fs::write(
+            dir.path().join("users/alice/skills/my-tool/SKILL.md"),
+            "---\nname: my-tool\ndescription: \"Alice's custom tool\"\n---\n# my-tool",
+        )
+        .unwrap();
+
+        let skills = scan_skills(dir.path());
+        let index = WorkspaceIndex::scan(dir.path(), &default_file_configs()).unwrap();
+        let prompt = PromptBuilder::new(dir.path().to_path_buf(), "reid".into())
+            .trust(TrustLevel::Full)
+            .user("alice")
+            .skills(skills)
+            .build(&index)
+            .unwrap();
+
+        let flat = prompt.to_flat_string();
+        assert!(flat.contains("tmux"), "should include workspace skill");
+        assert!(flat.contains("my-tool"), "should include user skill");
+        assert!(
+            flat.contains("skills/tmux/SKILL.md"),
+            "workspace skill path unchanged"
+        );
+        assert!(
+            flat.contains("users/alice/skills/my-tool/SKILL.md"),
+            "user skill has prefixed path"
+        );
+    }
+
+    #[test]
+    fn per_user_skill_overrides_workspace_skill_same_name() {
+        let dir = setup_workspace(&[("SOUL.md", "I am an agent.")]);
+        // Workspace-level skill.
+        fs::create_dir_all(dir.path().join("skills/tmux")).unwrap();
+        fs::write(
+            dir.path().join("skills/tmux/SKILL.md"),
+            "---\nname: tmux\ndescription: \"Shared tmux skill\"\n---\n# shared",
+        )
+        .unwrap();
+        // User-level skill with same name.
+        fs::create_dir_all(dir.path().join("users/alice/skills/tmux")).unwrap();
+        fs::write(
+            dir.path().join("users/alice/skills/tmux/SKILL.md"),
+            "---\nname: tmux\ndescription: \"Alice's tmux skill\"\n---\n# alice",
+        )
+        .unwrap();
+
+        let skills = scan_skills(dir.path());
+        let index = WorkspaceIndex::scan(dir.path(), &default_file_configs()).unwrap();
+        let prompt = PromptBuilder::new(dir.path().to_path_buf(), "reid".into())
+            .trust(TrustLevel::Full)
+            .user("alice")
+            .skills(skills)
+            .build(&index)
+            .unwrap();
+
+        let flat = prompt.to_flat_string();
+        assert!(
+            flat.contains("Alice's tmux skill"),
+            "user skill description should override workspace"
+        );
+        assert!(
+            !flat.contains("Shared tmux skill"),
+            "workspace skill description should be replaced"
+        );
+        assert!(
+            flat.contains("users/alice/skills/tmux/SKILL.md"),
+            "path should point to user skill"
+        );
+    }
+
+    #[test]
+    fn no_user_skills_without_user() {
+        let dir = setup_workspace(&[("SOUL.md", "I am an agent.")]);
+        fs::create_dir_all(dir.path().join("users/alice/skills/my-tool")).unwrap();
+        fs::write(
+            dir.path().join("users/alice/skills/my-tool/SKILL.md"),
+            "---\nname: my-tool\ndescription: \"Alice's tool\"\n---\n# tool",
+        )
+        .unwrap();
+
+        let index = WorkspaceIndex::scan(dir.path(), &default_file_configs()).unwrap();
+        let prompt = PromptBuilder::new(dir.path().to_path_buf(), "reid".into())
+            .trust(TrustLevel::Full)
+            // No .user() call.
+            .build(&index)
+            .unwrap();
+
+        let flat = prompt.to_flat_string();
+        assert!(
+            !flat.contains("my-tool"),
+            "should not include user skills without a user set"
         );
     }
 
