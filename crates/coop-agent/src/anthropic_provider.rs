@@ -267,11 +267,15 @@ impl AnthropicProvider {
 
     /// Build system prompt array with cache_control breakpoints.
     ///
-    /// Each element in `system_blocks` becomes a separate text block with a
-    /// `cache_control` breakpoint. The caller splits the prompt so that the
-    /// first block (stable across turns) forms a cacheable prefix — even
-    /// when the volatile suffix changes between turns, the stable prefix
-    /// gets cache hits.
+    /// The caller splits the prompt so that stable content (workspace files,
+    /// tools, identity) comes first and the volatile suffix (runtime context,
+    /// memory index) is last. We place `cache_control` on every block
+    /// *except* the last — the volatile tail doesn't need its own breakpoint
+    /// because the tool definitions after it carry one.
+    ///
+    /// This keeps total breakpoints ≤ 4 (Anthropic's limit):
+    ///   non-OAuth: stable(1) + tools(1) + messages(1) = 3
+    ///   OAuth:     identity(1) + stable(1) + tools(1) + messages(1) = 4
     ///
     /// OAuth tokens include Claude Code identity as first block.
     fn build_system_blocks(system_blocks: &[String], is_oauth: bool) -> Value {
@@ -285,12 +289,18 @@ impl AnthropicProvider {
             }));
         }
 
-        for block in system_blocks {
-            blocks.push(json!({
+        let block_count = system_blocks.len();
+        for (i, block) in system_blocks.iter().enumerate() {
+            let mut entry = json!({
                 "type": "text",
                 "text": block,
-                "cache_control": { "type": "ephemeral" }
-            }));
+            });
+            // Cache breakpoint on all blocks except the last (volatile) one.
+            // The last block is covered by the tool definitions breakpoint.
+            if i + 1 < block_count {
+                entry["cache_control"] = json!({ "type": "ephemeral" });
+            }
+            blocks.push(entry);
         }
 
         json!(blocks)
@@ -1096,13 +1106,14 @@ mod tests {
     }
 
     #[test]
-    fn build_system_blocks_non_oauth_single_block() {
+    fn build_system_blocks_non_oauth_single_block_no_breakpoint() {
         let blocks =
             AnthropicProvider::build_system_blocks(&["You are a test agent.".to_owned()], false);
 
         let arr = blocks.as_array().expect("should be an array");
         assert_eq!(arr.len(), 1);
-        assert_eq!(arr[0]["cache_control"]["type"], "ephemeral");
+        // Single block is the "last" block — no cache_control (tools breakpoint covers it).
+        assert!(arr[0]["cache_control"].is_null());
         assert_eq!(arr[0]["text"], "You are a test agent.");
     }
 
@@ -1117,8 +1128,9 @@ mod tests {
         assert_eq!(arr.len(), 2);
         assert_eq!(arr[0]["text"], "stable prefix");
         assert_eq!(arr[0]["cache_control"]["type"], "ephemeral");
+        // Last block: no cache_control (tools breakpoint covers it).
         assert_eq!(arr[1]["text"], "volatile suffix");
-        assert_eq!(arr[1]["cache_control"]["type"], "ephemeral");
+        assert!(arr[1]["cache_control"].is_null());
     }
 
     #[test]
@@ -1130,12 +1142,32 @@ mod tests {
 
         let arr = blocks.as_array().expect("should be an array");
         assert_eq!(arr.len(), 3, "identity + stable + volatile");
+        // Identity and stable get breakpoints.
         assert!(arr[0]["text"].as_str().unwrap().contains("Claude Code"));
+        assert_eq!(arr[0]["cache_control"]["type"], "ephemeral");
         assert_eq!(arr[1]["text"], "stable prefix");
+        assert_eq!(arr[1]["cache_control"]["type"], "ephemeral");
+        // Volatile (last): no breakpoint — covered by tools.
         assert_eq!(arr[2]["text"], "volatile suffix");
-        for block in arr {
-            assert_eq!(block["cache_control"]["type"], "ephemeral");
-        }
+        assert!(arr[2]["cache_control"].is_null());
+    }
+
+    #[test]
+    fn build_system_blocks_total_breakpoints_within_limit() {
+        // Worst case: OAuth + 2 system blocks + tools + messages = 4 breakpoints.
+        let blocks = AnthropicProvider::build_system_blocks(
+            &["stable".to_owned(), "volatile".to_owned()],
+            true,
+        );
+        let system_breakpoints = blocks
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|b| !b["cache_control"].is_null())
+            .count();
+        // identity + stable = 2 system breakpoints. Plus tools(1) + messages(1) = 4 total.
+        assert_eq!(system_breakpoints, 2);
+        assert!(system_breakpoints + 2 <= 4, "total breakpoints must be ≤ 4");
     }
 
     #[test]
