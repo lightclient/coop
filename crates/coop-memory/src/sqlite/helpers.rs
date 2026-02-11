@@ -96,13 +96,20 @@ pub(super) fn to_json(values: &[String]) -> String {
     serde_json::to_string(values).unwrap_or_else(|_| "[]".to_owned())
 }
 
+/// Build an FTS5 query from space-separated terms.
+///
+/// Uses OR matching so partial overlap still returns results. BM25 ranking
+/// naturally scores docs with more matching terms higher — no strict AND
+/// required.
 pub(super) fn fts_query(text: &str) -> String {
-    text.split_whitespace()
+    let tokens: Vec<String> = text
+        .split_whitespace()
         .map(str::trim)
         .filter(|token| !token.is_empty())
         .map(|token| format!("\"{}\"", token.replace('"', " ")))
-        .collect::<Vec<_>>()
-        .join(" ")
+        .collect();
+
+    tokens.join(" OR ")
 }
 
 pub(super) fn from_json(raw: &str) -> Vec<String> {

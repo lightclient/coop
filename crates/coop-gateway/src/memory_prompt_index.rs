@@ -193,9 +193,10 @@ fn format_row(entry: &ObservationIndex) -> String {
 
 /// Extract meaningful search terms from conversational user input.
 ///
-/// FTS5 uses AND logic, so raw input like "tell me about the deployment
-/// pipeline" would require every word to appear in the observation. We
-/// strip common English stop words so FTS gets "deployment pipeline".
+/// Tokenizes on alphanumeric boundaries (like OpenClaw's regex approach),
+/// which naturally decomposes contractions and possessives:
+/// `"what's"` → `["what", "s"]`, `"Ariel's"` → `["Ariel", "s"]`.
+/// Then filters stop words so FTS gets clean content terms.
 fn extract_search_terms(input: &str) -> Option<String> {
     #[rustfmt::skip]
     const STOP_WORDS: &[&str] = &[
@@ -209,12 +210,13 @@ fn extract_search_terms(input: &str) -> Option<String> {
         "and", "or", "but", "not", "so", "if", "then", "else",
         "what", "which", "who", "when", "where", "how", "why",
         "all", "each", "every", "some", "any", "no", "just", "also",
-        "tell", "show", "give", "get", "let", "know", "think",
+        "tell", "show", "give", "get", "let", "know", "think", "make",
+        "many", "much", "very", "really", "going",
         "please", "thanks", "ok", "hi", "hello",
+        "s", "t", "re", "ve", "ll", "d", "m",
     ];
 
-    let terms: Vec<&str> = input
-        .split_whitespace()
+    let terms: Vec<&str> = alphanumeric_tokens(input)
         .filter(|w| {
             let lower = w.to_lowercase();
             lower.len() >= 2 && !STOP_WORDS.contains(&lower.as_str())
@@ -226,6 +228,17 @@ fn extract_search_terms(input: &str) -> Option<String> {
     } else {
         Some(terms.join(" "))
     }
+}
+
+/// Iterate alphanumeric token runs from input.
+///
+/// Splits on any non-alphanumeric/underscore boundary, so punctuation,
+/// apostrophes, hyphens, and unicode quotes all act as delimiters.
+/// `"what's the Ariel's recipe?"` → `["what", "s", "the", "Ariel", "s", "recipe"]`
+fn alphanumeric_tokens(input: &str) -> impl Iterator<Item = &str> {
+    input
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter(|s| !s.is_empty())
 }
 
 fn compact_title(title: &str) -> String {
