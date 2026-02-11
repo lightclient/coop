@@ -110,6 +110,37 @@ impl BuiltPrompt {
             .collect::<Vec<_>>()
             .join("\n\n")
     }
+
+    /// Group layers into cache-friendly blocks: stable prefix + volatile suffix.
+    ///
+    /// Returns a `Vec<String>` where each element becomes a separate system block
+    /// in the API call. The stable prefix (Stable/Session layers) is identical
+    /// across turns, so providers with prefix caching get cache hits on it even
+    /// when the volatile suffix (runtime context, memory index) changes.
+    pub fn to_cache_blocks(&self) -> Vec<String> {
+        let mut stable_parts: Vec<&str> = Vec::new();
+        let mut volatile_parts: Vec<&str> = Vec::new();
+
+        for layer in &self.layers {
+            match layer.cache {
+                CacheHint::Stable | CacheHint::Session => {
+                    stable_parts.push(&layer.content);
+                }
+                CacheHint::Volatile => {
+                    volatile_parts.push(&layer.content);
+                }
+            }
+        }
+
+        let mut blocks = Vec::new();
+        if !stable_parts.is_empty() {
+            blocks.push(stable_parts.join("\n\n"));
+        }
+        if !volatile_parts.is_empty() {
+            blocks.push(volatile_parts.join("\n\n"));
+        }
+        blocks
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1258,6 +1289,71 @@ mod tests {
                 "All Stable layers should come before Volatile layers. Order: {cache_order:?}"
             );
         }
+    }
+
+    #[test]
+    fn cache_blocks_split_stable_and_volatile() {
+        let dir = setup_workspace(&[
+            ("SOUL.md", "personality"),
+            ("AGENTS.md", "behavior"),
+            ("HEARTBEAT.md", "tasks"),
+        ]);
+
+        let index = WorkspaceIndex::scan(dir.path(), &default_file_configs()).unwrap();
+        let prompt = PromptBuilder::new(dir.path().to_path_buf(), "test".into())
+            .trust(TrustLevel::Full)
+            .build(&index)
+            .unwrap();
+
+        let blocks = prompt.to_cache_blocks();
+        assert_eq!(blocks.len(), 2, "should have stable + volatile blocks");
+
+        // Stable block contains workspace files.
+        assert!(
+            blocks[0].contains("personality"),
+            "stable block should contain SOUL.md content"
+        );
+        assert!(
+            blocks[0].contains("behavior"),
+            "stable block should contain AGENTS.md content"
+        );
+
+        // Volatile block contains runtime context.
+        assert!(
+            blocks[1].contains("## Runtime"),
+            "volatile block should contain runtime context"
+        );
+        assert!(
+            blocks[1].contains("tasks"),
+            "volatile block should contain HEARTBEAT.md content"
+        );
+
+        // Joining blocks should produce the same content as flat string.
+        let flat = prompt.to_flat_string();
+        let joined = blocks.join("\n\n");
+        assert_eq!(flat, joined, "cache blocks joined should equal flat string");
+    }
+
+    #[test]
+    fn cache_blocks_only_volatile_when_no_files() {
+        let dir = setup_workspace(&[]);
+
+        let index = WorkspaceIndex::scan(dir.path(), &default_file_configs()).unwrap();
+        let prompt = PromptBuilder::new(dir.path().to_path_buf(), "test".into())
+            .trust(TrustLevel::Full)
+            .build(&index)
+            .unwrap();
+
+        let blocks = prompt.to_cache_blocks();
+        assert_eq!(
+            blocks.len(),
+            1,
+            "should have only volatile block when no files"
+        );
+        assert!(
+            blocks[0].contains("## Runtime"),
+            "single block should contain runtime context"
+        );
     }
 
     #[test]

@@ -18,11 +18,11 @@ async fn live_oauth_roundtrip() {
             .expect("provider creation");
     let provider: Arc<dyn coop_core::Provider> = Arc::new(provider);
 
-    let system = "You are Claude Code, Anthropic's official CLI for Claude.";
+    let system = vec!["You are Claude Code, Anthropic's official CLI for Claude.".to_owned()];
     let msg = coop_core::Message::user().with_text("Respond with exactly: COOP_OK");
 
     let (response, usage) = provider
-        .complete(system, &[msg], &[])
+        .complete(&system, &[msg], &[])
         .await
         .expect("API call");
     let text = response.text();

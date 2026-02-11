@@ -841,7 +841,7 @@ match = ["signal:bob-uuid"]
         }
         async fn complete(
             &self,
-            _s: &str,
+            _s: &[String],
             _m: &[coop_core::Message],
             _t: &[coop_core::ToolDef],
         ) -> Result<(coop_core::Message, Usage)> {
@@ -849,7 +849,7 @@ match = ["signal:bob-uuid"]
         }
         async fn stream(
             &self,
-            _s: &str,
+            _s: &[String],
             _m: &[coop_core::Message],
             _t: &[coop_core::ToolDef],
         ) -> Result<coop_core::traits::ProviderStream> {

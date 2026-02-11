@@ -107,7 +107,7 @@ impl Provider for ScriptedProvider {
 
     async fn complete(
         &self,
-        _system: &str,
+        _system: &[String],
         _messages: &[Message],
         _tools: &[ToolDef],
     ) -> Result<(Message, Usage)> {
@@ -123,7 +123,7 @@ impl Provider for ScriptedProvider {
 
     async fn stream(
         &self,
-        _system: &str,
+        _system: &[String],
         _messages: &[Message],
         _tools: &[ToolDef],
     ) -> Result<ProviderStream> {
@@ -132,7 +132,7 @@ impl Provider for ScriptedProvider {
 
     async fn complete_fast(
         &self,
-        _system: &str,
+        _system: &[String],
         _messages: &[Message],
         _tools: &[ToolDef],
     ) -> Result<(Message, Usage)> {

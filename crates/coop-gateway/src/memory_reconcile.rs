@@ -29,7 +29,7 @@ impl ProviderReconciler {
 impl Reconciler for ProviderReconciler {
     #[instrument(skip(self, request), fields(candidate_count = request.candidates.len()))]
     async fn reconcile(&self, request: &ReconcileRequest) -> Result<ReconcileDecision> {
-        let system = reconciliation_system_prompt();
+        let system = vec![reconciliation_system_prompt().to_owned()];
         let user_prompt = reconciliation_user_prompt(request)?;
 
         debug!(
@@ -40,7 +40,7 @@ impl Reconciler for ProviderReconciler {
         let (response, _usage) = self
             .provider
             .complete_fast(
-                system,
+                &system,
                 &[Message::user().with_text(user_prompt)],
                 &[] as &[ToolDef],
             )

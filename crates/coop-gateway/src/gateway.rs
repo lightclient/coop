@@ -174,17 +174,22 @@ impl Gateway {
     }
 
     /// Build a trust-gated system prompt for this turn.
+    ///
+    /// Returns cache-friendly blocks: the stable prefix (workspace files,
+    /// identity, tools) is separated from the volatile suffix (runtime
+    /// context, memory index). This lets providers with prefix caching
+    /// avoid full cache misses when only the volatile part changes.
     async fn build_prompt(
         &self,
         trust: TrustLevel,
         user_name: Option<&str>,
         channel: Option<&str>,
         user_input: &str,
-    ) -> Result<String> {
+    ) -> Result<Vec<String>> {
         let cfg = self.config.load();
         let shared_configs = cfg.prompt.shared_core_configs();
         let user_configs = cfg.prompt.user_core_configs();
-        let mut system_prompt = {
+        let mut system_blocks = {
             let mut index = self
                 .workspace_index
                 .lock()
@@ -210,7 +215,7 @@ impl Gateway {
             }
             let prompt = builder.build(&index)?;
             drop(index);
-            prompt.to_flat_string()
+            prompt.to_cache_blocks()
         };
 
         if let Some(memory) = &self.memory {
@@ -229,8 +234,13 @@ impl Gateway {
                         index_len = memory_index.len(),
                         "memory prompt index injected"
                     );
-                    system_prompt.push_str("\n\n");
-                    system_prompt.push_str(&memory_index);
+                    // Append to the last (volatile) block, or add a new block.
+                    if let Some(last) = system_blocks.last_mut() {
+                        last.push_str("\n\n");
+                        last.push_str(&memory_index);
+                    } else {
+                        system_blocks.push(memory_index);
+                    }
                 }
                 Ok(None) => {}
                 Err(error) => {
@@ -243,7 +253,7 @@ impl Gateway {
             }
         }
 
-        Ok(system_prompt)
+        Ok(system_blocks)
     }
 
     pub(crate) fn default_session_key(&self) -> SessionKey {
@@ -760,7 +770,7 @@ impl Gateway {
     async fn maybe_compact(
         &self,
         session_key: &SessionKey,
-        system_prompt: &str,
+        system_prompt: &[String],
         event_tx: &mpsc::Sender<TurnEvent>,
     ) -> Result<bool> {
         let input_tokens = self
@@ -995,7 +1005,7 @@ impl Gateway {
 
     async fn assistant_response(
         &self,
-        system_prompt: &str,
+        system_prompt: &[String],
         messages: &[Message],
         tool_defs: &[ToolDef],
         event_tx: &mpsc::Sender<TurnEvent>,
@@ -1023,7 +1033,7 @@ impl Gateway {
 
     async fn assistant_response_streaming(
         &self,
-        system_prompt: &str,
+        system_prompt: &[String],
         messages: &[Message],
         tool_defs: &[ToolDef],
         event_tx: &mpsc::Sender<TurnEvent>,
@@ -1066,7 +1076,7 @@ impl Gateway {
 
     async fn assistant_response_non_streaming(
         &self,
-        system_prompt: &str,
+        system_prompt: &[String],
         messages: &[Message],
         tool_defs: &[ToolDef],
         event_tx: &mpsc::Sender<TurnEvent>,
@@ -1297,7 +1307,7 @@ model = "test-model"
 
         async fn complete(
             &self,
-            _system: &str,
+            _system: &[String],
             _messages: &[Message],
             _tools: &[ToolDef],
         ) -> Result<(Message, Usage)> {
@@ -1306,7 +1316,7 @@ model = "test-model"
 
         async fn stream(
             &self,
-            _system: &str,
+            _system: &[String],
             _messages: &[Message],
             _tools: &[ToolDef],
         ) -> Result<ProviderStream> {
@@ -1348,7 +1358,7 @@ model = "test-model"
 
         async fn complete(
             &self,
-            _system: &str,
+            _system: &[String],
             _messages: &[Message],
             _tools: &[ToolDef],
         ) -> Result<(Message, Usage)> {
@@ -1375,7 +1385,7 @@ model = "test-model"
 
         async fn stream(
             &self,
-            _system: &str,
+            _system: &[String],
             _messages: &[Message],
             _tools: &[ToolDef],
         ) -> Result<ProviderStream> {
@@ -1679,7 +1689,7 @@ model = "test-model"
 
         async fn complete(
             &self,
-            _system: &str,
+            _system: &[String],
             _messages: &[Message],
             tools: &[ToolDef],
         ) -> Result<(Message, Usage)> {
@@ -1710,7 +1720,7 @@ model = "test-model"
 
         async fn stream(
             &self,
-            _system: &str,
+            _system: &[String],
             _messages: &[Message],
             _tools: &[ToolDef],
         ) -> Result<ProviderStream> {
@@ -1749,7 +1759,7 @@ model = "test-model"
 
         async fn complete(
             &self,
-            _system: &str,
+            _system: &[String],
             _messages: &[Message],
             _tools: &[ToolDef],
         ) -> Result<(Message, Usage)> {
@@ -1770,7 +1780,7 @@ model = "test-model"
 
         async fn stream(
             &self,
-            _system: &str,
+            _system: &[String],
             _messages: &[Message],
             _tools: &[ToolDef],
         ) -> Result<ProviderStream> {
@@ -2041,7 +2051,7 @@ model = "test-model"
 
         async fn complete(
             &self,
-            _system: &str,
+            _system: &[String],
             _messages: &[Message],
             tools: &[ToolDef],
         ) -> Result<(Message, Usage)> {
@@ -2065,7 +2075,7 @@ model = "test-model"
 
         async fn stream(
             &self,
-            _system: &str,
+            _system: &[String],
             _messages: &[Message],
             _tools: &[ToolDef],
         ) -> Result<ProviderStream> {
@@ -2394,7 +2404,7 @@ model = "test-model"
 
         async fn complete(
             &self,
-            _system: &str,
+            _system: &[String],
             messages: &[Message],
             tools: &[ToolDef],
         ) -> Result<(Message, Usage)> {
@@ -2443,7 +2453,7 @@ model = "test-model"
 
         async fn stream(
             &self,
-            _system: &str,
+            _system: &[String],
             _messages: &[Message],
             _tools: &[ToolDef],
         ) -> Result<ProviderStream> {

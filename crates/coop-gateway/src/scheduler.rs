@@ -965,7 +965,7 @@ mod tests {
 
         async fn complete(
             &self,
-            _system: &str,
+            _system: &[String],
             _messages: &[Message],
             _tools: &[ToolDef],
         ) -> Result<(Message, Usage)> {
@@ -987,7 +987,7 @@ mod tests {
 
         async fn stream(
             &self,
-            _system: &str,
+            _system: &[String],
             _messages: &[Message],
             _tools: &[ToolDef],
         ) -> Result<coop_core::traits::ProviderStream> {

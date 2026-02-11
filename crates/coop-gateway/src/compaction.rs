@@ -100,7 +100,7 @@ fn prepare_compaction_messages(messages: &[Message]) -> Vec<Message> {
 pub(crate) async fn compact(
     messages: &[Message],
     provider: &dyn Provider,
-    system_prompt: &str,
+    system_prompt: &[String],
 ) -> Result<CompactionState> {
     let span = info_span!("compaction", message_count = messages.len());
 

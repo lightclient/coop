@@ -267,35 +267,39 @@ impl AnthropicProvider {
 
     /// Build system prompt array with cache_control breakpoints.
     ///
+    /// Each element in `system_blocks` becomes a separate text block with a
+    /// `cache_control` breakpoint. The caller splits the prompt so that the
+    /// first block (stable across turns) forms a cacheable prefix — even
+    /// when the volatile suffix changes between turns, the stable prefix
+    /// gets cache hits.
+    ///
     /// OAuth tokens include Claude Code identity as first block.
-    /// Both paths use structured arrays for prompt caching.
-    fn build_system_blocks(system: &str, is_oauth: bool) -> Value {
+    fn build_system_blocks(system_blocks: &[String], is_oauth: bool) -> Value {
+        let mut blocks: Vec<Value> = Vec::new();
+
         if is_oauth {
-            json!([
-                {
-                    "type": "text",
-                    "text": "You are Claude Code, Anthropic's official CLI for Claude.",
-                    "cache_control": { "type": "ephemeral" }
-                },
-                {
-                    "type": "text",
-                    "text": system,
-                    "cache_control": { "type": "ephemeral" }
-                }
-            ])
-        } else {
-            json!([{
+            blocks.push(json!({
                 "type": "text",
-                "text": system,
+                "text": "You are Claude Code, Anthropic's official CLI for Claude.",
                 "cache_control": { "type": "ephemeral" }
-            }])
+            }));
         }
+
+        for block in system_blocks {
+            blocks.push(json!({
+                "type": "text",
+                "text": block,
+                "cache_control": { "type": "ephemeral" }
+            }));
+        }
+
+        json!(blocks)
     }
 
     /// Build the request body shared between complete() and stream().
     fn build_body(
         &self,
-        system: &str,
+        system: &[String],
         messages: &[Message],
         tools: &[ToolDef],
         stream: bool,
@@ -541,7 +545,7 @@ impl Provider for AnthropicProvider {
 
     async fn complete(
         &self,
-        system: &str,
+        system: &[String],
         messages: &[Message],
         tools: &[ToolDef],
     ) -> Result<(Message, Usage)> {
@@ -592,7 +596,7 @@ impl Provider for AnthropicProvider {
 
     async fn stream(
         &self,
-        system: &str,
+        system: &[String],
         messages: &[Message],
         tools: &[ToolDef],
     ) -> Result<ProviderStream> {
@@ -664,7 +668,7 @@ impl Provider for AnthropicProvider {
 
     async fn complete_fast(
         &self,
-        system: &str,
+        system: &[String],
         messages: &[Message],
         tools: &[ToolDef],
     ) -> Result<(Message, Usage)> {
@@ -1092,13 +1096,46 @@ mod tests {
     }
 
     #[test]
-    fn build_system_blocks_non_oauth_has_cache_control() {
-        let blocks = AnthropicProvider::build_system_blocks("You are a test agent.", false);
+    fn build_system_blocks_non_oauth_single_block() {
+        let blocks =
+            AnthropicProvider::build_system_blocks(&["You are a test agent.".to_owned()], false);
 
         let arr = blocks.as_array().expect("should be an array");
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["cache_control"]["type"], "ephemeral");
         assert_eq!(arr[0]["text"], "You are a test agent.");
+    }
+
+    #[test]
+    fn build_system_blocks_non_oauth_multi_block() {
+        let blocks = AnthropicProvider::build_system_blocks(
+            &["stable prefix".to_owned(), "volatile suffix".to_owned()],
+            false,
+        );
+
+        let arr = blocks.as_array().expect("should be an array");
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["text"], "stable prefix");
+        assert_eq!(arr[0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(arr[1]["text"], "volatile suffix");
+        assert_eq!(arr[1]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn build_system_blocks_oauth_multi_block() {
+        let blocks = AnthropicProvider::build_system_blocks(
+            &["stable prefix".to_owned(), "volatile suffix".to_owned()],
+            true,
+        );
+
+        let arr = blocks.as_array().expect("should be an array");
+        assert_eq!(arr.len(), 3, "identity + stable + volatile");
+        assert!(arr[0]["text"].as_str().unwrap().contains("Claude Code"));
+        assert_eq!(arr[1]["text"], "stable prefix");
+        assert_eq!(arr[2]["text"], "volatile suffix");
+        for block in arr {
+            assert_eq!(block["cache_control"]["type"], "ephemeral");
+        }
     }
 
     #[test]
@@ -1261,11 +1298,12 @@ mod tests {
                 .unwrap();
 
         let messages = vec![Message::user().with_text("hello")];
-        let body = provider.build_body("system", &messages, &[], false, false);
+        let system = vec!["system".to_owned()];
+        let body = provider.build_body(&system, &messages, &[], false, false);
         assert_eq!(body["model"], "claude-sonnet-4-20250514");
 
         provider.set_model("claude-haiku-3-20250514");
-        let body = provider.build_body("system", &messages, &[], false, false);
+        let body = provider.build_body(&system, &messages, &[], false, false);
         assert_eq!(body["model"], "claude-haiku-3-20250514");
     }
 }

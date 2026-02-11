@@ -59,11 +59,16 @@ pub trait Provider: Send + Sync {
     /// Model info (name, context limit).
     fn model_info(&self) -> ModelInfo;
 
-    /// Run a completion: given a system prompt, conversation, and available tools,
+    /// Run a completion: given system prompt blocks, conversation, and available tools,
     /// return a response message and usage.
+    ///
+    /// Each element of `system` becomes a separate system block. Providers that
+    /// support prompt caching (e.g. Anthropic) place a `cache_control` breakpoint
+    /// on each block, so a stable first block caches across turns even when later
+    /// blocks change.
     async fn complete(
         &self,
-        system: &str,
+        system: &[String],
         messages: &[Message],
         tools: &[ToolDef],
     ) -> Result<(Message, Usage)>;
@@ -71,7 +76,7 @@ pub trait Provider: Send + Sync {
     /// Streaming variant of complete. Returns a stream of partial messages.
     async fn stream(
         &self,
-        system: &str,
+        system: &[String],
         messages: &[Message],
         tools: &[ToolDef],
     ) -> Result<ProviderStream>;
@@ -92,7 +97,7 @@ pub trait Provider: Send + Sync {
     /// Falls back to `complete` by default.
     async fn complete_fast(
         &self,
-        system: &str,
+        system: &[String],
         messages: &[Message],
         tools: &[ToolDef],
     ) -> Result<(Message, Usage)> {

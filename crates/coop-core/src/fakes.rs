@@ -113,7 +113,7 @@ impl Provider for FakeProvider {
 
     async fn complete(
         &self,
-        _system: &str,
+        _system: &[String],
         _messages: &[Message],
         _tools: &[ToolDef],
     ) -> Result<(Message, Usage)> {
@@ -130,7 +130,7 @@ impl Provider for FakeProvider {
 
     async fn stream(
         &self,
-        _system: &str,
+        _system: &[String],
         _messages: &[Message],
         _tools: &[ToolDef],
     ) -> Result<ProviderStream> {
@@ -170,7 +170,7 @@ impl Provider for SlowFakeProvider {
 
     async fn complete(
         &self,
-        system: &str,
+        system: &[String],
         messages: &[Message],
         tools: &[ToolDef],
     ) -> Result<(Message, Usage)> {
@@ -180,7 +180,7 @@ impl Provider for SlowFakeProvider {
 
     async fn stream(
         &self,
-        _system: &str,
+        _system: &[String],
         _messages: &[Message],
         _tools: &[ToolDef],
     ) -> Result<ProviderStream> {

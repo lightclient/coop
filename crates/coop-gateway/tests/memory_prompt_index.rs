@@ -88,14 +88,14 @@ impl Provider for PromptCaptureProvider {
 
     async fn complete(
         &self,
-        system: &str,
+        system: &[String],
         _messages: &[Message],
         _tools: &[ToolDef],
     ) -> Result<(Message, Usage)> {
         self.seen_system_prompts
             .lock()
             .unwrap()
-            .push(system.to_owned());
+            .push(system.join("\n\n"));
         let response = self
             .queue
             .lock()
@@ -107,7 +107,7 @@ impl Provider for PromptCaptureProvider {
 
     async fn stream(
         &self,
-        _system: &str,
+        _system: &[String],
         _messages: &[Message],
         _tools: &[ToolDef],
     ) -> Result<ProviderStream> {
