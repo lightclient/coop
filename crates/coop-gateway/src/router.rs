@@ -215,7 +215,7 @@ impl MessageRouter {
         match input {
             "/new" | "/clear" | "/reset" => {
                 self.gateway.clear_session(&decision.session_key);
-                Some("Session cleared.".to_owned())
+                Some("New session ✅".to_owned())
             }
             "/stop" => {
                 if self.gateway.cancel_active_turn(&decision.session_key) {
@@ -1243,7 +1243,7 @@ match = ["signal:bob-uuid"]
         // Now send /new to clear
         let msg = inbound_command("signal", "alice-uuid", "/new");
         let (_decision, text) = dispatch_and_collect_text(&router, &msg).await;
-        assert!(text.contains("Session cleared"));
+        assert!(text.contains("New session"));
         assert_eq!(
             gateway.session_message_count(&decision.session_key),
             0,
