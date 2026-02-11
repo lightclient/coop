@@ -15,6 +15,8 @@ pub(crate) async fn run_signal_loop(
     mut signal_channel: SignalChannel,
     router: Arc<MessageRouter>,
 ) -> Result<()> {
+    tracing::info!("signal loop listening");
+
     // Track the active turn task so we can await it before starting another.
     let mut active_turn: Option<JoinHandle<Result<()>>> = None;
 

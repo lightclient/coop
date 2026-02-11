@@ -293,6 +293,8 @@ fn start_signal_runtime(
 
             let local = tokio::task::LocalSet::new();
             local.block_on(&runtime, async move {
+                info!("signal runtime started");
+
                 let receive_manager = manager.clone();
                 let query_manager = manager.clone();
                 let receive_health = Arc::clone(&health);
@@ -353,6 +355,7 @@ async fn receive_task(
         match Box::pin(manager.receive_messages()).await {
             Ok(messages) => {
                 set_health(&health, ChannelHealth::Healthy);
+                info!("signal websocket connected, receiving messages");
                 backoff = Duration::from_secs(1);
 
                 tokio::pin!(messages);
@@ -414,6 +417,7 @@ async fn receive_task(
                     }
                 }
 
+                warn!("signal receive stream ended, will reconnect");
                 set_health(
                     &health,
                     ChannelHealth::Degraded("signal receive stream ended".to_owned()),

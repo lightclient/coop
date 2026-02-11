@@ -25,8 +25,8 @@ chrono = { workspace = true }
 coop-core = { path = "../coop-core" }
 futures = { workspace = true, optional = true }
 hex = { workspace = true, optional = true }
-presage = { git = "https://github.com/whisperfish/presage", rev = "07413c5", optional = true }
-presage-store-sqlite = { git = "https://github.com/whisperfish/presage", rev = "07413c5", optional = true }
+presage = { git = "https://github.com/whisperfish/presage", rev = "1b81dfe", optional = true }
+presage-store-sqlite = { git = "https://github.com/whisperfish/presage", rev = "1b81dfe", optional = true }
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 tokio = { version = "1", features = ["sync", "time", "macros", "rt", "rt-multi-thread"] }

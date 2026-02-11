@@ -642,9 +642,10 @@ mod tests {
         let (query_tx, _qrx) = mpsc::channel(1);
         let executor = SignalToolExecutor::new(action_tx, query_tx);
         let names: Vec<_> = executor.tools().iter().map(|t| t.name.clone()).collect();
-        assert_eq!(names.len(), 3);
+        assert_eq!(names.len(), 4);
         assert!(names.contains(&"signal_react".to_owned()));
         assert!(names.contains(&"signal_reply".to_owned()));
+        assert!(names.contains(&"signal_send".to_owned()));
         assert!(names.contains(&"signal_history".to_owned()));
     }
 

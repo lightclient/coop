@@ -359,7 +359,7 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
                 }
                 Err(error) => {
                     tracing::warn!(
-                        error = %error,
+                        error = format!("{error:#}"),
                         db_path = %db_path.display(),
                         "failed to initialize signal channel",
                     );
@@ -466,13 +466,33 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
     );
 
     #[cfg(feature = "signal")]
+    let signal_active = signal_channel.is_some();
+    #[cfg(not(feature = "signal"))]
+    let signal_active = false;
+
+    #[cfg(feature = "signal")]
     if let Some(signal_channel) = signal_channel {
+        info!("signal channel starting");
         let router = Arc::clone(&router);
         tokio::spawn(async move {
             if let Err(error) = run_signal_loop(signal_channel, router).await {
                 tracing::warn!(error = %error, "signal loop stopped");
             }
         });
+    }
+
+    if !signal_active {
+        let has_signal_cron = shared
+            .load()
+            .cron
+            .iter()
+            .any(|c| c.deliver.as_ref().is_some_and(|d| d.channel == "signal"));
+        if has_signal_cron {
+            warn!(
+                "cron jobs reference signal delivery but signal channel is not active \
+                 (add [channels.signal] to config and build with --features signal)"
+            );
+        }
     }
 
     {
