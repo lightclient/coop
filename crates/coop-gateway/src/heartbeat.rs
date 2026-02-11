@@ -47,9 +47,9 @@ pub(crate) fn strip_heartbeat_token(text: &str) -> HeartbeatResult {
     }
 }
 
-/// Strip leading markdown (**, *) wrappers to expose the inner text.
+/// Strip leading markdown (**, *, `) wrappers to expose the inner text.
 fn unwrap_markdown(s: &str) -> &str {
-    // Try ** first, then *
+    // Try ** first, then *, then `
     if let Some(inner) = s
         .strip_prefix("**")
         .and_then(|rest| rest.strip_suffix("**"))
@@ -57,6 +57,9 @@ fn unwrap_markdown(s: &str) -> &str {
         return inner.trim();
     }
     if let Some(inner) = s.strip_prefix('*').and_then(|rest| rest.strip_suffix('*')) {
+        return inner.trim();
+    }
+    if let Some(inner) = s.strip_prefix('`').and_then(|rest| rest.strip_suffix('`')) {
         return inner.trim();
     }
     s
@@ -81,6 +84,12 @@ fn strip_token_from_start(text: &str) -> String {
         .and_then(|r| r.strip_prefix('*'))
     {
         strip_leading_punctuation(rest).to_owned()
+    } else if let Some(rest) = trimmed
+        .strip_prefix('`')
+        .and_then(|r| r.strip_prefix(HEARTBEAT_OK_TOKEN))
+        .and_then(|r| r.strip_prefix('`'))
+    {
+        strip_leading_punctuation(rest).to_owned()
     } else {
         text.to_owned()
     }
@@ -102,6 +111,12 @@ fn strip_token_from_end(text: &str) -> String {
         .strip_suffix('*')
         .and_then(|r| r.strip_suffix(HEARTBEAT_OK_TOKEN))
         .and_then(|r| r.strip_suffix('*'))
+    {
+        rest.trim_end().to_owned()
+    } else if let Some(rest) = trimmed
+        .strip_suffix('`')
+        .and_then(|r| r.strip_suffix(HEARTBEAT_OK_TOKEN))
+        .and_then(|r| r.strip_suffix('`'))
     {
         rest.trim_end().to_owned()
     } else {
@@ -172,6 +187,30 @@ mod tests {
         assert_eq!(
             strip_heartbeat_token("*HEARTBEAT_OK*"),
             HeartbeatResult::Suppress,
+        );
+    }
+
+    #[test]
+    fn markdown_backtick_suppresses() {
+        assert_eq!(
+            strip_heartbeat_token("`HEARTBEAT_OK`"),
+            HeartbeatResult::Suppress,
+        );
+    }
+
+    #[test]
+    fn backtick_token_at_start_with_content() {
+        assert_eq!(
+            strip_heartbeat_token("`HEARTBEAT_OK` Your server is down"),
+            HeartbeatResult::Deliver("Your server is down".to_owned()),
+        );
+    }
+
+    #[test]
+    fn backtick_token_at_end_with_content() {
+        assert_eq!(
+            strip_heartbeat_token("Your server is down `HEARTBEAT_OK`"),
+            HeartbeatResult::Deliver("Your server is down".to_owned()),
         );
     }
 

@@ -291,16 +291,19 @@ impl MessageRouter {
         });
 
         let mut text = String::new();
-        let mut fallback_assistant = String::new();
 
         while let Some(event) = event_rx.recv().await {
             match event {
                 TurnEvent::TextDelta(delta) => {
                     text.push_str(&delta);
                 }
-                TurnEvent::AssistantMessage(message) => {
-                    if fallback_assistant.is_empty() {
-                        fallback_assistant = message.text();
+                TurnEvent::AssistantMessage(ref message) => {
+                    // Only keep the final assistant response (the one without
+                    // tool requests). Intermediate "thinking" text before tool
+                    // calls is not useful for delivery.
+                    let msg_text = message.text();
+                    if !message.has_tool_requests() && !msg_text.is_empty() {
+                        text = msg_text;
                     }
                 }
                 TurnEvent::Error(message) => {
@@ -320,10 +323,6 @@ impl MessageRouter {
             Err(error) => anyhow::bail!("router task failed: {error}"),
         };
 
-        if text.is_empty() {
-            text = fallback_assistant;
-        }
-
         Ok((decision, text))
     }
 
@@ -340,7 +339,6 @@ impl MessageRouter {
             tokio::spawn(async move { router.dispatch_injection(&injection, event_tx).await });
 
         let mut text = String::new();
-        let mut fallback_assistant = String::new();
         let mut turn_error: Option<String> = None;
 
         while let Some(event) = event_rx.recv().await {
@@ -348,9 +346,10 @@ impl MessageRouter {
                 TurnEvent::TextDelta(delta) => {
                     text.push_str(&delta);
                 }
-                TurnEvent::AssistantMessage(message) => {
-                    if fallback_assistant.is_empty() {
-                        fallback_assistant = message.text();
+                TurnEvent::AssistantMessage(ref message) => {
+                    let msg_text = message.text();
+                    if !message.has_tool_requests() && !msg_text.is_empty() {
+                        text = msg_text;
                     }
                 }
                 TurnEvent::Error(message) => {
@@ -372,10 +371,6 @@ impl MessageRouter {
 
         if let Some(message) = turn_error {
             anyhow::bail!(message);
-        }
-
-        if text.is_empty() {
-            text = fallback_assistant;
         }
 
         Ok((decision, text))
