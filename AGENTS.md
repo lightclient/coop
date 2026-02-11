@@ -114,6 +114,7 @@ Test: Use fake/placeholder data only — never real PII
 Test: Use fakes from coop-core/src/fakes.rs for trait boundaries
 Provider: Implement `Provider` trait — see crates/coop-core/src/traits.rs
 Channel: Implement `Channel` trait — see crates/coop-core/src/traits.rs
+Tools: Tool names, parameters, and descriptions live in the `ToolDef` definitions in code — not in TOOLS.md. TOOLS.md contains only workflow guidance, conceptual context (e.g. memory stores, config hot-reload), and reference (coop.toml schema) that tool schemas can't express. If a change adds workflow guidance or conceptual context, update both `workspaces/default/TOOLS.md` and the init template in `crates/coop-gateway/src/init_templates.rs` (`TOOLS_MD`)
 
 ## Code Quality
 

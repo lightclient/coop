@@ -35,42 +35,7 @@ If there is something to report, reply with the actual content.
 Keep heartbeat responses concise — these are push notifications, not conversations.
 ";
 
-pub(crate) const TOOLS_MD: &str = "\
-# Tools
-
-## Configuration
-
-Coop is configured via `coop.toml`. You can read, validate, and write config
-changes conversationally using the config tools. The config file is automatically
-watched — most changes take effect within seconds without a restart.
-
-### Config workflow
-
-1. **Read** the current config with `config_read` to see what's set
-2. **Modify** — produce the complete new TOML (config_write requires the full file, not a patch)
-3. **Write** with `config_write` — it validates before writing, backs up the old file, and rejects invalid configs
-
-## File tools
-
-- `read_file` — read file contents (params: path, optional offset/limit)
-- `write_file` — create or overwrite a file
-- `edit_file` — find-and-replace in a file
-- `bash` — execute a shell command (120s timeout)
-
-## Memory tools
-
-- `memory_search` — search observations by text, type, people, store
-- `memory_get` — fetch full observation details by ID
-- `memory_write` — create a new observation
-- `memory_timeline` — browse observations around a specific ID
-- `memory_history` — view mutation history for an observation
-- `memory_people` — search known people
-
-## Config tools
-
-- `config_read` — read the current coop.toml
-- `config_write` — validate and write coop.toml (backs up first)
-";
+pub(crate) const TOOLS_MD: &str = include_str!("../../../workspaces/default/TOOLS.md");
 
 pub(crate) const HEARTBEAT_MD: &str = "\
 # Heartbeat Tasks
@@ -144,7 +109,7 @@ IDENTITY.md should capture factual identity info:
 ```
 # Identity
 
-- **Name:** Aria
+- **Name:** Cooper
 - **Role:** Personal assistant and coding partner
 - **Created:** February 2026
 - **Traits:** Direct, concise, dry humor, action-oriented

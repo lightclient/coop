@@ -1,10 +1,11 @@
 # Tools
 
-## Configuration
+Tool names, parameters, and basic descriptions are provided via the API tool definitions.
+This file covers workflow guidance, conceptual context, and reference that tool schemas can't express.
 
-Coop is configured via `coop.toml`. You can read, validate, and write config changes conversationally using the config tools. The config file is automatically watched — most changes take effect within seconds without a restart.
+## Configuration workflow
 
-### Config workflow
+Coop is configured via `coop.toml`. The config file is automatically watched — most changes take effect within seconds without a restart.
 
 1. **Read** the current config with `config_read` to see what's set
 2. **Modify** — produce the complete new TOML (config_write requires the full file, not a patch)
@@ -30,19 +31,6 @@ These fields require a process restart:
 - `memory.embedding` (provider, model, dimensions)
 
 If a user asks to change a restart-required field, apply it with config_write and tell them to restart coop.
-
-### config_read
-
-Returns the current coop.toml contents. No parameters.
-
-### config_write
-
-Validates and writes coop.toml atomically. Backs up the previous version to `coop.toml.bak`.
-
-Parameters:
-- `content` (string, required) — the complete TOML file contents
-
-The content is validated before writing. If validation fails, the file is not modified and you get an error report showing what's wrong.
 
 ## coop.toml reference
 
@@ -154,18 +142,27 @@ message = "run cleanup"
 - Cron with user but no `deliver`: warns if user has no non-terminal match patterns (heartbeat will have no delivery targets)
 - API keys: if `provider.api_keys` is set, each entry must use `env:` prefix and the referenced env var must be set. Otherwise, `ANTHROPIC_API_KEY` must be set. Plus embedding provider key if configured
 
-## File tools
+## Skills
 
-These operate relative to the workspace directory.
+Skills are reusable instruction sets discovered from `SKILL.md` files. They appear as a menu in the system prompt; use `read_file` to load one when the task matches.
 
-- `read_file` — read file contents (params: path, optional offset/limit)
-- `write_file` — create or overwrite a file (requires full/inner trust)
-- `edit_file` — find-and-replace in a file (requires full/inner trust)
-- `bash` — execute a shell command (requires full/inner trust, 120s timeout)
+### Installation paths
 
-## Memory tools
+- **Workspace-level** — `skills/{name}/SKILL.md` (available to all users)
+- **Per-user** — `users/{user}/skills/{name}/SKILL.md` (only for that user; overrides a workspace skill with the same name)
 
-Structured observation storage with trust-gated access to three stores:
+## Diagnostics
+
+When asked why you did something, or when something went wrong, you have direct access to your own internals via bash and read_file. Check these before guessing:
+
+- **Session transcripts** — `sessions/*.jsonl` in the workspace. Each line is a JSON message (role, content, tool calls/results). Your current session file shows exactly what messages were exchanged and what tool calls you made. Use `ls sessions/` to find them, `tail` or `jq` to inspect.
+- **Trace log** — `traces.jsonl` in the working directory (present when `COOP_TRACE_FILE` is set). JSONL with spans covering `route_message → agent_turn → turn_iteration → provider_request / tool_execute`. Use `grep`, `jq`, or `rg` to search. Each line has `timestamp`, `level`, `message`, `span`, and `spans` (ancestry). Look for `"level":"ERROR"` for failures, `tool_execute` spans for tool behavior, `provider_request` for API interactions.
+- **Config** — `config_read` shows the live config. Check here for model, trust levels, channel bindings, cron schedules.
+- **Source code** — the crates are in `crates/` relative to the project root. When behavior is confusing, read the implementation.
+
+## Memory stores
+
+Memory tools operate on three trust-gated stores:
 
 | Store | Min trust | Use for |
 |-------|-----------|---------|
@@ -173,23 +170,9 @@ Structured observation storage with trust-gated access to three stores:
 | shared | inner | knowledge shared with trusted users |
 | social | familiar | public-safe facts about people/topics |
 
-- `memory_search` — search observations by text, type, people, time range, store
-- `memory_get` — fetch full observation details by ID
-- `memory_write` — create a new observation (store defaults based on trust level)
-- `memory_timeline` — get observations around a specific observation ID
-- `memory_history` — fetch mutation history for an observation
-- `memory_people` — search known people across observations
+## Slash commands
 
-## Signal tools (available when Signal channel is configured)
-
-- `signal_send` — send a message to the current conversation immediately, mid-turn. Use to notify the user before long-running work. Your final reply still arrives separately.
-- `signal_react` — react to a message with an emoji
-- `signal_reply` — reply to a specific message (shows as a quote)
-- `signal_history` — search message history in the current Signal conversation
-
-## Slash commands (available on all channels)
-
-Users can send these directly:
+Users can send these directly on any channel:
 
 - `/new`, `/clear`, `/reset` — clear session history
 - `/stop` — cancel the current agent turn
