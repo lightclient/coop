@@ -68,7 +68,7 @@ impl Tool for ReadFileTool {
     fn definition(&self) -> ToolDef {
         ToolDef::new(
             "read_file",
-            "Read the contents of a file relative to the workspace",
+            "Read a file (relative to workspace). Truncated to 2000 lines or 50KB. Use offset/limit for large files; continue with offset until complete.",
             Self::schema(),
         )
     }
