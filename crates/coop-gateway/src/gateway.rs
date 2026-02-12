@@ -363,6 +363,14 @@ impl Gateway {
             // Sync provider model with config (picks up hot-reloaded agent.model).
             self.sync_provider_model();
 
+            // Cron sessions always start fresh — clear any previous run's
+            // context. This happens after the turn lock to avoid a race where
+            // a concurrent fire clears a session mid-turn.
+            if matches!(session_key.kind, SessionKind::Cron(_)) {
+                self.clear_session(session_key);
+                debug!(session = %session_key, "cleared cron session for fresh execution");
+            }
+
             let system_prompt = self.build_prompt(trust, user_name, channel, user_input).await?;
 
             // Repair corrupt session state: if the last message is an assistant

@@ -931,6 +931,45 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn fire_cron_clears_session_between_runs() {
+        let (shared, router, gateway) =
+            make_shared_config_and_router(None, &[], "cron response ok");
+
+        let cfg = CronConfig {
+            name: "heartbeat".to_owned(),
+            cron: "*/30 * * * *".to_owned(),
+            message: "check tasks".to_owned(),
+            user: None,
+            deliver: None,
+        };
+
+        let cron_key = SessionKey {
+            agent_id: "test".to_owned(),
+            kind: SessionKind::Cron("heartbeat".to_owned()),
+        };
+
+        // First fire: session should have 2 messages (user + assistant).
+        fire_cron(&cfg, &router, None, &shared).await;
+        assert_eq!(gateway.session_message_count(&cron_key), 2);
+
+        // Second fire: session should still have 2 messages, not 4.
+        fire_cron(&cfg, &router, None, &shared).await;
+        assert_eq!(
+            gateway.session_message_count(&cron_key),
+            2,
+            "cron session should be cleared between runs"
+        );
+
+        // Third fire: same — always exactly 2 messages.
+        fire_cron(&cfg, &router, None, &shared).await;
+        assert_eq!(
+            gateway.session_message_count(&cron_key),
+            2,
+            "cron session should be cleared on every run"
+        );
+    }
+
     #[derive(Debug)]
     struct FailOnSecondCallProvider {
         model: ModelInfo,
@@ -2093,9 +2132,8 @@ match = ["signal:alice-uuid"]
 
         // The scheduler fires every second (non-blocking via tokio::spawn), but
         // the per-session turn lock ensures only one turn runs at a time.
-        // With a 2s provider and 4s runtime, we expect ~2 completed turns (4 messages).
-        // Concurrent fires on the same session are skipped, which is correct —
-        // without this, interleaved messages corrupt the session history.
+        // Cron sessions are cleared on each run, so the final session contains
+        // only the last completed turn's messages (2 messages: user + assistant).
         let msg_count = gateway.session_message_count(cron_session.unwrap());
         assert!(
             msg_count >= 2,
