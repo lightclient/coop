@@ -47,6 +47,8 @@ pub trait Memory: Send + Sync {
 
     async fn summarize_session(&self, session_key: &SessionKey) -> Result<SessionSummary>;
 
+    async fn recent_session_summaries(&self, limit: usize) -> Result<Vec<SessionSummary>>;
+
     async fn history(&self, observation_id: i64) -> Result<Vec<ObservationHistoryEntry>>;
 
     async fn run_maintenance(

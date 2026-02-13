@@ -228,6 +228,8 @@ pub(crate) struct MemoryConfig {
     #[serde(default)]
     pub prompt_index: MemoryPromptIndexConfig,
     #[serde(default)]
+    pub auto_capture: MemoryAutoCaptureConfig,
+    #[serde(default)]
     pub retention: MemoryRetentionConfig,
 }
 
@@ -237,6 +239,7 @@ impl Default for MemoryConfig {
             db_path: default_memory_db_path(),
             embedding: None,
             prompt_index: MemoryPromptIndexConfig::default(),
+            auto_capture: MemoryAutoCaptureConfig::default(),
             retention: MemoryRetentionConfig::default(),
         }
     }
@@ -250,6 +253,8 @@ pub(crate) struct MemoryPromptIndexConfig {
     pub limit: usize,
     #[serde(default = "default_prompt_index_max_tokens")]
     pub max_tokens: usize,
+    #[serde(default = "default_prompt_index_recent_days")]
+    pub recent_days: u32,
 }
 
 impl Default for MemoryPromptIndexConfig {
@@ -258,6 +263,24 @@ impl Default for MemoryPromptIndexConfig {
             enabled: default_prompt_index_enabled(),
             limit: default_prompt_index_limit(),
             max_tokens: default_prompt_index_max_tokens(),
+            recent_days: default_prompt_index_recent_days(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct MemoryAutoCaptureConfig {
+    #[serde(default = "default_memory_auto_capture_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_memory_auto_capture_min_turn_messages")]
+    pub min_turn_messages: usize,
+}
+
+impl Default for MemoryAutoCaptureConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_memory_auto_capture_enabled(),
+            min_turn_messages: default_memory_auto_capture_min_turn_messages(),
         }
     }
 }
@@ -373,11 +396,23 @@ const fn default_prompt_index_enabled() -> bool {
 }
 
 const fn default_prompt_index_limit() -> usize {
-    12
+    30
 }
 
 const fn default_prompt_index_max_tokens() -> usize {
-    1_200
+    3_000
+}
+
+const fn default_prompt_index_recent_days() -> u32 {
+    3
+}
+
+const fn default_memory_auto_capture_enabled() -> bool {
+    true
+}
+
+const fn default_memory_auto_capture_min_turn_messages() -> usize {
+    4
 }
 
 const fn default_memory_retention_enabled() -> bool {
@@ -493,8 +528,11 @@ model = "anthropic/claude-sonnet-4-20250514"
         assert!(config.channels.signal.is_none());
         assert_eq!(config.memory.db_path, "./db/memory.db");
         assert!(config.memory.prompt_index.enabled);
-        assert_eq!(config.memory.prompt_index.limit, 12);
-        assert_eq!(config.memory.prompt_index.max_tokens, 1_200);
+        assert_eq!(config.memory.prompt_index.limit, 30);
+        assert_eq!(config.memory.prompt_index.max_tokens, 3_000);
+        assert_eq!(config.memory.prompt_index.recent_days, 3);
+        assert!(config.memory.auto_capture.enabled);
+        assert_eq!(config.memory.auto_capture.min_turn_messages, 4);
         assert!(config.memory.retention.enabled);
         assert_eq!(config.memory.retention.archive_after_days, 30);
         assert_eq!(config.memory.retention.delete_archive_after_days, 365);
@@ -540,8 +578,11 @@ name = "anthropic"
         assert_eq!(config.provider.name, "anthropic");
         assert_eq!(config.memory.db_path, "./db/memory.db");
         assert!(config.memory.prompt_index.enabled);
-        assert_eq!(config.memory.prompt_index.limit, 12);
-        assert_eq!(config.memory.prompt_index.max_tokens, 1_200);
+        assert_eq!(config.memory.prompt_index.limit, 30);
+        assert_eq!(config.memory.prompt_index.max_tokens, 3_000);
+        assert_eq!(config.memory.prompt_index.recent_days, 3);
+        assert!(config.memory.auto_capture.enabled);
+        assert_eq!(config.memory.auto_capture.min_turn_messages, 4);
         assert!(config.memory.retention.enabled);
         assert_eq!(config.memory.retention.archive_after_days, 30);
     }
@@ -637,6 +678,11 @@ db_path = "./state/memory.db"
 enabled = false
 limit = 5
 max_tokens = 300
+recent_days = 7
+
+[memory.auto_capture]
+enabled = false
+min_turn_messages = 2
 
 [memory.retention]
 enabled = true
@@ -656,6 +702,9 @@ dimensions = 1024
         assert!(!config.memory.prompt_index.enabled);
         assert_eq!(config.memory.prompt_index.limit, 5);
         assert_eq!(config.memory.prompt_index.max_tokens, 300);
+        assert_eq!(config.memory.prompt_index.recent_days, 7);
+        assert!(!config.memory.auto_capture.enabled);
+        assert_eq!(config.memory.auto_capture.min_turn_messages, 2);
         assert!(config.memory.retention.enabled);
         assert_eq!(config.memory.retention.archive_after_days, 10);
         assert_eq!(config.memory.retention.delete_archive_after_days, 20);
