@@ -2,6 +2,7 @@ use anyhow::Result;
 use chrono::Utc;
 use coop_core::{InboundKind, InboundMessage, Message, OutboundMessage, SessionKey, SessionKind};
 use cron::Schedule;
+use std::collections::HashMap;
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -101,6 +102,12 @@ pub(crate) async fn run_scheduler_with_notify(
 
     let mut last_cron: Vec<CronConfig> = Vec::new();
     let mut parsed: Vec<(CronConfig, Schedule)> = Vec::new();
+    // Tracks the last *scheduled* fire time per cron. Used as the
+    // starting point for the next `schedule.after()` query so we always
+    // advance past already-fired ticks.  Without this, `upcoming(Utc)`
+    // (which queries from wall-clock time) can return the same tick
+    // twice when the sleep timer wakes slightly early.
+    let mut last_fired: HashMap<String, chrono::DateTime<Utc>> = HashMap::new();
 
     loop {
         // Re-read cron entries from shared config on each iteration so
@@ -135,17 +142,24 @@ pub(crate) async fn run_scheduler_with_notify(
 
         let now = Utc::now();
 
-        // Next cron fire time.
-        let next_cron = parsed
+        // Collect all crons with their next fire times. Use the last
+        // scheduled fire time (if any) as the starting point so the
+        // cron library's +1s offset always advances past the last tick.
+        // On first iteration, fall back to wall-clock time.
+        let all_upcoming: Vec<_> = parsed
             .iter()
-            .filter_map(|(cfg, sched)| sched.upcoming(Utc).next().map(|t| (cfg, t)))
-            .min_by_key(|(_, t)| *t);
+            .filter_map(|(cfg, sched)| {
+                let after = last_fired.get(&cfg.name).copied().unwrap_or_else(Utc::now);
+                sched.after(&after).next().map(|t| (cfg, t))
+            })
+            .collect();
+
+        let next_cron_time = all_upcoming.iter().map(|(_, t)| *t).min();
 
         // Next reminder fire time.
         let next_reminder = reminders.as_ref().and_then(ReminderStore::next_fire_time);
 
         // Compute the earlier of cron vs reminder.
-        let next_cron_time = next_cron.as_ref().map(|(_, t)| *t);
         let next_fire = match (next_cron_time, next_reminder) {
             (Some(c), Some(r)) => Some(c.min(r)),
             (Some(c), None) => Some(c),
@@ -166,7 +180,7 @@ pub(crate) async fn run_scheduler_with_notify(
         let delay = (fire_time - now).to_std().unwrap_or(Duration::ZERO);
 
         // Only log cron waits (reminders are handled at loop top).
-        if let Some((cfg, _)) = &next_cron {
+        if let Some((cfg, _)) = all_upcoming.first() {
             debug!(
                 cron.name = %cfg.name,
                 fire_time = %fire_time,
@@ -177,17 +191,25 @@ pub(crate) async fn run_scheduler_with_notify(
 
         tokio::select! {
             () = tokio::time::sleep(delay) => {
-                // Check if a cron is due at this fire_time.
-                if let Some((cfg, _)) = &next_cron
-                    && next_cron_time == Some(fire_time)
-                {
-                    let cfg = (*cfg).clone();
-                    let router = Arc::clone(&router);
-                    let deliver_tx = deliver_tx.clone();
-                    let sched_config = Arc::clone(&config);
-                    tokio::spawn(async move {
-                        fire_cron(&cfg, &router, deliver_tx.as_ref(), &sched_config).await;
-                    });
+                // Fire ALL crons due at this time.
+                if next_cron_time == Some(fire_time) {
+                    for (cfg, cron_time) in &all_upcoming {
+                        if *cron_time != fire_time {
+                            continue;
+                        }
+
+                        // Record the scheduled fire time so the next
+                        // after() query advances past this tick.
+                        last_fired.insert(cfg.name.clone(), fire_time);
+
+                        let cfg = (*cfg).clone();
+                        let router = Arc::clone(&router);
+                        let deliver_tx = deliver_tx.clone();
+                        let sched_config = Arc::clone(&config);
+                        tokio::spawn(async move {
+                            fire_cron(&cfg, &router, deliver_tx.as_ref(), &sched_config).await;
+                        });
+                    }
                 }
                 // Reminders are checked at the top of the next iteration
                 // via take_due(), so we just loop.
@@ -330,9 +352,15 @@ async fn fire_cron(
 
         let content = if delivery_targets.is_empty() {
             cfg.message.clone()
-        } else {
+        } else if cfg.message.contains("HEARTBEAT.md") {
             format!(
                 "[Your response will be delivered to the user via {}. Reply HEARTBEAT_OK if nothing needs attention. Your response is delivered automatically.]\n\n{}",
+                prompt_channel.as_deref().unwrap_or("messaging"),
+                cfg.message
+            )
+        } else {
+            format!(
+                "[Your response will be delivered to the user via {}. Your response is delivered automatically.]\n\n{}",
                 prompt_channel.as_deref().unwrap_or("messaging"),
                 cfg.message
             )
@@ -362,30 +390,10 @@ async fn fire_cron(
                     "cron completed"
                 );
 
-                if delivery_targets.is_empty() {
-                    return;
-                }
-
-                match strip_heartbeat_token(&response) {
-                    HeartbeatResult::Suppress => {
-                        debug!(cron.name = %cfg.name, "heartbeat suppressed: HEARTBEAT_OK token detected");
-                    }
-                    HeartbeatResult::Deliver(content) => {
-                        for (channel, target) in &delivery_targets {
-                            announce_to_session(
-                                &cfg.name,
-                                &cfg.message,
-                                &content,
-                                channel,
-                                target,
-                                &agent_id,
-                                router,
-                                deliver_tx,
-                            )
-                            .await;
-                        }
-                    }
-                }
+                deliver_cron_response(
+                    cfg, response, &delivery_targets, &agent_id, router, deliver_tx,
+                )
+                .await;
             }
             Err(e) => {
                 error!(error = %e, "cron dispatch failed");
@@ -394,6 +402,53 @@ async fn fire_cron(
     }
     .instrument(span)
     .await;
+}
+
+async fn deliver_cron_response(
+    cfg: &CronConfig,
+    response: String,
+    delivery_targets: &[(String, String)],
+    agent_id: &str,
+    router: &MessageRouter,
+    deliver_tx: Option<&DeliverySender>,
+) {
+    if delivery_targets.is_empty() {
+        return;
+    }
+
+    // Empty response means the turn was skipped (session lock held)
+    // or the LLM returned nothing.
+    if response.trim().is_empty() {
+        debug!(cron.name = %cfg.name, "cron produced empty response, skipping delivery");
+        return;
+    }
+
+    // Only heartbeat crons support HEARTBEAT_OK suppression.
+    let content_to_deliver = if cfg.message.contains("HEARTBEAT.md") {
+        match strip_heartbeat_token(&response) {
+            HeartbeatResult::Suppress => {
+                debug!(cron.name = %cfg.name, "heartbeat suppressed: HEARTBEAT_OK token detected");
+                return;
+            }
+            HeartbeatResult::Deliver(cleaned) => cleaned,
+        }
+    } else {
+        response
+    };
+
+    for (channel, target) in delivery_targets {
+        announce_to_session(
+            &cfg.name,
+            &cfg.message,
+            &content_to_deliver,
+            channel,
+            target,
+            agent_id,
+            router,
+            deliver_tx,
+        )
+        .await;
+    }
 }
 
 async fn fire_reminder(
@@ -1315,7 +1370,7 @@ mod tests {
         let cfg = CronConfig {
             name: "humidifier-check".to_owned(),
             cron: "0 7 * * *".to_owned(),
-            message: "Read WEATHER.md".to_owned(),
+            message: "Read HEARTBEAT.md".to_owned(),
             user: None,
             deliver: Some(CronDelivery {
                 channel: "signal".to_owned(),
@@ -1937,6 +1992,224 @@ match = ["signal:alice-uuid"]
 
         let targets = resolve_cron_delivery_targets(&config, &cfg);
         assert!(targets.is_empty());
+    }
+
+    // -- Bug fix tests: debounce, empty response, heartbeat scope --
+
+    #[derive(Debug)]
+    struct CountingProvider {
+        model: ModelInfo,
+        response: String,
+        call_count: std::sync::atomic::AtomicU32,
+    }
+
+    impl CountingProvider {
+        fn new(response: &str) -> Self {
+            Self {
+                model: ModelInfo {
+                    name: "counting".to_owned(),
+                    context_limit: 128_000,
+                },
+                response: response.to_owned(),
+                call_count: std::sync::atomic::AtomicU32::new(0),
+            }
+        }
+
+        fn count(&self) -> u32 {
+            self.call_count.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl Provider for CountingProvider {
+        fn name(&self) -> &'static str {
+            "counting"
+        }
+
+        fn model_info(&self) -> ModelInfo {
+            self.model.clone()
+        }
+
+        async fn complete(
+            &self,
+            _system: &[String],
+            _messages: &[Message],
+            _tools: &[ToolDef],
+        ) -> Result<(Message, Usage)> {
+            self.call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok((
+                Message::assistant().with_text(&self.response),
+                Usage {
+                    input_tokens: Some(100),
+                    output_tokens: Some(50),
+                    ..Default::default()
+                },
+            ))
+        }
+
+        async fn stream(
+            &self,
+            _system: &[String],
+            _messages: &[Message],
+            _tools: &[ToolDef],
+        ) -> Result<coop_core::traits::ProviderStream> {
+            anyhow::bail!("streaming not supported");
+        }
+    }
+
+    #[tokio::test]
+    async fn scheduler_does_not_double_fire() {
+        let counting = Arc::new(CountingProvider::new("response"));
+        let provider: Arc<dyn Provider> = Arc::clone(&counting) as _;
+        let cron = vec![CronConfig {
+            name: "rapid".to_owned(),
+            cron: "* * * * * * *".to_owned(), // every second
+            message: "tick".to_owned(),
+            user: None,
+            deliver: None,
+        }];
+        let (shared, router, _gateway) =
+            make_shared_config_and_router_with_provider(None, &cron, provider);
+        let router = Arc::new(router);
+        let cancel = CancellationToken::new();
+
+        let sched_cancel = cancel.clone();
+        let handle = tokio::spawn(async move {
+            run_scheduler(shared, router, None, sched_cancel).await;
+        });
+
+        // Run for 3 seconds. The scheduler tracks last-fired scheduled
+        // times and queries after(last_fire), so each tick fires exactly
+        // once even if the sleep timer wakes slightly early.
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        cancel.cancel();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+
+        let count = counting.count();
+        // Per-second cron over 3 seconds: expect 2-4 fires (timing).
+        // A double-fire bug would produce ~6-8.
+        assert!(
+            (2..=5).contains(&count),
+            "expected 2-5 fires for per-second cron over 3 seconds, got {count}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fire_cron_empty_response_does_not_suppress() {
+        let (shared, router, _gateway) = make_shared_config_and_router(None, &[], "");
+        let (tx, mut rx) = mpsc::channel::<OutboundMessage>(8);
+        let deliver_tx = DeliverySender::new(tx);
+
+        let cfg = CronConfig {
+            name: "heartbeat".to_owned(),
+            cron: "*/30 * * * *".to_owned(),
+            message: "check HEARTBEAT.md".to_owned(),
+            user: None,
+            deliver: Some(CronDelivery {
+                channel: "signal".to_owned(),
+                target: "alice-uuid".to_owned(),
+            }),
+        };
+
+        fire_cron(&cfg, &router, Some(&deliver_tx), &shared).await;
+
+        // Empty response should skip delivery via the empty-response guard,
+        // not via HEARTBEAT_OK suppression.
+        assert!(
+            rx.try_recv().is_err(),
+            "empty response should not trigger delivery"
+        );
+    }
+
+    #[tokio::test]
+    async fn fire_cron_heartbeat_ok_still_suppresses() {
+        let (shared, router, _gateway) = make_shared_config_and_router(None, &[], "HEARTBEAT_OK");
+        let (tx, mut rx) = mpsc::channel::<OutboundMessage>(8);
+        let deliver_tx = DeliverySender::new(tx);
+
+        let cfg = CronConfig {
+            name: "heartbeat".to_owned(),
+            cron: "*/30 * * * *".to_owned(),
+            message: "check HEARTBEAT.md".to_owned(),
+            user: None,
+            deliver: Some(CronDelivery {
+                channel: "signal".to_owned(),
+                target: "alice-uuid".to_owned(),
+            }),
+        };
+
+        fire_cron(&cfg, &router, Some(&deliver_tx), &shared).await;
+
+        assert!(
+            rx.try_recv().is_err(),
+            "HEARTBEAT_OK should suppress delivery for heartbeat crons"
+        );
+    }
+
+    #[tokio::test]
+    async fn fire_cron_non_heartbeat_always_delivers() {
+        let (shared, router, _gateway) = make_shared_config_and_router(None, &[], "HEARTBEAT_OK");
+        let (tx, mut rx) = mpsc::channel::<OutboundMessage>(8);
+        let deliver_tx = DeliverySender::new(tx);
+
+        let cfg = CronConfig {
+            name: "evening-mood-checkin".to_owned(),
+            cron: "0 20 * * *".to_owned(),
+            message: "Send Alice an 8pm mood check-in".to_owned(),
+            user: None,
+            deliver: Some(CronDelivery {
+                channel: "signal".to_owned(),
+                target: "alice-uuid".to_owned(),
+            }),
+        };
+
+        fire_cron(&cfg, &router, Some(&deliver_tx), &shared).await;
+
+        // Non-heartbeat crons should deliver even if response is HEARTBEAT_OK
+        let msg = rx.try_recv().unwrap();
+        assert_eq!(msg.channel, "signal");
+        assert_eq!(msg.target, "alice-uuid");
+        assert_eq!(
+            msg.content, "HEARTBEAT_OK",
+            "non-heartbeat crons should deliver HEARTBEAT_OK as content"
+        );
+    }
+
+    #[tokio::test]
+    async fn fire_cron_heartbeat_still_suppresses() {
+        let (shared, router, gateway) = make_shared_config_and_router(None, &[], "HEARTBEAT_OK");
+        let (tx, mut rx) = mpsc::channel::<OutboundMessage>(8);
+        let deliver_tx = DeliverySender::new(tx);
+
+        let cfg = CronConfig {
+            name: "heartbeat".to_owned(),
+            cron: "*/30 * * * *".to_owned(),
+            message: "check HEARTBEAT.md".to_owned(),
+            user: None,
+            deliver: Some(CronDelivery {
+                channel: "signal".to_owned(),
+                target: "alice-uuid".to_owned(),
+            }),
+        };
+
+        fire_cron(&cfg, &router, Some(&deliver_tx), &shared).await;
+
+        assert!(
+            rx.try_recv().is_err(),
+            "HEARTBEAT_OK should suppress delivery for heartbeat crons"
+        );
+
+        let dm_key = SessionKey {
+            agent_id: "test".to_owned(),
+            kind: SessionKind::Dm("signal:alice-uuid".to_owned()),
+        };
+        assert_eq!(
+            gateway.session_message_count(&dm_key),
+            0,
+            "suppressed heartbeat should not inject into DM session"
+        );
     }
 
     // -- Helpers --
