@@ -27,6 +27,9 @@ const TOOL_PREFIX: &str = "mcp_";
 /// Max retry attempts for transient errors.
 const MAX_RETRIES: u32 = 3;
 
+/// Anthropic API limit: 5 MB per image (decoded bytes).
+const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+
 /// Parse an Anthropic API error response body into a friendly message.
 ///
 /// Anthropic errors are JSON: `{"type":"error","error":{"type":"rate_limit_error","message":"..."}}`
@@ -57,6 +60,25 @@ fn format_api_error(status: reqwest::StatusCode, raw_body: &str) -> String {
     } else {
         format!("Anthropic API error ({status}): {raw_body}")
     }
+}
+
+/// Estimate the decoded byte count of a base64 string.
+///
+/// Standard base64 encodes 3 bytes into 4 characters. This computes the
+/// decoded size accounting for padding, without actually decoding.
+fn base64_decoded_size(b64: &str) -> usize {
+    let len = b64.len();
+    if len == 0 {
+        return 0;
+    }
+    let padding = b64
+        .as_bytes()
+        .iter()
+        .rev()
+        .take(2)
+        .filter(|&&b| b == b'=')
+        .count();
+    (len / 4) * 3 - padding
 }
 
 /// Direct Anthropic provider with OAuth support and key rotation.
@@ -410,14 +432,27 @@ impl AnthropicProvider {
                         "content": output,
                         "is_error": is_error
                     })),
-                    Content::Image { data, mime_type } => Some(json!({
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": mime_type,
-                            "data": data
+                    Content::Image { data, mime_type } => {
+                        let decoded_size = base64_decoded_size(data);
+                        if decoded_size > MAX_IMAGE_BYTES {
+                            warn!(
+                                decoded_bytes = decoded_size,
+                                max_bytes = MAX_IMAGE_BYTES,
+                                mime = %mime_type,
+                                "image exceeds 5 MB API limit, skipping"
+                            );
+                            None
+                        } else {
+                            Some(json!({
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": mime_type,
+                                    "data": data
+                                }
+                            }))
                         }
-                    })),
+                    }
                     Content::Thinking { .. } => None,
                 })
                 .collect();
@@ -1337,5 +1372,109 @@ mod tests {
         provider.set_model("claude-haiku-3-20250514");
         let body = provider.build_body(&system, &messages, &[], false, false);
         assert_eq!(body["model"], "claude-haiku-3-20250514");
+    }
+
+    // ---- base64_decoded_size ----
+
+    #[test]
+    fn base64_decoded_size_empty() {
+        assert_eq!(base64_decoded_size(""), 0);
+    }
+
+    #[test]
+    fn base64_decoded_size_no_padding() {
+        // "aGVsbG8=" decodes to "hello" (5 bytes), but "aGVsbG8gd29ybGQ=" is "hello world" (11)
+        // 3 bytes -> "AAAA" (4 chars, 0 padding)
+        assert_eq!(base64_decoded_size("AAAA"), 3);
+    }
+
+    #[test]
+    fn base64_decoded_size_one_pad() {
+        // 2 bytes -> "AAA=" (4 chars, 1 pad)
+        assert_eq!(base64_decoded_size("AAA="), 2);
+    }
+
+    #[test]
+    fn base64_decoded_size_two_pad() {
+        // 1 byte -> "AA==" (4 chars, 2 pad)
+        assert_eq!(base64_decoded_size("AA=="), 1);
+    }
+
+    #[test]
+    fn base64_decoded_size_realistic() {
+        // 5 MB of zeros -> base64 length = ceil(5242880/3)*4 = 6_990_508 chars (no padding, 5MB is divisible by 3)
+        // Actually 5242880 / 3 = 1747626.666... so it needs padding.
+        // Let's just verify with a known small example: "hello" = "aGVsbG8="
+        assert_eq!(base64_decoded_size("aGVsbG8="), 5);
+    }
+
+    // ---- format_messages image size validation ----
+
+    #[test]
+    fn format_messages_skips_oversized_image() {
+        // Create a base64 string that decodes to > 5MB.
+        // 5MB + 1 byte = 5242881 bytes. base64 of that is ceil(5242881/3)*4 chars.
+        // Use a string of 'A' repeated to the right length.
+        // 5242881 bytes: ceil(5242881/3) = 1747627, * 4 = 6_990_508 chars, with 2 pad.
+        // Actually for exact: 5242881 % 3 = 0 => 5242881/3*4 = 6_990_508, no padding.
+        // Wait, 5242881 / 3 = 1747627.0 => exact, so 6_990_508 chars, no padding.
+        let oversized_b64 = "A".repeat(6_990_508);
+
+        let messages = vec![
+            Message::user()
+                .with_text("Look at this")
+                .with_image(oversized_b64, "image/png"),
+        ];
+
+        let formatted = AnthropicProvider::format_messages(&messages, false, None);
+
+        assert_eq!(formatted.len(), 1);
+        let content = formatted[0]["content"].as_array().unwrap();
+        // Only the text block should remain; the oversized image is skipped.
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "text");
+    }
+
+    #[test]
+    fn format_messages_keeps_image_at_exact_limit() {
+        // Exactly 5MB = 5242880 bytes. 5242880 / 3 = 1747626.666...
+        // So we need padding. 1747626 * 3 = 5242878, remainder 2.
+        // base64: 1747627 * 4 = 6_990_508 chars, with 1 pad char.
+        // Actually let's use a size that divides evenly: 5242878 bytes (just under 5MB).
+        // 5242878 / 3 = 1747626.0, * 4 = 6_990_504, no padding. decoded = 5242878 < 5242880.
+        let at_limit_b64 = "A".repeat(6_990_504);
+
+        let messages = vec![
+            Message::user()
+                .with_text("Look at this")
+                .with_image(at_limit_b64, "image/png"),
+        ];
+
+        let formatted = AnthropicProvider::format_messages(&messages, false, None);
+
+        let content = formatted[0]["content"].as_array().unwrap();
+        // Image is within limit, should be present.
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[1]["type"], "image");
+    }
+
+    #[test]
+    fn format_messages_drops_message_if_only_content_was_oversized_image() {
+        // Message with only an oversized image — after filtering, content is empty.
+        // Empty-content messages should be dropped (same as thinking-only messages).
+        let oversized_b64 = "A".repeat(6_990_508);
+
+        let messages = vec![
+            Message::user().with_text("hello"),
+            Message::user().with_image(oversized_b64, "image/png"),
+            Message::user().with_text("world"),
+        ];
+
+        let formatted = AnthropicProvider::format_messages(&messages, false, None);
+
+        // The middle message (image-only, oversized) should be dropped entirely.
+        assert_eq!(formatted.len(), 2);
+        assert_eq!(formatted[0]["content"][0]["text"], "hello");
+        assert_eq!(formatted[1]["content"][0]["text"], "world");
     }
 }
