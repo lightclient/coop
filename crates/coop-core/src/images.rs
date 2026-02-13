@@ -62,6 +62,12 @@ pub fn load_image(path: &str) -> Result<(String, String)> {
 
     let meta = std::fs::metadata(p)?;
     if meta.len() > MAX_IMAGE_SIZE {
+        tracing::warn!(
+            path = %path,
+            size_bytes = meta.len(),
+            max_bytes = MAX_IMAGE_SIZE,
+            "image exceeds 5 MB API limit, skipping injection"
+        );
         bail!(
             "image file exceeds 5 MB limit ({} bytes): {path}",
             meta.len()
