@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use anyhow::Result;
 use async_trait::async_trait;
 use coop_core::{Tool, ToolContext, ToolDef, ToolExecutor, ToolOutput};
@@ -403,6 +405,100 @@ impl Tool for SignalSendTool {
     }
 }
 
+#[derive(Debug)]
+pub struct SignalSendImageTool {
+    action_tx: mpsc::Sender<SignalAction>,
+}
+
+impl SignalSendImageTool {
+    pub fn new(action_tx: mpsc::Sender<SignalAction>) -> Self {
+        Self { action_tx }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct SendImageArgs {
+    path: String,
+    #[serde(default)]
+    caption: Option<String>,
+}
+
+#[async_trait]
+impl Tool for SignalSendImageTool {
+    fn definition(&self) -> ToolDef {
+        ToolDef::new(
+            "signal_send_image",
+            "Send an image file as a Signal attachment to the current conversation. The file must exist on disk and be a valid image (JPEG, PNG, GIF, or WEBP).",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Absolute path to the image file to send"
+                    },
+                    "caption": {
+                        "type": "string",
+                        "description": "Optional text caption to include with the image"
+                    }
+                },
+                "required": ["path"]
+            }),
+        )
+    }
+
+    async fn execute(&self, arguments: serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
+        let span = info_span!("signal_tool_send_image");
+        async {
+            let args: SendImageArgs = serde_json::from_value(arguments)?;
+            let file_path = PathBuf::from(&args.path);
+
+            if !file_path.exists() {
+                return Ok(ToolOutput::error(format!(
+                    "file not found: {}",
+                    file_path.display()
+                )));
+            }
+
+            let file_bytes = std::fs::read(&file_path)?;
+            let Some(mime_type) = coop_core::validate_image_magic(&file_bytes) else {
+                return Ok(ToolOutput::error(format!(
+                    "file is not a recognized image format: {}",
+                    file_path.display()
+                )));
+            };
+
+            let target = extract_signal_target_from_session(&ctx.session_id).ok_or_else(|| {
+                anyhow::anyhow!("signal_send_image is only available in Signal chat sessions")
+            })?;
+
+            debug!(
+                tool.name = "signal_send_image",
+                signal.action = "send_attachment",
+                signal.attachment_path = %args.path,
+                signal.attachment_mime = %mime_type,
+                signal.caption = ?args.caption,
+                "signal tool send_image queued"
+            );
+
+            let action = SignalAction::SendAttachment {
+                target,
+                path: file_path,
+                mime_type,
+                caption: args.caption,
+            };
+
+            self.action_tx
+                .send(action)
+                .await
+                .map_err(|_send_err| anyhow::anyhow!("signal action channel closed"))?;
+
+            Ok(ToolOutput::success("image sent"))
+        }
+        .instrument(span)
+        .await
+    }
+}
+
 #[allow(missing_debug_implementations)]
 pub struct SignalToolExecutor {
     tools: Vec<Box<dyn Tool>>,
@@ -414,7 +510,8 @@ impl SignalToolExecutor {
             tools: vec![
                 Box::new(SignalReactTool::new(action_tx.clone())),
                 Box::new(SignalReplyTool::new(action_tx.clone())),
-                Box::new(SignalSendTool::new(action_tx)),
+                Box::new(SignalSendTool::new(action_tx.clone())),
+                Box::new(SignalSendImageTool::new(action_tx)),
                 Box::new(SignalHistoryTool::new(query_tx)),
             ],
         }
@@ -637,15 +734,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn executor_has_react_reply_and_history() {
+    async fn executor_has_all_signal_tools() {
         let (action_tx, _rx) = mpsc::channel(1);
         let (query_tx, _qrx) = mpsc::channel(1);
         let executor = SignalToolExecutor::new(action_tx, query_tx);
         let names: Vec<_> = executor.tools().iter().map(|t| t.name.clone()).collect();
-        assert_eq!(names.len(), 4);
+        assert_eq!(names.len(), 5);
         assert!(names.contains(&"signal_react".to_owned()));
         assert!(names.contains(&"signal_reply".to_owned()));
         assert!(names.contains(&"signal_send".to_owned()));
+        assert!(names.contains(&"signal_send_image".to_owned()));
         assert!(names.contains(&"signal_history".to_owned()));
     }
 
@@ -659,6 +757,96 @@ mod tests {
             extract_signal_target_from_session("coop:group:signal:group:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff").is_some()
         );
         assert_eq!(extract_signal_target_from_session("coop:main"), None);
+    }
+
+    fn signal_session_context() -> ToolContext {
+        ToolContext {
+            session_id: "coop:dm:signal:alice-uuid".to_owned(),
+            trust: TrustLevel::Full,
+            workspace: PathBuf::from("."),
+            user_name: None,
+        }
+    }
+
+    fn write_png_tempfile() -> tempfile::NamedTempFile {
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::with_suffix(".png").unwrap();
+        let mut data = vec![0x89u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        data.extend_from_slice(&[0x00; 20]);
+        f.write_all(&data).unwrap();
+        f.flush().unwrap();
+        f
+    }
+
+    #[tokio::test]
+    async fn send_image_tool_dispatches_attachment_action() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let tool = SignalSendImageTool::new(tx);
+        let f = write_png_tempfile();
+
+        let args = serde_json::json!({
+            "path": f.path().to_str().unwrap(),
+            "caption": "a meme"
+        });
+
+        let result = tool.execute(args, &signal_session_context()).await.unwrap();
+        assert_eq!(result.content, "image sent");
+
+        let action = rx.recv().await.unwrap();
+        match action {
+            SignalAction::SendAttachment {
+                target,
+                path,
+                mime_type,
+                caption,
+            } => {
+                assert_eq!(target, SignalTarget::Direct("alice-uuid".to_owned()));
+                assert_eq!(path, f.path());
+                assert_eq!(mime_type, "image/png");
+                assert_eq!(caption.as_deref(), Some("a meme"));
+            }
+            _ => panic!("expected SendAttachment action"),
+        }
+    }
+
+    #[tokio::test]
+    async fn send_image_tool_rejects_non_image() {
+        use std::io::Write;
+        let (tx, _rx) = mpsc::channel(1);
+        let tool = SignalSendImageTool::new(tx);
+
+        let mut f = tempfile::NamedTempFile::with_suffix(".jpg").unwrap();
+        f.write_all(b"<!DOCTYPE html><html></html>").unwrap();
+        f.flush().unwrap();
+
+        let args = serde_json::json!({ "path": f.path().to_str().unwrap() });
+        let result = tool.execute(args, &signal_session_context()).await.unwrap();
+        assert!(result.content.contains("not a recognized image format"));
+    }
+
+    #[tokio::test]
+    async fn send_image_tool_rejects_missing_file() {
+        let (tx, _rx) = mpsc::channel(1);
+        let tool = SignalSendImageTool::new(tx);
+
+        let args = serde_json::json!({ "path": "/nonexistent/meme.png" });
+        let result = tool.execute(args, &signal_session_context()).await.unwrap();
+        assert!(result.content.contains("file not found"));
+    }
+
+    #[tokio::test]
+    async fn send_image_tool_rejects_non_signal_session() {
+        let (tx, _rx) = mpsc::channel(1);
+        let tool = SignalSendImageTool::new(tx);
+        let f = write_png_tempfile();
+
+        let args = serde_json::json!({ "path": f.path().to_str().unwrap() });
+        let error = tool.execute(args, &context()).await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("only available in Signal chat sessions")
+        );
     }
 
     #[tokio::test]

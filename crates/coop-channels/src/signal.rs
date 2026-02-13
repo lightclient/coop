@@ -22,6 +22,7 @@ use inbound::{format_attachment_metadata, inbound_from_content};
 use presage::libsignal_service::content::{ContentBody, DataMessage, GroupContextV2};
 use presage::libsignal_service::prelude::Uuid;
 use presage::libsignal_service::protocol::ServiceId;
+use presage::libsignal_service::sender::AttachmentSpec;
 use presage::manager::Registered;
 use presage::model::identity::OnNewIdentity;
 use presage::model::messages::Received;
@@ -42,6 +43,12 @@ type HealthState = Arc<Mutex<ChannelHealth>>;
 #[derive(Debug, Clone)]
 pub enum SignalAction {
     SendText(OutboundMessage),
+    SendAttachment {
+        target: SignalTarget,
+        path: PathBuf,
+        mime_type: String,
+        caption: Option<String>,
+    },
     React {
         target: SignalTarget,
         emoji: String,
@@ -529,6 +536,62 @@ async fn send_signal_action(manager: &mut SignalManager, action: SignalAction) -
             );
             let message = DataMessage {
                 body: Some(outbound.content),
+                group_v2: group_context_for_target(&target),
+                ..Default::default()
+            };
+            send_action_with_trace(manager, span, target, message, timestamp).await
+        }
+        SignalAction::SendAttachment {
+            target,
+            path,
+            mime_type,
+            caption,
+        } => {
+            let target_kind = signal_target_kind(&target);
+            let target_value = signal_target_value(&target);
+            let timestamp = now_epoch_millis();
+            let path_display = path.display().to_string();
+            let mime_for_trace = mime_type.clone();
+            let span = info_span!(
+                "signal_action_send",
+                signal.action = "send_attachment",
+                signal.target_kind = target_kind,
+                signal.target = %target_value,
+                signal.timestamp = timestamp,
+                signal.attachment_path = %path_display,
+                signal.attachment_mime = %mime_for_trace,
+            );
+
+            let file_data = std::fs::read(&path)
+                .with_context(|| format!("failed to read attachment: {}", path.display()))?;
+            let file_name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("attachment")
+                .to_owned();
+
+            let spec = AttachmentSpec {
+                content_type: mime_type,
+                length: file_data.len(),
+                file_name: Some(file_name),
+                preview: None,
+                voice_note: None,
+                borderless: None,
+                width: None,
+                height: None,
+                caption: caption.clone(),
+                blur_hash: None,
+            };
+
+            let attachment = manager
+                .upload_attachment(spec, file_data)
+                .await
+                .context("failed to upload signal attachment")?
+                .map_err(|e| anyhow::anyhow!("attachment upload error: {e:?}"))?;
+
+            let message = DataMessage {
+                body: caption,
+                attachments: vec![attachment],
                 group_v2: group_context_for_target(&target),
                 ..Default::default()
             };
