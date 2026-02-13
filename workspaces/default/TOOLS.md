@@ -151,6 +151,8 @@ Skills are reusable instruction sets discovered from `SKILL.md` files. They appe
 - **Workspace-level** — `skills/{name}/SKILL.md` (available to all users)
 - **Per-user** — `users/{user}/skills/{name}/SKILL.md` (only for that user; overrides a workspace skill with the same name)
 
+Skills are rescanned on every turn, so new skills added to the workspace while coop is running are picked up automatically without a restart.
+
 ## Diagnostics
 
 When asked why you did something, or when something went wrong, you have direct access to your own internals via bash and read_file. Check these before guessing:

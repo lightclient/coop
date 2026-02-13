@@ -25,7 +25,7 @@ pub(crate) struct Gateway {
     config: SharedConfig,
     workspace: PathBuf,
     workspace_index: Mutex<WorkspaceIndex>,
-    skills: Vec<SkillEntry>,
+    skills: Mutex<Vec<SkillEntry>>,
     provider: Arc<dyn Provider>,
     executor: Arc<dyn ToolExecutor>,
     memory: Option<Arc<dyn Memory>>,
@@ -158,7 +158,7 @@ impl Gateway {
             config,
             workspace,
             workspace_index: Mutex::new(workspace_index),
-            skills,
+            skills: Mutex::new(skills),
             provider,
             executor,
             memory,
@@ -201,12 +201,41 @@ impl Gateway {
                 debug!("workspace index refreshed");
             }
 
+            let current_skills = scan_skills(&self.workspace);
+            {
+                let mut cached = self.skills.lock().expect("skills mutex poisoned");
+                if cached.len() != current_skills.len()
+                    || cached
+                        .iter()
+                        .zip(&current_skills)
+                        .any(|(a, b)| a.name != b.name || a.path != b.path)
+                {
+                    let added: Vec<&str> = current_skills
+                        .iter()
+                        .filter(|s| !cached.iter().any(|c| c.name == s.name))
+                        .map(|s| s.name.as_str())
+                        .collect();
+                    let removed: Vec<&str> = cached
+                        .iter()
+                        .filter(|c| !current_skills.iter().any(|s| s.name == c.name))
+                        .map(|c| c.name.as_str())
+                        .collect();
+                    info!(
+                        added = ?added,
+                        removed = ?removed,
+                        total = current_skills.len(),
+                        "workspace skills changed"
+                    );
+                    cached.clone_from(&current_skills);
+                }
+            }
+
             let mut builder = PromptBuilder::new(self.workspace.clone(), cfg.agent.id.clone())
                 .trust(trust)
                 .model(&cfg.agent.model)
                 .file_configs(shared_configs)
                 .user_file_configs(user_configs)
-                .skills(self.skills.clone());
+                .skills(current_skills);
             if let Some(name) = user_name {
                 builder = builder.user(name);
             }
@@ -2709,5 +2738,82 @@ model = "test-model"
             gateway.get_compaction(&session_key).is_none(),
             "no compaction state should exist"
         );
+    }
+
+    #[tokio::test]
+    async fn skills_added_after_startup_appear_in_next_turn() {
+        let workspace = test_workspace();
+        let provider: Arc<dyn Provider> = Arc::new(FakeProvider::new("hello"));
+        let executor = Arc::new(DefaultExecutor::new());
+        let gateway = Arc::new(
+            Gateway::new(
+                shared_config(test_config()),
+                workspace.path().to_path_buf(),
+                provider,
+                executor,
+                None,
+                None,
+            )
+            .unwrap(),
+        );
+
+        // No skills at startup.
+        assert!(
+            gateway
+                .skills
+                .lock()
+                .expect("skills mutex poisoned")
+                .is_empty(),
+            "should start with no skills"
+        );
+
+        // Run a turn — prompt should have no skills section.
+        let session_key = gateway.default_session_key();
+        let (event_tx, mut event_rx) = mpsc::channel(32);
+        gateway
+            .run_turn_with_trust(
+                &session_key,
+                "first",
+                TrustLevel::Full,
+                Some("alice"),
+                None,
+                event_tx,
+            )
+            .await
+            .unwrap();
+        while event_rx.try_recv().is_ok() {}
+
+        // Add a skill to the workspace while the gateway is running.
+        let skill_dir = workspace.path().join("skills/test-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: test-skill\ndescription: A test skill\n---\nSkill content here.\n",
+        )
+        .unwrap();
+
+        // Clear the session so we can run a fresh turn.
+        gateway.clear_session(&session_key);
+
+        // Run another turn — the new skill should be picked up.
+        let (tx, mut rx) = mpsc::channel(32);
+        gateway
+            .run_turn_with_trust(
+                &session_key,
+                "second",
+                TrustLevel::Full,
+                Some("alice"),
+                None,
+                tx,
+            )
+            .await
+            .unwrap();
+        while rx.try_recv().is_ok() {}
+
+        // The cached skills should now include the new skill.
+        let cached = gateway.skills.lock().expect("skills mutex poisoned");
+        assert_eq!(cached.len(), 1, "should have picked up the new skill");
+        assert_eq!(cached[0].name, "test-skill");
+        drop(cached);
     }
 }
