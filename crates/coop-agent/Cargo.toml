@@ -10,9 +10,11 @@ workspace = true
 [dependencies]
 anyhow = { workspace = true }
 async-trait = { workspace = true }
+base64 = "0.21"
 bytes = "1.11.0"
 coop-core = { path = "../coop-core" }
 futures = { workspace = true }
+image = { version = "0.25.9", default-features = false, features = ["png", "jpeg"] }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

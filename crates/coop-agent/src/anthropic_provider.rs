@@ -5,10 +5,14 @@
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use futures::StreamExt;
+use image::ImageFormat;
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::io::Cursor;
 use std::sync::RwLock;
 use tracing::{Instrument, debug, info, info_span, warn};
 
@@ -29,6 +33,16 @@ const MAX_RETRIES: u32 = 3;
 
 /// Anthropic API limit: 5 MB per image (decoded bytes).
 const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+
+/// Anthropic scales images with long edge > 1568px server-side, so we cap
+/// at this before iterative shrinking — usually enough to get under 5 MB.
+const ANTHROPIC_MAX_LONG_EDGE: u32 = 1568;
+
+/// Each iterative shrink pass reduces dimensions to this fraction.
+const SHRINK_FACTOR: f64 = 0.75;
+
+/// JPEG quality for lossy re-encoding.
+const JPEG_QUALITY: u8 = 85;
 
 /// Parse an Anthropic API error response body into a friendly message.
 ///
@@ -79,6 +93,127 @@ fn base64_decoded_size(b64: &str) -> usize {
         .filter(|&&b| b == b'=')
         .count();
     (len / 4) * 3 - padding
+}
+
+/// Downscale a base64-encoded image so its decoded bytes fit under `MAX_IMAGE_BYTES`.
+///
+/// Strategy:
+/// 1. Cap the long edge at `ANTHROPIC_MAX_LONG_EDGE` (1568 px) — Anthropic
+///    resizes anything larger server-side anyway.
+/// 2. If still over 5 MB, iteratively shrink by `SHRINK_FACTOR` (75 %).
+/// 3. Re-encode as PNG for `image/png` inputs, JPEG (quality 85) otherwise.
+///
+/// Returns `(new_base64_data, mime_type)` or `None` if decoding/resizing fails.
+fn downscale_image(b64_data: &str, mime_type: &str) -> Option<(String, String)> {
+    let raw = BASE64.decode(b64_data).ok()?;
+    let img = image::load_from_memory(&raw).ok()?;
+
+    let use_png = mime_type == "image/png";
+    let output_format = if use_png {
+        ImageFormat::Png
+    } else {
+        ImageFormat::Jpeg
+    };
+    let out_mime = if use_png { "image/png" } else { "image/jpeg" };
+
+    // First pass: cap long edge at Anthropic's server-side limit.
+    let (w, h) = (img.width(), img.height());
+    let long_edge = w.max(h);
+    let mut img = if long_edge > ANTHROPIC_MAX_LONG_EDGE {
+        let scale = f64::from(ANTHROPIC_MAX_LONG_EDGE) / f64::from(long_edge);
+        let nw = scale_dim(w, scale);
+        let nh = scale_dim(h, scale);
+        img.resize_exact(nw, nh, image::imageops::FilterType::Lanczos3)
+    } else {
+        img
+    };
+
+    // Iterative shrink until under the limit (or dimensions collapse).
+    loop {
+        let encoded_bytes = encode_image(&img, output_format)?;
+        if encoded_bytes.len() <= MAX_IMAGE_BYTES {
+            let b64_out = BASE64.encode(&encoded_bytes);
+            return Some((b64_out, out_mime.to_owned()));
+        }
+
+        let (cw, ch) = (img.width(), img.height());
+        let nw = scale_dim(cw, SHRINK_FACTOR);
+        let nh = scale_dim(ch, SHRINK_FACTOR);
+        if nw == 0 || nh == 0 {
+            return None;
+        }
+        img = img.resize_exact(nw, nh, image::imageops::FilterType::Lanczos3);
+    }
+}
+
+/// Scale a pixel dimension by a factor, rounding to the nearest integer.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn scale_dim(dim: u32, factor: f64) -> u32 {
+    (f64::from(dim) * factor).round() as u32
+}
+
+/// Encode a `DynamicImage` to bytes in the given format.
+fn encode_image(img: &image::DynamicImage, format: ImageFormat) -> Option<Vec<u8>> {
+    let mut buf = Cursor::new(Vec::new());
+    match format {
+        ImageFormat::Jpeg => {
+            let encoder =
+                image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, JPEG_QUALITY);
+            img.write_with_encoder(encoder).ok()?;
+        }
+        _ => {
+            img.write_to(&mut buf, format).ok()?;
+        }
+    }
+    Some(buf.into_inner())
+}
+
+/// Format a single image content block for the Anthropic API.
+///
+/// If the image exceeds `MAX_IMAGE_BYTES`, attempts to downscale it.
+/// Returns `None` (skip) only if downscaling also fails.
+fn format_image_block(data: &str, mime_type: &str) -> Option<Value> {
+    let decoded_size = base64_decoded_size(data);
+    if decoded_size > MAX_IMAGE_BYTES {
+        info!(
+            decoded_bytes = decoded_size,
+            max_bytes = MAX_IMAGE_BYTES,
+            mime = %mime_type,
+            "image exceeds 5 MB API limit, downscaling"
+        );
+        if let Some((new_data, new_mime)) = downscale_image(data, mime_type) {
+            info!(
+                original_bytes = decoded_size,
+                new_bytes = base64_decoded_size(&new_data),
+                new_mime = %new_mime,
+                "image downscaled successfully"
+            );
+            Some(json!({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": new_mime,
+                    "data": new_data
+                }
+            }))
+        } else {
+            warn!(
+                decoded_bytes = decoded_size,
+                mime = %mime_type,
+                "failed to downscale image, skipping"
+            );
+            None
+        }
+    } else {
+        Some(json!({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": mime_type,
+                "data": data
+            }
+        }))
+    }
 }
 
 /// Direct Anthropic provider with OAuth support and key rotation.
@@ -433,25 +568,7 @@ impl AnthropicProvider {
                         "is_error": is_error
                     })),
                     Content::Image { data, mime_type } => {
-                        let decoded_size = base64_decoded_size(data);
-                        if decoded_size > MAX_IMAGE_BYTES {
-                            warn!(
-                                decoded_bytes = decoded_size,
-                                max_bytes = MAX_IMAGE_BYTES,
-                                mime = %mime_type,
-                                "image exceeds 5 MB API limit, skipping"
-                            );
-                            None
-                        } else {
-                            Some(json!({
-                                "type": "image",
-                                "source": {
-                                    "type": "base64",
-                                    "media_type": mime_type,
-                                    "data": data
-                                }
-                            }))
-                        }
+                        format_image_block(data, mime_type)
                     }
                     Content::Thinking { .. } => None,
                 })
@@ -1476,5 +1593,118 @@ mod tests {
         assert_eq!(formatted.len(), 2);
         assert_eq!(formatted[0]["content"][0]["text"], "hello");
         assert_eq!(formatted[1]["content"][0]["text"], "world");
+    }
+
+    // ---- downscale_image ----
+
+    /// Deterministic noise: produces pseudo-random bytes that resist PNG compression.
+    #[allow(clippy::many_single_char_names, clippy::cast_possible_truncation)]
+    fn noisy_pixel(col: u32, row: u32) -> image::Rgb<u8> {
+        let hash = col.wrapping_mul(2_654_435_761) ^ row.wrapping_mul(2_246_822_519);
+        image::Rgb([hash as u8, (hash >> 8) as u8, (hash >> 16) as u8])
+    }
+
+    /// Create a PNG image in memory and return its base64 encoding.
+    /// Uses noisy pixels so the PNG doesn't compress below realistic sizes.
+    fn make_png(width: u32, height: u32) -> String {
+        let img = image::RgbImage::from_fn(width, height, noisy_pixel);
+        let mut buf = Cursor::new(Vec::new());
+        img.write_to(&mut buf, ImageFormat::Png)
+            .expect("encode test PNG");
+        BASE64.encode(buf.into_inner())
+    }
+
+    /// Create a JPEG image in memory and return its base64 encoding.
+    fn make_jpeg(width: u32, height: u32) -> String {
+        let img = image::RgbImage::from_fn(width, height, noisy_pixel);
+        let mut buf = Cursor::new(Vec::new());
+        let enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 95);
+        img.write_with_encoder(enc).expect("encode test JPEG");
+        BASE64.encode(buf.into_inner())
+    }
+
+    #[test]
+    fn downscale_returns_none_for_invalid_base64() {
+        assert!(downscale_image("not-valid-base64!!!", "image/png").is_none());
+    }
+
+    #[test]
+    fn downscale_returns_none_for_non_image_data() {
+        let b64 = BASE64.encode(b"this is plain text, not an image");
+        assert!(downscale_image(&b64, "image/png").is_none());
+    }
+
+    #[test]
+    fn downscale_caps_long_edge_at_1568() {
+        // 3000×2000 image — long edge should be capped to 1568.
+        let b64 = make_png(3000, 2000);
+        let (new_b64, mime) = downscale_image(&b64, "image/png").expect("downscale");
+        assert_eq!(mime, "image/png");
+
+        let raw = BASE64.decode(&new_b64).expect("decode result");
+        let img = image::load_from_memory(&raw).expect("load result");
+        assert!(img.width().max(img.height()) <= ANTHROPIC_MAX_LONG_EDGE);
+    }
+
+    #[test]
+    fn downscale_preserves_png_format() {
+        let b64 = make_png(2000, 1000);
+        let (_new_b64, mime) = downscale_image(&b64, "image/png").expect("downscale");
+        assert_eq!(mime, "image/png");
+    }
+
+    #[test]
+    fn downscale_uses_jpeg_for_non_png() {
+        let b64 = make_jpeg(2000, 1000);
+        let (_new_b64, mime) = downscale_image(&b64, "image/jpeg").expect("downscale");
+        assert_eq!(mime, "image/jpeg");
+    }
+
+    #[test]
+    fn downscale_result_fits_under_5mb() {
+        // Large image that will produce >5MB as PNG.
+        let b64 = make_png(4000, 3000);
+        let decoded_size = BASE64.decode(&b64).expect("decode").len();
+        // Verify the test image is actually >5MB.
+        assert!(
+            decoded_size > MAX_IMAGE_BYTES,
+            "test image should exceed 5MB, got {decoded_size}"
+        );
+
+        let (new_b64, _mime) = downscale_image(&b64, "image/png").expect("downscale");
+        let new_size = BASE64.decode(&new_b64).expect("decode result").len();
+        assert!(
+            new_size <= MAX_IMAGE_BYTES,
+            "downscaled image should be <= 5MB, got {new_size}"
+        );
+    }
+
+    #[test]
+    fn format_messages_downscales_oversized_real_image() {
+        // Use a real PNG image that exceeds 5MB.
+        let b64 = make_png(4000, 3000);
+        let decoded_size = BASE64.decode(&b64).expect("decode").len();
+        assert!(decoded_size > MAX_IMAGE_BYTES);
+
+        let messages = vec![
+            Message::user()
+                .with_text("What's in this image?")
+                .with_image(b64, "image/png"),
+        ];
+
+        let formatted = AnthropicProvider::format_messages(&messages, false, None);
+
+        assert_eq!(formatted.len(), 1);
+        let content = formatted[0]["content"].as_array().unwrap();
+        // Both text and (downscaled) image should be present.
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["source"]["type"], "base64");
+
+        // Verify the resulting image is under the limit.
+        let result_b64 = content[1]["source"]["data"].as_str().unwrap();
+        let result_size = BASE64.decode(result_b64).expect("decode").len();
+        assert!(result_size <= MAX_IMAGE_BYTES);
     }
 }
