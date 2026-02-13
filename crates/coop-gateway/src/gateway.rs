@@ -1098,21 +1098,37 @@ impl Gateway {
             .unwrap_or_default()
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_session_usage(&self, session_key: &SessionKey, usage: SessionUsage) {
+        self.session_usage
+            .lock()
+            .expect("session_usage mutex poisoned")
+            .insert(session_key.clone(), usage);
+    }
+
     /// Update the last-seen input token count for a session.
     ///
     /// Called after each provider response so that `maybe_compact` can
     /// check mid-turn whether the context has grown past the threshold.
+    ///
+    /// Uses `context_input_tokens()` which includes cached tokens
+    /// (cache_read + cache_write) to reflect actual context window usage.
     fn update_last_input_tokens(&self, session_key: &SessionKey, usage: &Usage) {
         let mut map = self
             .session_usage
             .lock()
             .expect("session_usage mutex poisoned");
         let entry = map.entry(session_key.clone()).or_default();
-        entry.last_input_tokens = usage.input_tokens.unwrap_or(0);
+        entry.last_input_tokens = usage.context_input_tokens();
         drop(map);
     }
 
     /// Record usage from a completed turn into session-level cumulative stats.
+    ///
+    /// Does NOT overwrite `last_input_tokens` — that is already set correctly
+    /// by `update_last_input_tokens` during the turn loop. The cumulative
+    /// `turn_usage` sums input tokens across all iterations, which does not
+    /// represent current context size.
     fn record_turn_usage(&self, session_key: &SessionKey, turn_usage: &Usage) {
         let mut map = self
             .session_usage
@@ -1120,8 +1136,6 @@ impl Gateway {
             .expect("session_usage mutex poisoned");
         let entry = map.entry(session_key.clone()).or_default();
         entry.cumulative += turn_usage.clone();
-        // Also set last_input_tokens from the final iteration.
-        entry.last_input_tokens = turn_usage.input_tokens.unwrap_or(0);
         drop(map);
     }
 
@@ -2913,5 +2927,207 @@ model = "test-model"
         assert_eq!(cached.len(), 1, "should have picked up the new skill");
         assert_eq!(cached[0].name, "test-skill");
         drop(cached);
+    }
+
+    // -----------------------------------------------------------------------
+    // Provider that returns cache tokens in usage, simulating prompt caching.
+    // -----------------------------------------------------------------------
+
+    #[derive(Debug)]
+    struct CachingProvider {
+        model: ModelInfo,
+        call_count: Mutex<u32>,
+    }
+
+    impl CachingProvider {
+        fn new() -> Self {
+            Self {
+                model: ModelInfo {
+                    name: "caching-model".into(),
+                    context_limit: 200_000,
+                },
+                call_count: Mutex::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Provider for CachingProvider {
+        fn name(&self) -> &'static str {
+            "caching"
+        }
+
+        fn model_info(&self) -> ModelInfo {
+            self.model.clone()
+        }
+
+        async fn complete(
+            &self,
+            _system: &[String],
+            _messages: &[Message],
+            tools: &[ToolDef],
+        ) -> Result<(Message, Usage)> {
+            let mut count = self.call_count.lock().unwrap();
+            *count += 1;
+            let call = *count;
+            drop(count);
+
+            if call == 1 {
+                // First call: tool use with cache write (cold cache).
+                // input_tokens=500 (non-cached), cache_write=9000, cache_read=0
+                // Real context = 9500
+                Ok((
+                    Message::assistant().with_tool_request(
+                        "tool_1",
+                        "bash",
+                        serde_json::json!({"command": "echo hi"}),
+                    ),
+                    Usage {
+                        input_tokens: Some(500),
+                        output_tokens: Some(80),
+                        cache_read_tokens: None,
+                        cache_write_tokens: Some(9000),
+                        ..Default::default()
+                    },
+                ))
+            } else if !tools.is_empty() {
+                // Second call (with tools): cache hit.
+                // input_tokens=200 (non-cached new tokens), cache_read=9000
+                // Real context = 9200
+                Ok((
+                    Message::assistant().with_text("Done with the task."),
+                    Usage {
+                        input_tokens: Some(200),
+                        output_tokens: Some(60),
+                        cache_read_tokens: Some(9000),
+                        cache_write_tokens: None,
+                        ..Default::default()
+                    },
+                ))
+            } else {
+                // Forced final completion (no tools)
+                Ok((
+                    Message::assistant().with_text("Summary."),
+                    Usage {
+                        input_tokens: Some(150),
+                        output_tokens: Some(40),
+                        cache_read_tokens: Some(9000),
+                        cache_write_tokens: None,
+                        ..Default::default()
+                    },
+                ))
+            }
+        }
+
+        async fn stream(
+            &self,
+            _system: &[String],
+            _messages: &[Message],
+            _tools: &[ToolDef],
+        ) -> Result<ProviderStream> {
+            anyhow::bail!("not supported")
+        }
+    }
+
+    /// Verify that last_input_tokens includes cache_read + cache_write
+    /// tokens, not just the non-cached input_tokens field.
+    #[tokio::test]
+    async fn last_input_tokens_includes_cache_tokens() {
+        let workspace = test_workspace();
+        let provider: Arc<dyn Provider> = Arc::new(CachingProvider::new());
+        let executor = Arc::new(DefaultExecutor::new());
+        let gateway = Arc::new(
+            Gateway::new(
+                shared_config(test_config()),
+                workspace.path().to_path_buf(),
+                provider,
+                executor,
+                None,
+                None,
+            )
+            .unwrap(),
+        );
+
+        let session_key = gateway.default_session_key();
+        let (event_tx, mut event_rx) = mpsc::channel(128);
+
+        gateway
+            .run_turn_with_trust(
+                &session_key,
+                "hello",
+                TrustLevel::Full,
+                Some("alice"),
+                None,
+                event_tx,
+            )
+            .await
+            .unwrap();
+        while event_rx.try_recv().is_ok() {}
+
+        let usage = gateway.session_usage(&session_key);
+
+        // The last iteration (call 2) returns:
+        //   input_tokens=200, cache_read=9000 → context = 9200
+        // Without the fix, this would be just 200.
+        assert_eq!(
+            usage.last_input_tokens, 9200,
+            "last_input_tokens must include cache_read + cache_write tokens"
+        );
+    }
+
+    /// Verify that record_turn_usage does NOT overwrite last_input_tokens
+    /// with the cumulative total across all iterations.
+    #[tokio::test]
+    async fn record_turn_usage_does_not_overwrite_last_input_tokens() {
+        let workspace = test_workspace();
+        let provider: Arc<dyn Provider> = Arc::new(CachingProvider::new());
+        let executor = Arc::new(DefaultExecutor::new());
+        let gateway = Arc::new(
+            Gateway::new(
+                shared_config(test_config()),
+                workspace.path().to_path_buf(),
+                provider,
+                executor,
+                None,
+                None,
+            )
+            .unwrap(),
+        );
+
+        let session_key = gateway.default_session_key();
+        let (event_tx, mut event_rx) = mpsc::channel(128);
+
+        gateway
+            .run_turn_with_trust(
+                &session_key,
+                "hello",
+                TrustLevel::Full,
+                Some("alice"),
+                None,
+                event_tx,
+            )
+            .await
+            .unwrap();
+        while event_rx.try_recv().is_ok() {}
+
+        let usage = gateway.session_usage(&session_key);
+
+        // Cumulative input_tokens across both iterations: 500 + 200 = 700.
+        // Cumulative cache: 9000 (write) + 9000 (read) = 18000.
+        // If record_turn_usage overwrote last_input_tokens with cumulative
+        // context_input_tokens, it would be 700 + 18000 = 18700 (wrong).
+        // Correct value is the LAST iteration's context: 200 + 9000 = 9200.
+        assert_ne!(
+            usage.last_input_tokens, 18700,
+            "must not be the cumulative total across iterations"
+        );
+        assert_eq!(
+            usage.last_input_tokens, 9200,
+            "must be the last iteration's context size only"
+        );
+
+        // Cumulative should correctly sum ALL tokens across iterations.
+        assert_eq!(usage.cumulative.input_tokens, Some(700));
+        assert_eq!(usage.cumulative.output_tokens, Some(140));
     }
 }

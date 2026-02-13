@@ -1398,4 +1398,45 @@ match = ["signal:bob-uuid"]
             "terminal user should always get command response"
         );
     }
+
+    #[tokio::test]
+    async fn slash_status_context_reflects_cache_tokens() {
+        use crate::gateway::SessionUsage;
+        use coop_core::types::Usage;
+
+        let config = test_config();
+        let (router, gw) = make_router_and_gateway(&config);
+
+        // First, dispatch a message to establish a session key.
+        let msg = inbound_command("signal", "alice-uuid", "/status");
+        let (decision, _) = dispatch_and_collect_text(&router, &msg).await;
+
+        // Seed session_usage with values that simulate prompt caching:
+        //   input_tokens=300, cache_read=8000, cache_write=1700
+        //   → real context = 10000
+        gw.set_session_usage(
+            &decision.session_key,
+            SessionUsage {
+                last_input_tokens: 10_000,
+                cumulative: Usage {
+                    input_tokens: Some(1500),
+                    output_tokens: Some(400),
+                    ..Default::default()
+                },
+            },
+        );
+
+        // Now call /status and verify the context line uses the full 10000.
+        let msg = inbound_command("signal", "alice-uuid", "/status");
+        let (_, text) = dispatch_and_collect_text(&router, &msg).await;
+
+        assert!(
+            text.contains("Context: 10000 / 128000 tokens"),
+            "context should show 10000 (including cache tokens), got: {text}"
+        );
+        assert!(
+            text.contains("Total tokens used: 1500 in / 400 out"),
+            "cumulative should show correct totals, got: {text}"
+        );
+    }
 }

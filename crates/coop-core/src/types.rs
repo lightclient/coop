@@ -393,6 +393,17 @@ impl Usage {
     pub fn total_tokens(&self) -> u32 {
         self.input_tokens.unwrap_or(0) + self.output_tokens.unwrap_or(0)
     }
+
+    /// Total input tokens including cached portions.
+    ///
+    /// Anthropic's API splits input tokens into non-cached (`input_tokens`),
+    /// cache-read (`cache_read_tokens`), and cache-write (`cache_write_tokens`).
+    /// This method sums all three to reflect actual context window usage.
+    pub fn context_input_tokens(&self) -> u32 {
+        self.input_tokens.unwrap_or(0)
+            + self.cache_read_tokens.unwrap_or(0)
+            + self.cache_write_tokens.unwrap_or(0)
+    }
 }
 
 impl std::ops::Add for Usage {
@@ -721,6 +732,26 @@ mod tests {
         assert_eq!(c.output_tokens, Some(50));
         assert_eq!(c.cache_read_tokens, Some(10));
         assert_eq!(c.total_tokens(), 350);
+    }
+
+    #[test]
+    fn context_input_tokens_includes_cache() {
+        let usage = Usage {
+            input_tokens: Some(500),
+            cache_read_tokens: Some(8000),
+            cache_write_tokens: Some(1500),
+            ..Default::default()
+        };
+        assert_eq!(usage.context_input_tokens(), 10_000);
+    }
+
+    #[test]
+    fn context_input_tokens_without_cache() {
+        let usage = Usage {
+            input_tokens: Some(5000),
+            ..Default::default()
+        };
+        assert_eq!(usage.context_input_tokens(), 5000);
     }
 
     #[test]
