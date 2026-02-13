@@ -8,9 +8,6 @@ use std::path::Path;
 
 use crate::{Content, Message};
 
-/// Maximum image file size (5 MB — Anthropic's limit).
-const MAX_IMAGE_SIZE: u64 = 5 * 1024 * 1024;
-
 /// Image extensions we recognize (lowercase, without dot).
 const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "gif", "webp"];
 
@@ -59,20 +56,6 @@ pub fn validate_image_magic(bytes: &[u8]) -> Option<String> {
 pub fn load_image(path: &str) -> Result<(String, String)> {
     let expanded = expand_home(path);
     let p = Path::new(&expanded);
-
-    let meta = std::fs::metadata(p)?;
-    if meta.len() > MAX_IMAGE_SIZE {
-        tracing::warn!(
-            path = %path,
-            size_bytes = meta.len(),
-            max_bytes = MAX_IMAGE_SIZE,
-            "image exceeds 5 MB API limit, skipping injection"
-        );
-        bail!(
-            "image file exceeds 5 MB limit ({} bytes): {path}",
-            meta.len()
-        );
-    }
 
     let bytes = std::fs::read(p)?;
     let ext = p
@@ -494,16 +477,22 @@ mod tests {
     }
 
     #[test]
-    fn error_on_oversized_file() {
+    fn loads_oversized_file() {
         let mut f = tempfile::NamedTempFile::with_suffix(".png").unwrap();
-        // Write just over 5 MB
-        #[allow(clippy::cast_possible_truncation)]
-        let buf = vec![0u8; (MAX_IMAGE_SIZE + 1) as usize];
+        // Write PNG magic header + padding to exceed 5 MB.
+        // load_image() loads regardless of size — the provider layer handles downscaling.
+        let mut buf = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        buf.resize(6 * 1024 * 1024, 0x00);
         f.write_all(&buf).unwrap();
         f.flush().unwrap();
 
-        let err = load_image(f.path().to_str().unwrap()).unwrap_err();
-        assert!(err.to_string().contains("5 MB"));
+        let (b64, mime) = load_image(f.path().to_str().unwrap()).unwrap();
+        assert_eq!(mime, "image/png");
+
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&b64)
+            .unwrap();
+        assert_eq!(decoded.len(), 6 * 1024 * 1024);
     }
 
     // ---- inject_images_into_message ----
