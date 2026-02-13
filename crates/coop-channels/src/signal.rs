@@ -851,6 +851,9 @@ fn extract_attachment_pointers(
 
 /// Download each attachment, save to disk, and rewrite the inbound message
 /// content to include the saved file paths so the agent can access them.
+/// Maximum attachment size we'll save to disk (100 MB).
+const MAX_ATTACHMENT_BYTES: usize = 100 * 1024 * 1024;
+
 async fn download_and_rewrite_attachments(
     manager: &SignalManager,
     pointers: &[&AttachmentPointer],
@@ -866,30 +869,65 @@ async fn download_and_rewrite_attachments(
     for pointer in pointers {
         let original_meta = format_attachment_metadata(pointer);
         let file_name = pointer.file_name.as_deref().unwrap_or("unnamed");
+
+        // Check declared size before downloading
+        if let Some(size) = pointer.size
+            && size as usize > MAX_ATTACHMENT_BYTES
+        {
+            warn!(
+                file_name,
+                declared_size = size,
+                max = MAX_ATTACHMENT_BYTES,
+                "attachment too large, skipping download"
+            );
+            let max = MAX_ATTACHMENT_BYTES;
+            let replacement = format!(
+                "{original_meta}\n[skipped: file too large ({size} bytes, max {max} bytes)]"
+            );
+            inbound.content = inbound.content.replace(&original_meta, &replacement);
+            continue;
+        }
+
         let sanitized = sanitize_filename(file_name);
         let save_name = format!("{timestamp}_{sanitized}");
-        let save_name = ensure_image_extension(&save_name, pointer.content_type.as_deref());
+        let save_name = ensure_media_extension(&save_name, pointer.content_type.as_deref());
         let save_path = attachments_dir.join(&save_name);
 
         match manager.get_attachment(pointer).await {
-            Ok(data) => match std::fs::write(&save_path, &data) {
-                Ok(()) => {
-                    info!(
-                        path = %save_path.display(),
-                        size = data.len(),
+            Ok(data) => {
+                if data.len() > MAX_ATTACHMENT_BYTES {
+                    let actual_size = data.len();
+                    let max = MAX_ATTACHMENT_BYTES;
+                    warn!(
                         file_name,
-                        "saved signal attachment"
+                        actual_size, max, "downloaded attachment too large, discarding"
                     );
-                    let replacement =
-                        format!("{original_meta}\n[file saved: {}]", save_path.display());
+                    let replacement = format!(
+                        "{original_meta}\n[skipped: file too large ({actual_size} bytes, max {max} bytes)]"
+                    );
                     inbound.content = inbound.content.replace(&original_meta, &replacement);
+                    continue;
                 }
-                Err(e) => {
-                    warn!(error = %e, path = %save_path.display(), "failed to write attachment");
-                    let replacement = format!("{original_meta}\n[file save failed: {e}]");
-                    inbound.content = inbound.content.replace(&original_meta, &replacement);
+
+                match std::fs::write(&save_path, &data) {
+                    Ok(()) => {
+                        info!(
+                            path = %save_path.display(),
+                            size = data.len(),
+                            file_name,
+                            "saved signal attachment"
+                        );
+                        let replacement =
+                            format!("{original_meta}\n[file saved: {}]", save_path.display());
+                        inbound.content = inbound.content.replace(&original_meta, &replacement);
+                    }
+                    Err(e) => {
+                        warn!(error = %e, path = %save_path.display(), "failed to write attachment");
+                        let replacement = format!("{original_meta}\n[file save failed: {e}]");
+                        inbound.content = inbound.content.replace(&original_meta, &replacement);
+                    }
                 }
-            },
+            }
             Err(e) => {
                 warn!(error = %e, file_name, "failed to download signal attachment");
                 let replacement = format!("{original_meta}\n[download failed: {e}]");
@@ -899,14 +937,17 @@ async fn download_and_rewrite_attachments(
     }
 }
 
-/// Append an image file extension when the filename lacks one and the
-/// content-type is a recognized image MIME type. This ensures downloaded
-/// Signal attachments are discoverable by the image-injection pipeline in
-/// `coop_core::images`, which requires a recognized extension.
-fn ensure_image_extension(name: &str, content_type: Option<&str>) -> String {
+/// Append a file extension when the filename lacks one and the content-type
+/// is a recognized MIME type. This ensures downloaded Signal attachments are
+/// discoverable by the media-injection pipeline in `coop_core::images`,
+/// which requires a recognized extension.
+fn ensure_media_extension(name: &str, content_type: Option<&str>) -> String {
     let lower = name.to_lowercase();
-    let image_extensions = ["jpg", "jpeg", "png", "gif", "webp"];
-    if image_extensions
+    let known_extensions = [
+        "jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "mp4", "mov", "avi", "mkv", "mp3",
+        "m4a", "ogg", "wav", "aac", "flac", "opus", "pdf",
+    ];
+    if known_extensions
         .iter()
         .any(|ext| lower.ends_with(&format!(".{ext}")))
     {
@@ -914,10 +955,28 @@ fn ensure_image_extension(name: &str, content_type: Option<&str>) -> String {
     }
 
     let ext = match content_type {
+        // Images
         Some("image/jpeg") => ".jpg",
         Some("image/png") => ".png",
         Some("image/gif") => ".gif",
         Some("image/webp") => ".webp",
+        Some("image/heic") => ".heic",
+        Some("image/heif") => ".heif",
+        // Audio
+        Some("audio/aac") => ".aac",
+        Some("audio/mp4" | "audio/x-m4a") => ".m4a",
+        Some("audio/mpeg") => ".mp3",
+        Some("audio/ogg" | "audio/ogg; codecs=opus") => ".ogg",
+        Some("audio/wav" | "audio/x-wav") => ".wav",
+        Some("audio/flac") => ".flac",
+        Some("audio/opus") => ".opus",
+        // Video
+        Some("video/mp4") => ".mp4",
+        Some("video/quicktime") => ".mov",
+        Some("video/x-msvideo") => ".avi",
+        Some("video/x-matroska") => ".mkv",
+        // Documents
+        Some("application/pdf") => ".pdf",
         _ => return name.to_owned(),
     };
 

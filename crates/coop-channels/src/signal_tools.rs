@@ -428,17 +428,17 @@ impl Tool for SignalSendImageTool {
     fn definition(&self) -> ToolDef {
         ToolDef::new(
             "signal_send_image",
-            "Send an image file as a Signal attachment to the current conversation. The file must exist on disk and be a valid image (JPEG, PNG, GIF, or WEBP).",
+            "Send a media file as a Signal attachment to the current conversation. Supports images (JPEG, PNG, GIF, WEBP, HEIC), audio (MP3, M4A, OGG, WAV, FLAC, AAC), video (MP4, MOV), and documents (PDF). The file must exist on disk.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Absolute path to the image file to send"
+                        "description": "Absolute path to the media file to send"
                     },
                     "caption": {
                         "type": "string",
-                        "description": "Optional text caption to include with the image"
+                        "description": "Optional text caption to include with the attachment"
                     }
                 },
                 "required": ["path"]
@@ -460,12 +460,11 @@ impl Tool for SignalSendImageTool {
             }
 
             let file_bytes = std::fs::read(&file_path)?;
-            let Some(mime_type) = coop_core::validate_image_magic(&file_bytes) else {
-                return Ok(ToolOutput::error(format!(
-                    "file is not a recognized image format: {}",
-                    file_path.display()
-                )));
-            };
+
+            // Try magic-byte detection first, fall back to extension-based MIME
+            let mime_type = coop_core::detect_media_magic(&file_bytes)
+                .or_else(|| mime_from_extension(&file_path))
+                .unwrap_or_else(|| "application/octet-stream".to_owned());
 
             let target = extract_signal_target_from_session(&ctx.session_id).ok_or_else(|| {
                 anyhow::anyhow!("signal_send_image is only available in Signal chat sessions")
@@ -492,10 +491,34 @@ impl Tool for SignalSendImageTool {
                 .await
                 .map_err(|_send_err| anyhow::anyhow!("signal action channel closed"))?;
 
-            Ok(ToolOutput::success("image sent"))
+            Ok(ToolOutput::success("attachment sent"))
         }
         .instrument(span)
         .await
+    }
+}
+
+fn mime_from_extension(path: &std::path::Path) -> Option<String> {
+    let ext = path.extension()?.to_str()?.to_lowercase();
+    match ext.as_str() {
+        "jpg" | "jpeg" => Some("image/jpeg".to_owned()),
+        "png" => Some("image/png".to_owned()),
+        "gif" => Some("image/gif".to_owned()),
+        "webp" => Some("image/webp".to_owned()),
+        "heic" => Some("image/heic".to_owned()),
+        "heif" => Some("image/heif".to_owned()),
+        "mp3" => Some("audio/mpeg".to_owned()),
+        "m4a" => Some("audio/mp4".to_owned()),
+        "ogg" | "oga" | "opus" => Some("audio/ogg".to_owned()),
+        "wav" => Some("audio/wav".to_owned()),
+        "flac" => Some("audio/flac".to_owned()),
+        "aac" => Some("audio/aac".to_owned()),
+        "mp4" => Some("video/mp4".to_owned()),
+        "mov" => Some("video/quicktime".to_owned()),
+        "avi" => Some("video/x-msvideo".to_owned()),
+        "mkv" => Some("video/x-matroska".to_owned()),
+        "pdf" => Some("application/pdf".to_owned()),
+        _ => None,
     }
 }
 

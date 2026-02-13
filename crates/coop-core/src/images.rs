@@ -9,7 +9,7 @@ use std::path::Path;
 use crate::{Content, Message};
 
 /// Image extensions we recognize (lowercase, without dot).
-const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "gif", "webp"];
+const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "gif", "webp", "heic", "heif"];
 
 /// Scan text for file paths ending in a recognized image extension.
 ///
@@ -52,10 +52,87 @@ pub fn validate_image_magic(bytes: &[u8]) -> Option<String> {
     None
 }
 
+/// Detect media type from file header bytes for audio and video formats.
+///
+/// Returns the MIME type if recognized, or `None` for unknown formats.
+pub fn detect_media_magic(bytes: &[u8]) -> Option<String> {
+    // Try image first
+    if let Some(mime) = validate_image_magic(bytes) {
+        return Some(mime);
+    }
+    if bytes.len() < 12 {
+        return None;
+    }
+    // OGG: audio/ogg or video/ogg
+    if bytes.starts_with(b"OggS") {
+        return Some("audio/ogg".to_owned());
+    }
+    // MP3: ID3 tag or MPEG sync word
+    if bytes.starts_with(b"ID3") || (bytes[0] == 0xFF && (bytes[1] & 0xE0) == 0xE0) {
+        return Some("audio/mpeg".to_owned());
+    }
+    // FLAC
+    if bytes.starts_with(b"fLaC") {
+        return Some("audio/flac".to_owned());
+    }
+    // WAV (RIFF + WAVE)
+    if bytes.starts_with(b"RIFF") && bytes.len() >= 12 && &bytes[8..12] == b"WAVE" {
+        return Some("audio/wav".to_owned());
+    }
+    // MP4/M4A/MOV: ISO BMFF container with 'ftyp'
+    if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" {
+        let brand = &bytes[8..12];
+        // Audio-specific brands
+        if brand == b"M4A " || brand == b"M4B " {
+            return Some("audio/mp4".to_owned());
+        }
+        // Video brands
+        if brand == b"isom"
+            || brand == b"mp41"
+            || brand == b"mp42"
+            || brand == b"avc1"
+            || brand == b"iso5"
+            || brand == b"iso6"
+            || brand == b"dash"
+        {
+            return Some("video/mp4".to_owned());
+        }
+        if brand == b"qt  " {
+            return Some("video/quicktime".to_owned());
+        }
+        // HEIC/HEIF image (can't be API-injected but gets correct extension)
+        if brand == b"heic" || brand == b"heix" || brand == b"hevc" || brand == b"mif1" {
+            return Some("image/heic".to_owned());
+        }
+    }
+    // PDF
+    if bytes.starts_with(b"%PDF") {
+        return Some("application/pdf".to_owned());
+    }
+    None
+}
+
+/// Maximum file size we'll read for image injection (20 MB raw).
+/// Files larger than this are skipped to avoid excessive memory usage.
+/// The provider layer handles further downsizing to API limits (5 MB).
+const MAX_INJECTABLE_FILE_SIZE: u64 = 20 * 1024 * 1024;
+
 /// Read a file, base64-encode it, and return `(base64_data, mime_type)`.
+///
+/// Refuses to load files larger than `MAX_INJECTABLE_FILE_SIZE` to prevent
+/// excessive memory use. The provider layer handles downsizing to API limits.
 pub fn load_image(path: &str) -> Result<(String, String)> {
     let expanded = expand_home(path);
     let p = Path::new(&expanded);
+
+    let metadata = std::fs::metadata(p)?;
+    if metadata.len() > MAX_INJECTABLE_FILE_SIZE {
+        bail!(
+            "image file too large ({} bytes, max {}): {path}",
+            metadata.len(),
+            MAX_INJECTABLE_FILE_SIZE
+        );
+    }
 
     let bytes = std::fs::read(p)?;
     let ext = p
@@ -477,10 +554,10 @@ mod tests {
     }
 
     #[test]
-    fn loads_oversized_file() {
+    fn loads_oversized_file_under_injection_limit() {
         let mut f = tempfile::NamedTempFile::with_suffix(".png").unwrap();
-        // Write PNG magic header + padding to exceed 5 MB.
-        // load_image() loads regardless of size — the provider layer handles downscaling.
+        // 6 MB is under the 20 MB injection limit — loads successfully.
+        // The provider layer handles downsizing to the 5 MB API limit.
         let mut buf = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
         buf.resize(6 * 1024 * 1024, 0x00);
         f.write_all(&buf).unwrap();
@@ -493,6 +570,19 @@ mod tests {
             .decode(&b64)
             .unwrap();
         assert_eq!(decoded.len(), 6 * 1024 * 1024);
+    }
+
+    #[test]
+    fn rejects_file_exceeding_injection_limit() {
+        let mut f = tempfile::NamedTempFile::with_suffix(".png").unwrap();
+        // 21 MB exceeds the 20 MB injection limit.
+        let mut buf = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        buf.resize(21 * 1024 * 1024, 0x00);
+        f.write_all(&buf).unwrap();
+        f.flush().unwrap();
+
+        let err = load_image(f.path().to_str().unwrap()).unwrap_err();
+        assert!(err.to_string().contains("too large"));
     }
 
     // ---- inject_images_into_message ----
