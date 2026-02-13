@@ -1,9 +1,10 @@
 use std::collections::HashSet;
 
 use anyhow::Result;
+use chrono::{Duration, Utc};
 use coop_core::TrustLevel;
 use coop_core::prompt::count_tokens;
-use coop_memory::{Memory, MemoryQuery, ObservationIndex, accessible_stores};
+use coop_memory::{Memory, MemoryQuery, ObservationIndex, SessionSummary, accessible_stores};
 use tracing::{debug, instrument};
 
 use crate::config::MemoryPromptIndexConfig;
@@ -12,11 +13,12 @@ use crate::config::MemoryPromptIndexConfig;
 struct RenderedPromptIndex {
     block: String,
     rendered_count: usize,
+    rendered_session_count: usize,
     token_estimate: usize,
     truncated: bool,
 }
 
-#[instrument(skip(memory, user_input), fields(trust = ?trust, limit = settings.limit, max_tokens = settings.max_tokens, has_user_input = !user_input.trim().is_empty()))]
+#[instrument(skip(memory, user_input), fields(trust = ?trust, limit = settings.limit, max_tokens = settings.max_tokens, recent_days = settings.recent_days, has_user_input = !user_input.trim().is_empty()))]
 pub(crate) async fn build_prompt_index(
     memory: &dyn Memory,
     trust: TrustLevel,
@@ -39,17 +41,17 @@ pub(crate) async fn build_prompt_index(
 
     let limit = settings.limit.max(1);
 
-    // Search 1: recency-based (always runs)
-    let recency_query = MemoryQuery {
+    let recent_cutoff = Utc::now() - Duration::days(i64::from(settings.recent_days));
+    let recent_query = MemoryQuery {
         stores: stores.clone(),
+        after: Some(recent_cutoff),
         limit,
         ..Default::default()
     };
-    let recency_results = memory.search(&recency_query).await?;
+    let recent_results = memory.search(&recent_query).await?;
 
-    // Search 2: query-relevant (only if user input has meaningful terms)
     let search_terms = extract_search_terms(user_input);
-    let query_results = if let Some(terms) = &search_terms {
+    let relevance_results = if let Some(terms) = &search_terms {
         let text_query = MemoryQuery {
             text: Some(terms.clone()),
             stores: stores.clone(),
@@ -59,13 +61,13 @@ pub(crate) async fn build_prompt_index(
         match memory.search(&text_query).await {
             Ok(results) => {
                 debug!(
-                    query_result_count = results.len(),
-                    "memory prompt index query-aware search complete"
+                    relevance_result_count = results.len(),
+                    "memory prompt index relevance search complete"
                 );
                 results
             }
             Err(error) => {
-                debug!(error = %error, "memory prompt index query-aware search failed, using recency only");
+                debug!(error = %error, "memory prompt index relevance search failed, using recent results only");
                 Vec::new()
             }
         }
@@ -73,14 +75,29 @@ pub(crate) async fn build_prompt_index(
         Vec::new()
     };
 
-    let results = merge_results(recency_results, query_results, limit);
+    let results = merge_results(recent_results, relevance_results, limit);
 
     if results.is_empty() {
         debug!(reason = "no_results", "memory prompt index skipped");
         return Ok(None);
     }
 
-    let rendered = render_prompt_index(&results, settings.max_tokens.max(1));
+    let session_summaries = if trust == TrustLevel::Full {
+        match memory.recent_session_summaries(5).await {
+            Ok(summaries) => summaries,
+            Err(error) => {
+                debug!(
+                    error = %error,
+                    "failed to load recent session summaries for prompt index"
+                );
+                Vec::new()
+            }
+        }
+    } else {
+        Vec::new()
+    };
+
+    let rendered = render_prompt_index(&results, &session_summaries, settings.max_tokens.max(1));
     if rendered.rendered_count == 0 {
         debug!(reason = "budget_exhausted", "memory prompt index skipped");
         return Ok(None);
@@ -90,6 +107,7 @@ pub(crate) async fn build_prompt_index(
         accessible_store_count = stores.len(),
         result_count = results.len(),
         rendered_count = rendered.rendered_count,
+        rendered_session_count = rendered.rendered_session_count,
         token_estimate = rendered.token_estimate,
         truncated = rendered.truncated,
         "memory prompt index built"
@@ -98,23 +116,20 @@ pub(crate) async fn build_prompt_index(
     Ok(Some(rendered.block))
 }
 
-/// Merge recency and query-relevant results, dedup by id.
+/// Merge recent and relevance results, dedup by id.
 ///
-/// Query-relevant results come first (they matched the user's input via
-/// FTS/vector), then recency results fill remaining slots. Each group
-/// is already internally sorted by its own scoring function, so we
-/// don't re-sort across groups (recency and text-query scores use
-/// different weight distributions and aren't directly comparable).
+/// Recent results come first to guarantee short-term continuity.
+/// Relevance results fill remaining slots for long-term recall.
+/// Each group keeps its internal ordering.
 fn merge_results(
-    recency: Vec<ObservationIndex>,
-    query: Vec<ObservationIndex>,
+    recent: Vec<ObservationIndex>,
+    relevance: Vec<ObservationIndex>,
     limit: usize,
 ) -> Vec<ObservationIndex> {
     let mut seen = HashSet::new();
     let mut merged = Vec::with_capacity(limit);
 
-    // Query-relevant results first (already ranked by FTS/vector relevance).
-    for result in query {
+    for result in recent {
         if merged.len() >= limit {
             break;
         }
@@ -123,8 +138,7 @@ fn merge_results(
         }
     }
 
-    // Fill remaining slots with recency results.
-    for result in recency {
+    for result in relevance {
         if merged.len() >= limit {
             break;
         }
@@ -136,13 +150,18 @@ fn merge_results(
     merged
 }
 
-fn render_prompt_index(results: &[ObservationIndex], max_tokens: usize) -> RenderedPromptIndex {
+fn render_prompt_index(
+    results: &[ObservationIndex],
+    summaries: &[SessionSummary],
+    max_tokens: usize,
+) -> RenderedPromptIndex {
     let mut lines = vec![
         "## Memory Index (DB)".to_owned(),
         "Use memory_get with observation IDs for full details.".to_owned(),
     ];
 
     let mut rendered_count = 0;
+    let mut rendered_session_count = 0;
     let mut truncated = false;
     let mut token_estimate = count_tokens(&lines.join("\n"));
 
@@ -160,6 +179,31 @@ fn render_prompt_index(results: &[ObservationIndex], max_tokens: usize) -> Rende
         rendered_count += 1;
     }
 
+    if !summaries.is_empty() && rendered_count > 0 {
+        let heading = "## Recent Sessions".to_owned();
+        let heading_tokens = count_tokens(&heading);
+        if token_estimate.saturating_add(heading_tokens) <= max_tokens {
+            lines.push(String::new());
+            lines.push(heading);
+            token_estimate = count_tokens(&lines.join("\n"));
+
+            for summary in summaries {
+                let line = format_session_summary(summary);
+                let line_tokens = count_tokens(&line);
+                if token_estimate.saturating_add(line_tokens) > max_tokens {
+                    truncated = true;
+                    break;
+                }
+
+                lines.push(line);
+                token_estimate = token_estimate.saturating_add(line_tokens);
+                rendered_session_count += 1;
+            }
+        } else {
+            truncated = true;
+        }
+    }
+
     if truncated {
         let marker = "- ... truncated to fit token budget.".to_owned();
         let marker_tokens = count_tokens(&marker);
@@ -173,6 +217,7 @@ fn render_prompt_index(results: &[ObservationIndex], max_tokens: usize) -> Rende
     RenderedPromptIndex {
         block: lines.join("\n"),
         rendered_count,
+        rendered_session_count,
         token_estimate,
         truncated,
     }
@@ -188,6 +233,19 @@ fn format_row(entry: &ObservationIndex) -> String {
         entry.score,
         entry.mention_count,
         entry.created_at.format("%Y-%m-%d"),
+    )
+}
+
+fn format_session_summary(summary: &SessionSummary) -> String {
+    let request = compact_title(&summary.request);
+    let outcome = compact_title(&summary.outcome);
+    format!(
+        "- session={} request={} outcome={} obs={} date={}",
+        summary.session_key,
+        if request.is_empty() { "-" } else { &request },
+        if outcome.is_empty() { "-" } else { &outcome },
+        summary.observation_count,
+        summary.created_at.format("%Y-%m-%d"),
     )
 }
 

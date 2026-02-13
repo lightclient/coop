@@ -164,6 +164,9 @@ pub(super) fn init_schema(conn: &Connection) -> Result<()> {
             created_at INTEGER NOT NULL
         );
 
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_session_summaries_key
+            ON session_summaries(agent_id, session_key);
+
         CREATE TABLE IF NOT EXISTS people (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             agent_id TEXT NOT NULL,

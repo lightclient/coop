@@ -19,6 +19,7 @@ Changes to these fields take effect immediately (hot-reload):
 - `users` — add/remove users, change trust levels or match patterns
 - `cron` — add/remove/edit scheduled tasks
 - `memory.prompt_index` — toggle prompt index, change limits
+- `memory.auto_capture` — toggle post-turn extraction and message threshold
 - `memory.retention` — change retention policy
 
 These fields require a process restart:
@@ -74,11 +75,17 @@ name = "anthropic"                 # restart-required
 [memory]
 db_path = "./db/memory.db"         # SQLite database path (restart-required)
 
-# Prompt index: injects recent relevant memories into system prompt
+# Prompt index: injects recent + relevant memories into system prompt
 [memory.prompt_index]
 enabled = true                     # default: true
-limit = 12                         # max observations to include (default: 12)
-max_tokens = 1200                  # token budget for index (default: 1200)
+limit = 30                         # max observations to include (default: 30)
+max_tokens = 3000                  # token budget for index (default: 3000)
+recent_days = 3                    # always include observations from last N days
+
+# Auto-capture: post-turn observation extraction
+[memory.auto_capture]
+enabled = true                     # default: true
+min_turn_messages = 4              # skip trivial turns with too few new messages
 
 # Retention policy: automatic archival, compression, and deletion
 [memory.retention]
@@ -134,7 +141,8 @@ message = "run cleanup"
 - `agent.id` and `agent.model` must be non-empty
 - `provider.name` must be `anthropic`
 - Workspace directory must exist and contain at least SOUL.md
-- Memory prompt_index: limit > 0, max_tokens > 0
+- Memory prompt_index: limit > 0, max_tokens > 0, recent_days in 1..=30
+- Memory auto_capture: min_turn_messages >= 1
 - Memory retention: all day values > 0, compression_min_cluster_size > 1, delete_archive_after_days >= archive_after_days
 - Embedding dimensions: 1..=8192
 - Cron users must exist in the users list

@@ -13,6 +13,7 @@ mod heartbeat;
 mod init;
 mod init_templates;
 mod injection;
+mod memory_auto_capture;
 mod memory_embedding;
 mod memory_prompt_index;
 mod memory_reconcile;
@@ -1440,6 +1441,10 @@ match = ["signal:bob-uuid"]
                 observation_count: 0,
                 created_at: Utc::now(),
             })
+        }
+
+        async fn recent_session_summaries(&self, _limit: usize) -> Result<Vec<SessionSummary>> {
+            Ok(Vec::new())
         }
 
         async fn history(&self, _observation_id: i64) -> Result<Vec<ObservationHistoryEntry>> {

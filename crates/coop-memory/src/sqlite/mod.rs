@@ -521,6 +521,11 @@ impl Memory for SqliteMemory {
         write_ops::summarize_session(self, session_key)
     }
 
+    #[instrument(skip(self), fields(limit))]
+    async fn recent_session_summaries(&self, limit: usize) -> Result<Vec<SessionSummary>> {
+        write_ops::recent_session_summaries(self, limit)
+    }
+
     #[instrument(skip(self))]
     async fn history(&self, observation_id: i64) -> Result<Vec<ObservationHistoryEntry>> {
         write_ops::history(self, observation_id)

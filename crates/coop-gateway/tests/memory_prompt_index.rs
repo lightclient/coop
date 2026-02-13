@@ -32,6 +32,8 @@ mod config;
 
 #[path = "../src/gateway.rs"]
 mod gateway;
+#[path = "../src/memory_auto_capture.rs"]
+mod memory_auto_capture;
 #[path = "../src/memory_prompt_index.rs"]
 mod memory_prompt_index;
 #[path = "../src/session_store.rs"]
@@ -218,7 +220,12 @@ impl PromptHarness {
     }
 }
 
-fn config_with_prompt_index(enabled: bool, limit: usize, max_tokens: usize) -> Config {
+fn config_with_prompt_index(
+    enabled: bool,
+    limit: usize,
+    max_tokens: usize,
+    recent_days: u32,
+) -> Config {
     toml::from_str(&format!(
         r#"
 [agent]
@@ -229,6 +236,7 @@ model = "prompt-capture-model"
 enabled = {enabled}
 limit = {limit}
 max_tokens = {max_tokens}
+recent_days = {recent_days}
 "#
     ))
     .unwrap()
@@ -273,7 +281,7 @@ fn ensure_global_trace_subscriber() -> &'static Path {
     trace_path.as_path()
 }
 
-async fn seed(memory: &SqliteMemory, store: &str, title: &str) {
+async fn seed(memory: &SqliteMemory, store: &str, title: &str) -> i64 {
     let obs = NewObservation {
         session_key: Some("coop:main".to_owned()),
         store: store.to_owned(),
@@ -291,7 +299,22 @@ async fn seed(memory: &SqliteMemory, store: &str, title: &str) {
     };
 
     let result = memory.write(obs).await.unwrap();
-    assert!(matches!(result, WriteOutcome::Added(_)));
+    match result {
+        WriteOutcome::Added(id) => id,
+        other => panic!("expected add, got {other:?}"),
+    }
+}
+
+async fn wait_for_summary_count(memory: &SqliteMemory, expected: usize) -> Vec<SessionSummary> {
+    for _ in 0..40 {
+        let summaries = memory.recent_session_summaries(10).await.unwrap();
+        if summaries.len() == expected {
+            return summaries;
+        }
+        sleep(Duration::from_millis(25)).await;
+    }
+
+    memory.recent_session_summaries(10).await.unwrap()
 }
 
 #[derive(Debug)]
@@ -336,6 +359,10 @@ impl Memory for FailingSearchMemory {
         })
     }
 
+    async fn recent_session_summaries(&self, _limit: usize) -> Result<Vec<SessionSummary>> {
+        Ok(Vec::new())
+    }
+
     async fn history(&self, _observation_id: i64) -> Result<Vec<ObservationHistoryEntry>> {
         Ok(Vec::new())
     }
@@ -348,9 +375,102 @@ impl Memory for FailingSearchMemory {
     }
 }
 
+#[derive(Debug)]
+struct ScriptedMemory {
+    recent: Vec<ObservationIndex>,
+    relevance: Vec<ObservationIndex>,
+}
+
+impl ScriptedMemory {
+    fn new(recent: Vec<ObservationIndex>, relevance: Vec<ObservationIndex>) -> Self {
+        Self { recent, relevance }
+    }
+}
+
+#[async_trait]
+impl Memory for ScriptedMemory {
+    async fn search(&self, query: &MemoryQuery) -> Result<Vec<ObservationIndex>> {
+        let mut rows = if query.after.is_some() && query.text.is_none() {
+            self.recent.clone()
+        } else if query
+            .text
+            .as_ref()
+            .is_some_and(|text| !text.trim().is_empty())
+        {
+            self.relevance.clone()
+        } else {
+            Vec::new()
+        };
+        rows.truncate(query.limit);
+        Ok(rows)
+    }
+
+    async fn timeline(
+        &self,
+        _anchor: i64,
+        _before: usize,
+        _after: usize,
+    ) -> Result<Vec<ObservationIndex>> {
+        Ok(Vec::new())
+    }
+
+    async fn get(&self, _ids: &[i64]) -> Result<Vec<Observation>> {
+        Ok(Vec::new())
+    }
+
+    async fn write(&self, _obs: NewObservation) -> Result<WriteOutcome> {
+        Ok(WriteOutcome::Skipped)
+    }
+
+    async fn people(&self, _query: &str) -> Result<Vec<Person>> {
+        Ok(Vec::new())
+    }
+
+    async fn summarize_session(&self, session_key: &SessionKey) -> Result<SessionSummary> {
+        Ok(SessionSummary {
+            session_key: session_key.to_string(),
+            request: String::new(),
+            outcome: String::new(),
+            decisions: Vec::new(),
+            open_items: Vec::new(),
+            observation_count: 0,
+            created_at: Utc::now(),
+        })
+    }
+
+    async fn recent_session_summaries(&self, _limit: usize) -> Result<Vec<SessionSummary>> {
+        Ok(Vec::new())
+    }
+
+    async fn history(&self, _observation_id: i64) -> Result<Vec<ObservationHistoryEntry>> {
+        Ok(Vec::new())
+    }
+
+    async fn run_maintenance(
+        &self,
+        _config: &coop_memory::MemoryMaintenanceConfig,
+    ) -> Result<coop_memory::MemoryMaintenanceReport> {
+        Ok(coop_memory::MemoryMaintenanceReport::default())
+    }
+}
+
+fn observation_index(id: i64, title: &str, days_ago: i64, mention_count: u32) -> ObservationIndex {
+    ObservationIndex {
+        id,
+        title: title.to_owned(),
+        obs_type: "technical".to_owned(),
+        store: "shared".to_owned(),
+        created_at: Utc::now() - chrono::Duration::days(days_ago),
+        token_count: 32,
+        mention_count,
+        score: 0.9,
+        related_people: vec!["alice".to_owned()],
+    }
+}
+
 #[tokio::test]
 async fn full_trust_injects_memory_prompt_index_when_data_exists() {
-    let config = config_with_prompt_index(true, 12, 1200);
+    let config = config_with_prompt_index(true, 12, 1200, 3);
     let (harness, memory) = PromptHarness::with_sqlite(config);
 
     seed(&memory, "shared", "deployment checklist").await;
@@ -369,11 +489,33 @@ async fn full_trust_injects_memory_prompt_index_when_data_exists() {
 }
 
 #[tokio::test]
+async fn prompt_index_includes_recent_session_summaries_for_full_trust() {
+    let config = config_with_prompt_index(true, 12, 2_000, 3);
+    let (harness, memory) = PromptHarness::with_sqlite(config);
+
+    seed(&memory, "shared", "summary seed row").await;
+    memory
+        .summarize_session(&SessionKey {
+            agent_id: "coop".to_owned(),
+            kind: coop_core::SessionKind::Main,
+        })
+        .await
+        .unwrap();
+
+    harness.provider.queue_text_response("ok");
+    let _ = harness.run_turn(TrustLevel::Full).await;
+
+    let prompt = harness.provider.last_system_prompt();
+    assert!(prompt.contains("## Recent Sessions"));
+    assert!(prompt.contains("session=coop:main"));
+}
+
+#[tokio::test]
 async fn trace_contains_prompt_index_build_and_injected_events() {
     let trace_path = ensure_global_trace_subscriber();
     let _ = std::fs::remove_file(trace_path);
 
-    let config = config_with_prompt_index(true, 12, 1200);
+    let config = config_with_prompt_index(true, 12, 1200, 3);
     let (harness, memory) = PromptHarness::with_sqlite(config);
     seed(&memory, "shared", "index trace row").await;
 
@@ -399,8 +541,31 @@ async fn trace_contains_prompt_index_build_and_injected_events() {
 }
 
 #[tokio::test]
+async fn post_turn_summary_write_uses_session_upsert() {
+    let config = config_with_prompt_index(true, 12, 1200, 3);
+    let (harness, memory) = PromptHarness::with_sqlite(config);
+
+    seed(&memory, "shared", "session summary source row").await;
+
+    harness.provider.queue_text_response("ok");
+    let _ = harness.run_turn(TrustLevel::Full).await;
+    let first = wait_for_summary_count(&memory, 1).await;
+    assert_eq!(first[0].session_key, "coop:main");
+
+    harness.provider.queue_text_response("ok");
+    let _ = harness.run_turn(TrustLevel::Full).await;
+    let second = wait_for_summary_count(&memory, 1).await;
+
+    assert_eq!(
+        second.len(),
+        1,
+        "summary should be upserted, not duplicated"
+    );
+}
+
+#[tokio::test]
 async fn familiar_and_public_trust_gate_prompt_index_content() {
-    let config = config_with_prompt_index(true, 12, 1200);
+    let config = config_with_prompt_index(true, 12, 1200, 3);
     let (harness, memory) = PromptHarness::with_sqlite(config);
 
     seed(&memory, "private", "private credential note").await;
@@ -425,7 +590,7 @@ async fn familiar_and_public_trust_gate_prompt_index_content() {
 
 #[tokio::test]
 async fn prompt_index_token_budget_truncates_output() {
-    let config = config_with_prompt_index(true, 12, 90);
+    let config = config_with_prompt_index(true, 12, 90, 3);
     let (harness, memory) = PromptHarness::with_sqlite(config);
 
     seed(
@@ -463,7 +628,7 @@ async fn prompt_index_token_budget_truncates_output() {
 
 #[tokio::test]
 async fn prompt_index_failures_do_not_break_turn_creation() {
-    let config = config_with_prompt_index(true, 12, 1200);
+    let config = config_with_prompt_index(true, 12, 1200, 3);
     let failing_memory: Arc<dyn Memory> = Arc::new(FailingSearchMemory);
     let harness = PromptHarness::with_memory(config, failing_memory);
 
@@ -487,45 +652,141 @@ async fn prompt_index_failures_do_not_break_turn_creation() {
 
 #[tokio::test]
 async fn query_aware_index_surfaces_relevant_non_recent_observation() {
-    let config = config_with_prompt_index(true, 12, 2400);
-    let (harness, memory) = PromptHarness::with_sqlite(config);
+    let memory: Arc<dyn Memory> = Arc::new(ScriptedMemory::new(
+        vec![observation_index(1, "recent standup summary", 1, 1)],
+        vec![observation_index(
+            2,
+            "deployment pipeline uses blue-green strategy",
+            30,
+            500,
+        )],
+    ));
 
-    // Seed an old observation about "deployment pipeline" first.
-    seed(
-        &memory,
-        "shared",
-        "deployment pipeline uses blue-green strategy",
+    let config = config_with_prompt_index(true, 6, 3_000, 3);
+    let block = memory_prompt_index::build_prompt_index(
+        memory.as_ref(),
+        TrustLevel::Full,
+        &config.memory.prompt_index,
+        "tell me about the deployment pipeline",
     )
-    .await;
-    // Sleep briefly so subsequent observations have a later updated_at.
-    sleep(Duration::from_millis(20)).await;
+    .await
+    .unwrap()
+    .unwrap();
 
-    // Seed many recent but unrelated observations to push the first one
-    // out of a pure recency-based top-12.
-    for i in 0..14 {
-        seed(
-            &memory,
-            "shared",
-            &format!("unrelated daily standup note {i}"),
-        )
-        .await;
-        sleep(Duration::from_millis(5)).await;
-    }
-
-    // Ask about deployment — the query-aware search should surface the
-    // matching observation even though it's not in the top-12 by recency.
-    harness.provider.queue_text_response("ok");
-    let _ = harness
-        .run_turn_with_input("tell me about the deployment pipeline", TrustLevel::Full)
-        .await;
-
-    let prompt = harness.provider.last_system_prompt();
+    assert!(block.contains("## Memory Index (DB)"));
     assert!(
-        prompt.contains("## Memory Index (DB)"),
-        "prompt index should be present"
+        block.contains("deployment pipeline"),
+        "query-relevant observation should appear in prompt index\n{block}"
     );
-    assert!(
-        prompt.contains("deployment pipeline"),
-        "query-relevant observation should appear in prompt index\nprompt:\n{prompt}"
-    );
+}
+
+#[tokio::test]
+async fn recent_window_rows_are_rendered_before_older_relevance_hits() {
+    let memory: Arc<dyn Memory> = Arc::new(ScriptedMemory::new(
+        vec![
+            observation_index(1, "recent build status (1 day)", 1, 2),
+            observation_index(2, "recent deploy note (2 days)", 2, 1),
+        ],
+        vec![
+            observation_index(3, "old migration decision (30 days)", 30, 999),
+            observation_index(4, "mid-age backlog item (5 days)", 5, 25),
+        ],
+    ));
+
+    let config = config_with_prompt_index(true, 4, 3_000, 3);
+    let block = memory_prompt_index::build_prompt_index(
+        memory.as_ref(),
+        TrustLevel::Full,
+        &config.memory.prompt_index,
+        "what happened with migration and deploy",
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    let rows = block
+        .lines()
+        .filter(|line| line.starts_with("- id="))
+        .collect::<Vec<_>>();
+
+    assert!(rows[0].contains("recent build status"));
+    assert!(rows[1].contains("recent deploy note"));
+    assert!(rows[2].contains("old migration decision"));
+}
+
+#[tokio::test]
+async fn no_recent_rows_gives_full_slot_budget_to_relevance_hits() {
+    let memory: Arc<dyn Memory> = Arc::new(ScriptedMemory::new(
+        Vec::new(),
+        vec![
+            observation_index(10, "relevance hit one", 7, 10),
+            observation_index(11, "relevance hit two", 9, 8),
+            observation_index(12, "relevance hit three", 12, 6),
+        ],
+    ));
+
+    let config = config_with_prompt_index(true, 3, 3_000, 3);
+    let block = memory_prompt_index::build_prompt_index(
+        memory.as_ref(),
+        TrustLevel::Full,
+        &config.memory.prompt_index,
+        "relevance",
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    let row_count = block
+        .lines()
+        .filter(|line| line.starts_with("- id="))
+        .count();
+
+    assert_eq!(row_count, 3);
+    assert!(block.contains("relevance hit one"));
+    assert!(block.contains("relevance hit three"));
+}
+
+#[tokio::test]
+async fn token_budget_prefers_recent_rows_and_truncates_relevance_rows() {
+    let memory: Arc<dyn Memory> = Arc::new(ScriptedMemory::new(
+        vec![
+            observation_index(
+                21,
+                "recent status alpha alpha alpha alpha alpha alpha alpha alpha",
+                1,
+                4,
+            ),
+            observation_index(
+                22,
+                "recent status beta beta beta beta beta beta beta beta",
+                2,
+                3,
+            ),
+            observation_index(
+                23,
+                "recent status gamma gamma gamma gamma gamma gamma gamma gamma",
+                3,
+                2,
+            ),
+        ],
+        vec![
+            observation_index(30, "relevance hit archived docs", 25, 40),
+            observation_index(31, "relevance hit old incident", 30, 55),
+        ],
+    ));
+
+    let config = config_with_prompt_index(true, 5, 90, 3);
+    let block = memory_prompt_index::build_prompt_index(
+        memory.as_ref(),
+        TrustLevel::Full,
+        &config.memory.prompt_index,
+        "incident docs",
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    assert!(block.contains("recent status"));
+    assert!(!block.contains("relevance hit archived docs"));
+    assert!(!block.contains("relevance hit old incident"));
 }

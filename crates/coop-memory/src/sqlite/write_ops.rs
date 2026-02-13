@@ -747,6 +747,12 @@ pub(super) fn summarize_session(
         created_at: now,
     };
 
+    if summary.observation_count == 0 {
+        drop(stmt);
+        drop(conn);
+        return Ok(summary);
+    }
+
     conn.execute(
         "
             INSERT INTO session_summaries (
@@ -759,6 +765,14 @@ pub(super) fn summarize_session(
                 observation_count,
                 created_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(agent_id, session_key)
+            DO UPDATE SET
+                request = excluded.request,
+                outcome = excluded.outcome,
+                decisions = excluded.decisions,
+                open_items = excluded.open_items,
+                observation_count = excluded.observation_count,
+                created_at = excluded.created_at
             ",
         params![
             memory.agent_id,
@@ -775,6 +789,54 @@ pub(super) fn summarize_session(
     drop(stmt);
     drop(conn);
     Ok(summary)
+}
+
+pub(super) fn recent_session_summaries(
+    memory: &SqliteMemory,
+    limit: usize,
+) -> Result<Vec<SessionSummary>> {
+    let limit = i64::try_from(limit.max(1)).unwrap_or(i64::MAX);
+    let conn = memory.conn.lock().expect("memory db mutex poisoned");
+
+    let mut stmt = conn.prepare(
+        "
+            SELECT session_key, request, outcome, decisions, open_items, observation_count, created_at
+            FROM session_summaries
+            WHERE agent_id = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            ",
+    )?;
+
+    let rows = stmt.query_map(params![memory.agent_id, limit], |row| {
+        let decisions = row
+            .get::<_, Option<String>>(3)?
+            .unwrap_or_else(|| "[]".to_owned());
+        let open_items = row
+            .get::<_, Option<String>>(4)?
+            .unwrap_or_else(|| "[]".to_owned());
+        let observation_count = row
+            .get::<_, Option<i64>>(5)?
+            .and_then(|value| usize::try_from(value).ok())
+            .unwrap_or_default();
+        Ok(SessionSummary {
+            session_key: row.get(0)?,
+            request: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+            outcome: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+            decisions: serde_json::from_str(&decisions).unwrap_or_default(),
+            open_items: serde_json::from_str(&open_items).unwrap_or_default(),
+            observation_count,
+            created_at: helpers::dt_from_ms(row.get(6)?),
+        })
+    })?;
+
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    drop(stmt);
+    drop(conn);
+    Ok(out)
 }
 
 pub(super) fn history(

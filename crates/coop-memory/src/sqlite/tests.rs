@@ -501,14 +501,28 @@ async fn timeline_returns_chronological_window() {
 }
 
 #[tokio::test]
-async fn summarize_session_persists_summary() {
+async fn summarize_session_persists_summary_with_upsert() {
     let memory = memory();
-    let mut obs = sample_obs("decision: use sqlite", &["done"]);
-    obs.obs_type = "decision".to_owned();
-    obs.session_key = Some("coop:main".to_owned());
-    memory.write(obs).await.unwrap();
+    let mut decision = sample_obs("decision: use sqlite", &["done"]);
+    decision.obs_type = "decision".to_owned();
+    decision.session_key = Some("coop:main".to_owned());
+    memory.write(decision).await.unwrap();
 
-    let summary = memory
+    let first = memory
+        .summarize_session(&SessionKey {
+            agent_id: "coop".to_owned(),
+            kind: SessionKind::Main,
+        })
+        .await
+        .unwrap();
+    assert_eq!(first.observation_count, 1);
+
+    let mut task = sample_obs("task: ship release", &["open"]);
+    task.obs_type = "task".to_owned();
+    task.session_key = Some("coop:main".to_owned());
+    memory.write(task).await.unwrap();
+
+    let second = memory
         .summarize_session(&SessionKey {
             agent_id: "coop".to_owned(),
             kind: SessionKind::Main,
@@ -516,9 +530,58 @@ async fn summarize_session_persists_summary() {
         .await
         .unwrap();
 
-    assert_eq!(summary.session_key, "coop:main");
-    assert_eq!(summary.observation_count, 1);
-    assert_eq!(summary.decisions.len(), 1);
+    assert_eq!(second.session_key, "coop:main");
+    assert_eq!(second.observation_count, 2);
+    assert_eq!(second.decisions.len(), 1);
+    assert_eq!(second.open_items.len(), 1);
+
+    let conn = memory.conn.lock().expect("memory db mutex poisoned");
+    let row_count = conn
+        .query_row("SELECT COUNT(*) FROM session_summaries", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap();
+    drop(conn);
+
+    assert_eq!(row_count, 1, "summary rows should upsert by session key");
+}
+
+#[tokio::test]
+async fn recent_session_summaries_returns_newest_first() {
+    let memory = memory();
+
+    let mut main_obs = sample_obs("main decision", &["done"]);
+    main_obs.obs_type = "decision".to_owned();
+    main_obs.session_key = Some("coop:main".to_owned());
+    memory.write(main_obs).await.unwrap();
+
+    memory
+        .summarize_session(&SessionKey {
+            agent_id: "coop".to_owned(),
+            kind: SessionKind::Main,
+        })
+        .await
+        .unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+    let mut dm_obs = sample_obs("dm outcome", &["done"]);
+    dm_obs.obs_type = "event".to_owned();
+    dm_obs.session_key = Some("coop:dm:signal:bob-uuid".to_owned());
+    memory.write(dm_obs).await.unwrap();
+
+    memory
+        .summarize_session(&SessionKey {
+            agent_id: "coop".to_owned(),
+            kind: SessionKind::Dm("signal:bob-uuid".to_owned()),
+        })
+        .await
+        .unwrap();
+
+    let summaries = memory.recent_session_summaries(5).await.unwrap();
+    assert_eq!(summaries.len(), 2);
+    assert_eq!(summaries[0].session_key, "coop:dm:signal:bob-uuid");
+    assert_eq!(summaries[1].session_key, "coop:main");
 }
 
 #[tokio::test]

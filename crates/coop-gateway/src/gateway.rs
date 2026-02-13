@@ -18,6 +18,7 @@ use uuid::Uuid;
 use crate::compaction::{self, CompactionState};
 use crate::compaction_store::CompactionStore;
 use crate::config::SharedConfig;
+use crate::memory_auto_capture;
 use crate::memory_prompt_index;
 use crate::session_store::DiskSessionStore;
 
@@ -681,6 +682,8 @@ impl Gateway {
             // Track session-level cumulative usage.
             self.record_turn_usage(session_key, &total_usage);
 
+            let post_turn_messages = new_messages.clone();
+
             let _ = event_tx
                 .send(TurnEvent::Done(TurnResult {
                     messages: new_messages,
@@ -688,6 +691,101 @@ impl Gateway {
                     hit_limit,
                 }))
                 .await;
+
+            if let Some(memory) = &self.memory {
+                let memory_for_summary = Arc::clone(memory);
+                let summary_session_key = session_key.clone();
+                tokio::spawn(async move {
+                    match memory_for_summary.summarize_session(&summary_session_key).await {
+                        Ok(summary) if summary.observation_count > 0 => {
+                            debug!(
+                                session = %summary_session_key,
+                                observation_count = summary.observation_count,
+                                "session summary written"
+                            );
+                        }
+                        Ok(_) => {
+                            debug!(
+                                session = %summary_session_key,
+                                "session summary skipped: no session observations"
+                            );
+                        }
+                        Err(error) => {
+                            warn!(
+                                session = %summary_session_key,
+                                error = %error,
+                                "failed to write session summary"
+                            );
+                        }
+                    }
+                });
+
+                let auto_capture = self.config.load().memory.auto_capture.clone();
+                if auto_capture.enabled
+                    && post_turn_messages.len() >= auto_capture.min_turn_messages
+                {
+                    let memory_for_capture = Arc::clone(memory);
+                    let provider = Arc::clone(&self.provider);
+                    let capture_session_key = session_key.clone();
+                    let turn_messages = post_turn_messages.clone();
+                    tokio::spawn(async move {
+                        match memory_auto_capture::extract_turn_observations(
+                            provider.as_ref(),
+                            &turn_messages,
+                            &capture_session_key,
+                            trust,
+                        )
+                        .await
+                        {
+                            Ok(observations) if !observations.is_empty() => {
+                                let extracted_count = observations.len();
+                                let mut written_count = 0usize;
+
+                                for observation in observations {
+                                    match memory_for_capture.write(observation).await {
+                                        Ok(_) => written_count += 1,
+                                        Err(error) => {
+                                            warn!(
+                                                session = %capture_session_key,
+                                                error = %error,
+                                                "auto-capture memory write failed"
+                                            );
+                                        }
+                                    }
+                                }
+
+                                debug!(
+                                    session = %capture_session_key,
+                                    extracted_count,
+                                    written_count,
+                                    "post-turn auto-capture complete"
+                                );
+                            }
+                            Ok(_) => {
+                                debug!(
+                                    session = %capture_session_key,
+                                    "post-turn auto-capture: nothing to extract"
+                                );
+                            }
+                            Err(error) => {
+                                warn!(
+                                    session = %capture_session_key,
+                                    error = %error,
+                                    "post-turn auto-capture extraction failed"
+                                );
+                            }
+                        }
+                    });
+                } else {
+                    debug!(
+                        session = %session_key,
+                        enabled = auto_capture.enabled,
+                        message_count = post_turn_messages.len(),
+                        min_turn_messages = auto_capture.min_turn_messages,
+                        "post-turn auto-capture skipped"
+                    );
+                }
+            }
 
             Ok(())
         }

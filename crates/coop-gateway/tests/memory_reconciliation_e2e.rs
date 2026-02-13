@@ -31,6 +31,8 @@ mod config;
 
 #[path = "../src/gateway.rs"]
 mod gateway;
+#[path = "../src/memory_auto_capture.rs"]
+mod memory_auto_capture;
 #[path = "../src/memory_prompt_index.rs"]
 mod memory_prompt_index;
 #[path = "../src/memory_reconcile.rs"]

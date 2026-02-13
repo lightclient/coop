@@ -346,18 +346,41 @@ fn check_memory(report: &mut CheckReport, config: &Config, config_dir: &Path) {
     });
 
     let prompt_index = &config.memory.prompt_index;
-    let prompt_index_valid = prompt_index.limit > 0 && prompt_index.max_tokens > 0;
+    let prompt_index_valid = prompt_index.limit > 0
+        && prompt_index.max_tokens > 0
+        && prompt_index.recent_days > 0
+        && prompt_index.recent_days <= 30;
     report.push(CheckResult {
         name: "memory_prompt_index",
         severity: Severity::Error,
         passed: prompt_index_valid,
         message: if prompt_index_valid {
             format!(
-                "memory.prompt_index: enabled={}, limit={}, max_tokens={}",
-                prompt_index.enabled, prompt_index.limit, prompt_index.max_tokens
+                "memory.prompt_index: enabled={}, limit={}, max_tokens={}, recent_days={}",
+                prompt_index.enabled,
+                prompt_index.limit,
+                prompt_index.max_tokens,
+                prompt_index.recent_days
             )
         } else {
-            "memory.prompt_index requires limit > 0 and max_tokens > 0".to_owned()
+            "memory.prompt_index requires limit > 0, max_tokens > 0, and recent_days in 1..=30"
+                .to_owned()
+        },
+    });
+
+    let auto_capture = &config.memory.auto_capture;
+    let auto_capture_valid = auto_capture.min_turn_messages >= 1;
+    report.push(CheckResult {
+        name: "memory_auto_capture",
+        severity: Severity::Error,
+        passed: auto_capture_valid,
+        message: if auto_capture_valid {
+            format!(
+                "memory.auto_capture: enabled={}, min_turn_messages={}",
+                auto_capture.enabled, auto_capture.min_turn_messages
+            )
+        } else {
+            "memory.auto_capture requires min_turn_messages >= 1".to_owned()
         },
     });
 
@@ -942,6 +965,88 @@ mod tests {
             .find(|r| r.name == "memory_prompt_index")
             .unwrap();
         assert!(!prompt_index_check.passed);
+    }
+
+    #[test]
+    fn test_memory_prompt_index_recent_days_bounds() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        let config_path = dir.path().join("coop.toml");
+
+        std::fs::write(
+            &config_path,
+            format!(
+                "[agent]\nid = \"test\"\nmodel = \"test-model\"\nworkspace = \"{}\"\n\n[memory.prompt_index]\nrecent_days = 0\n",
+                workspace.display()
+            ),
+        )
+        .unwrap();
+        let report = validate_config(&config_path, dir.path());
+        let check = report
+            .results
+            .iter()
+            .find(|r| r.name == "memory_prompt_index")
+            .unwrap();
+        assert!(!check.passed, "recent_days=0 should fail");
+
+        std::fs::write(
+            &config_path,
+            format!(
+                "[agent]\nid = \"test\"\nmodel = \"test-model\"\nworkspace = \"{}\"\n\n[memory.prompt_index]\nrecent_days = 31\n",
+                workspace.display()
+            ),
+        )
+        .unwrap();
+        let report = validate_config(&config_path, dir.path());
+        let check = report
+            .results
+            .iter()
+            .find(|r| r.name == "memory_prompt_index")
+            .unwrap();
+        assert!(!check.passed, "recent_days=31 should fail");
+
+        std::fs::write(
+            &config_path,
+            format!(
+                "[agent]\nid = \"test\"\nmodel = \"test-model\"\nworkspace = \"{}\"\n\n[memory.prompt_index]\nrecent_days = 3\n",
+                workspace.display()
+            ),
+        )
+        .unwrap();
+        let report = validate_config(&config_path, dir.path());
+        let check = report
+            .results
+            .iter()
+            .find(|r| r.name == "memory_prompt_index")
+            .unwrap();
+        assert!(check.passed, "recent_days=3 should pass");
+    }
+
+    #[test]
+    fn test_invalid_memory_auto_capture() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        let config_path = dir.path().join("coop.toml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "[agent]\nid = \"test\"\nmodel = \"test-model\"\nworkspace = \"{}\"\n\n[memory.auto_capture]\nenabled = true\nmin_turn_messages = 0\n",
+                workspace.display()
+            ),
+        )
+        .unwrap();
+
+        let report = validate_config(&config_path, dir.path());
+        let check = report
+            .results
+            .iter()
+            .find(|r| r.name == "memory_auto_capture")
+            .unwrap();
+        assert!(!check.passed);
     }
 
     #[test]

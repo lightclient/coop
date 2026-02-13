@@ -1,6 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
+use coop_core::TrustLevel;
 use coop_core::traits::{ToolContext, ToolExecutor};
 use coop_core::types::{ToolDef, ToolOutput};
 use coop_memory::{
@@ -21,6 +22,7 @@ impl MemoryToolExecutor {
         Self { memory }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn defs() -> Vec<ToolDef> {
         vec![
             ToolDef::new(
@@ -118,6 +120,16 @@ impl MemoryToolExecutor {
                     "type": "object",
                     "properties": {
                         "query": { "type": "string" }
+                    }
+                }),
+            ),
+            ToolDef::new(
+                "memory_sessions",
+                "List recent session summaries showing what was discussed and completed.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "limit": { "type": "integer", "minimum": 1, "maximum": 50 }
                     }
                 }),
             ),
@@ -348,6 +360,27 @@ impl MemoryToolExecutor {
         });
         Ok(ToolOutput::success(serde_json::to_string_pretty(&payload)?))
     }
+
+    #[instrument(skip(self, arguments, ctx))]
+    async fn exec_sessions(&self, arguments: Value, ctx: &ToolContext) -> Result<ToolOutput> {
+        if ctx.trust != TrustLevel::Full {
+            return Ok(ToolOutput::success("{\"count\":0,\"sessions\":[]}"));
+        }
+
+        let limit = arguments
+            .get("limit")
+            .and_then(Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .unwrap_or(10)
+            .clamp(1, 50);
+
+        let sessions = self.memory.recent_session_summaries(limit).await?;
+        let payload = serde_json::json!({
+            "count": sessions.len(),
+            "sessions": sessions,
+        });
+        Ok(ToolOutput::success(serde_json::to_string_pretty(&payload)?))
+    }
 }
 
 #[async_trait]
@@ -360,6 +393,7 @@ impl ToolExecutor for MemoryToolExecutor {
             "memory_write" => self.exec_write(arguments, ctx).await,
             "memory_history" => self.exec_history(arguments, ctx).await,
             "memory_people" => self.exec_people(arguments, ctx).await,
+            "memory_sessions" => self.exec_sessions(arguments, ctx).await,
             _ => Ok(ToolOutput::error(format!("unknown tool: {name}"))),
         }
     }
@@ -400,7 +434,7 @@ fn millis_to_datetime(value: Option<&Value>) -> Option<chrono::DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use coop_core::TrustLevel;
+    use coop_core::{SessionKey, SessionKind, TrustLevel};
     use coop_memory::SqliteMemory;
     use std::path::PathBuf;
 
@@ -413,14 +447,20 @@ mod tests {
         }
     }
 
-    fn executor() -> MemoryToolExecutor {
+    fn executor_with_memory() -> (MemoryToolExecutor, Arc<SqliteMemory>) {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("memory.db");
         let memory = Arc::new(SqliteMemory::open(db_path, "coop").unwrap());
 
         // Leak tmpdir so the sqlite file remains available for the test lifetime.
         std::mem::forget(dir);
-        MemoryToolExecutor::new(memory)
+
+        let executor = MemoryToolExecutor::new(Arc::clone(&memory) as Arc<dyn Memory>);
+        (executor, memory)
+    }
+
+    fn executor() -> MemoryToolExecutor {
+        executor_with_memory().0
     }
 
     #[tokio::test]
@@ -470,5 +510,50 @@ mod tests {
 
         assert!(!out.is_error);
         assert!(out.content.contains("\"count\":0"));
+    }
+
+    #[tokio::test]
+    async fn memory_sessions_returns_recent_summaries() {
+        let (exec, memory) = executor_with_memory();
+
+        memory
+            .write(NewObservation {
+                session_key: Some("coop:main".to_owned()),
+                store: "shared".to_owned(),
+                obs_type: "decision".to_owned(),
+                title: "Use SQLite for memory".to_owned(),
+                narrative: "Persist memory in sqlite".to_owned(),
+                facts: vec!["SQLite enabled".to_owned()],
+                tags: vec!["memory".to_owned()],
+                source: "test".to_owned(),
+                related_files: vec!["crates/coop-memory/src/sqlite/mod.rs".to_owned()],
+                related_people: vec!["alice".to_owned()],
+                token_count: Some(32),
+                expires_at: None,
+                min_trust: min_trust_for_store("shared"),
+            })
+            .await
+            .unwrap();
+
+        memory
+            .summarize_session(&SessionKey {
+                agent_id: "coop".to_owned(),
+                kind: SessionKind::Main,
+            })
+            .await
+            .unwrap();
+
+        let out = exec
+            .execute(
+                "memory_sessions",
+                serde_json::json!({"limit": 5}),
+                &ctx(TrustLevel::Full),
+            )
+            .await
+            .unwrap();
+
+        assert!(!out.is_error);
+        assert!(out.content.contains("\"count\": 1"));
+        assert!(out.content.contains("Use SQLite for memory"));
     }
 }

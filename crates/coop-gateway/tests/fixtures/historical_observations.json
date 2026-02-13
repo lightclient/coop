@@ -1,0 +1,142 @@
+[
+  {
+    "id": 101,
+    "title": "daily deploy notes for api service",
+    "obs_type": "event",
+    "store": "shared",
+    "days_ago": 0,
+    "mention_count": 4,
+    "score": 0.82,
+    "related_people": ["alice"]
+  },
+  {
+    "id": 102,
+    "title": "alice approved hotfix rollback guardrails",
+    "obs_type": "decision",
+    "store": "shared",
+    "days_ago": 1,
+    "mention_count": 3,
+    "score": 0.8,
+    "related_people": ["alice"]
+  },
+  {
+    "id": 103,
+    "title": "bob asked for clearer release checklist wording",
+    "obs_type": "preference",
+    "store": "social",
+    "days_ago": 2,
+    "mention_count": 2,
+    "score": 0.78,
+    "related_people": ["bob"]
+  },
+  {
+    "id": 104,
+    "title": "ci pipeline cache warmup optimization",
+    "obs_type": "discovery",
+    "store": "shared",
+    "days_ago": 4,
+    "mention_count": 8,
+    "score": 0.76,
+    "related_people": ["alice"]
+  },
+  {
+    "id": 105,
+    "title": "group reminder to tag postmortems consistently",
+    "obs_type": "task",
+    "store": "social",
+    "days_ago": 5,
+    "mention_count": 6,
+    "score": 0.74,
+    "related_people": ["carol"]
+  },
+  {
+    "id": 106,
+    "title": "database migration dry-run findings",
+    "obs_type": "discovery",
+    "store": "shared",
+    "days_ago": 6,
+    "mention_count": 34,
+    "score": 0.9,
+    "related_people": ["alice"]
+  },
+  {
+    "id": 107,
+    "title": "observability dashboard threshold adjustment",
+    "obs_type": "decision",
+    "store": "shared",
+    "days_ago": 7,
+    "mention_count": 11,
+    "score": 0.81,
+    "related_people": ["bob"]
+  },
+  {
+    "id": 108,
+    "title": "memory search query tuning notes",
+    "obs_type": "discovery",
+    "store": "shared",
+    "days_ago": 8,
+    "mention_count": 18,
+    "score": 0.83,
+    "related_people": ["alice"]
+  },
+  {
+    "id": 109,
+    "title": "week-two incident drill schedule",
+    "obs_type": "task",
+    "store": "social",
+    "days_ago": 9,
+    "mention_count": 9,
+    "score": 0.72,
+    "related_people": ["carol"]
+  },
+  {
+    "id": 110,
+    "title": "historical migration incident root cause summary",
+    "obs_type": "event",
+    "store": "shared",
+    "days_ago": 10,
+    "mention_count": 120,
+    "score": 0.95,
+    "related_people": ["alice", "bob"]
+  },
+  {
+    "id": 111,
+    "title": "legacy migration rollback command reference",
+    "obs_type": "discovery",
+    "store": "shared",
+    "days_ago": 11,
+    "mention_count": 95,
+    "score": 0.93,
+    "related_people": ["bob"]
+  },
+  {
+    "id": 112,
+    "title": "security exception for maintenance window",
+    "obs_type": "decision",
+    "store": "shared",
+    "days_ago": 12,
+    "mention_count": 14,
+    "score": 0.79,
+    "related_people": ["alice"]
+  },
+  {
+    "id": 113,
+    "title": "release candidate smoke test script update",
+    "obs_type": "task",
+    "store": "shared",
+    "days_ago": 13,
+    "mention_count": 22,
+    "score": 0.84,
+    "related_people": ["alice"]
+  },
+  {
+    "id": 114,
+    "title": "deep migration incident retrospective",
+    "obs_type": "event",
+    "store": "shared",
+    "days_ago": 14,
+    "mention_count": 140,
+    "score": 0.97,
+    "related_people": ["alice", "bob", "carol"]
+  }
+]
