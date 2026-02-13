@@ -38,6 +38,11 @@ const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
 /// at this before iterative shrinking — usually enough to get under 5 MB.
 const ANTHROPIC_MAX_LONG_EDGE: u32 = 1568;
 
+/// Anthropic rejects images with any dimension > 2000px in many-image requests.
+/// We enforce this for all images proactively since we can't predict the API's
+/// internal image budget (it depends on total image count across the conversation).
+const MAX_IMAGE_DIMENSION: u32 = 2000;
+
 /// Each iterative shrink pass reduces dimensions to this fraction.
 const SHRINK_FACTOR: f64 = 0.75;
 
@@ -80,6 +85,7 @@ fn format_api_error(status: reqwest::StatusCode, raw_body: &str) -> String {
 ///
 /// Standard base64 encodes 3 bytes into 4 characters. This computes the
 /// decoded size accounting for padding, without actually decoding.
+#[cfg(test)]
 fn base64_decoded_size(b64: &str) -> usize {
     let len = b64.len();
     if len == 0 {
@@ -129,10 +135,12 @@ fn downscale_image(b64_data: &str, mime_type: &str) -> Option<(String, String)> 
     };
 
     // Iterative shrink until under the limit (or dimensions collapse).
+    // The API enforces the 5 MB limit on the base64 *string* length,
+    // not the decoded byte count. Check the base64 output directly.
     loop {
         let encoded_bytes = encode_image(&img, output_format)?;
-        if encoded_bytes.len() <= MAX_IMAGE_BYTES {
-            let b64_out = BASE64.encode(&encoded_bytes);
+        let b64_out = BASE64.encode(&encoded_bytes);
+        if b64_out.len() <= MAX_IMAGE_BYTES {
             return Some((b64_out, out_mime.to_owned()));
         }
 
@@ -168,24 +176,56 @@ fn encode_image(img: &image::DynamicImage, format: ImageFormat) -> Option<Vec<u8
     Some(buf.into_inner())
 }
 
+/// Check if a base64-encoded image has any dimension exceeding `MAX_IMAGE_DIMENSION`.
+///
+/// Uses `ImageReader::into_dimensions()` which only reads the image header,
+/// avoiding a full pixel decode. Returns `true` if any dimension exceeds the limit.
+fn exceeds_dimension_limit(b64_data: &str) -> bool {
+    let Ok(raw) = BASE64.decode(b64_data) else {
+        return false;
+    };
+    let cursor = Cursor::new(raw);
+    let Ok(reader) = image::ImageReader::new(cursor).with_guessed_format() else {
+        return false;
+    };
+    match reader.into_dimensions() {
+        Ok((w, h)) => w > MAX_IMAGE_DIMENSION || h > MAX_IMAGE_DIMENSION,
+        Err(_) => false,
+    }
+}
+
 /// Format a single image content block for the Anthropic API.
 ///
-/// If the image exceeds `MAX_IMAGE_BYTES`, attempts to downscale it.
+/// Downscales the image if it exceeds either:
+/// - `MAX_IMAGE_BYTES` (5 MB decoded)
+/// - `MAX_IMAGE_DIMENSION` (2000px on any axis, Anthropic's many-image limit)
+///
 /// Returns `None` (skip) only if downscaling also fails.
 fn format_image_block(data: &str, mime_type: &str) -> Option<Value> {
-    let decoded_size = base64_decoded_size(data);
-    if decoded_size > MAX_IMAGE_BYTES {
+    // The API enforces the 5 MB limit on the base64 string length.
+    let b64_len = data.len();
+    let over_size = b64_len > MAX_IMAGE_BYTES;
+    let over_dimension = !over_size && exceeds_dimension_limit(data);
+
+    if over_size || over_dimension {
+        let reason = if over_size {
+            "exceeds 5 MB API limit"
+        } else {
+            "exceeds 2000px dimension limit for many-image requests"
+        };
         info!(
-            decoded_bytes = decoded_size,
+            b64_len,
             max_bytes = MAX_IMAGE_BYTES,
             mime = %mime_type,
-            "image exceeds 5 MB API limit, downscaling"
+            reason,
+            "image needs downscaling"
         );
         if let Some((new_data, new_mime)) = downscale_image(data, mime_type) {
             info!(
-                original_bytes = decoded_size,
-                new_bytes = base64_decoded_size(&new_data),
+                original_b64_len = b64_len,
+                new_b64_len = new_data.len(),
                 new_mime = %new_mime,
+                reason,
                 "image downscaled successfully"
             );
             Some(json!({
@@ -198,8 +238,9 @@ fn format_image_block(data: &str, mime_type: &str) -> Option<Value> {
             }))
         } else {
             warn!(
-                decoded_bytes = decoded_size,
+                b64_len,
                 mime = %mime_type,
+                reason,
                 "failed to downscale image, skipping"
             );
             None
@@ -1541,13 +1582,9 @@ mod tests {
 
     #[test]
     fn format_messages_skips_oversized_image() {
-        // Create a base64 string that decodes to > 5MB.
-        // 5MB + 1 byte = 5242881 bytes. base64 of that is ceil(5242881/3)*4 chars.
-        // Use a string of 'A' repeated to the right length.
-        // 5242881 bytes: ceil(5242881/3) = 1747627, * 4 = 6_990_508 chars, with 2 pad.
-        // Actually for exact: 5242881 % 3 = 0 => 5242881/3*4 = 6_990_508, no padding.
-        // Wait, 5242881 / 3 = 1747627.0 => exact, so 6_990_508 chars, no padding.
-        let oversized_b64 = "A".repeat(6_990_508);
+        // The API enforces the 5 MB limit on base64 string length.
+        // Create a base64 string longer than MAX_IMAGE_BYTES (5242880).
+        let oversized_b64 = "A".repeat(MAX_IMAGE_BYTES + 1);
 
         let messages = vec![
             Message::user()
@@ -1566,12 +1603,8 @@ mod tests {
 
     #[test]
     fn format_messages_keeps_image_at_exact_limit() {
-        // Exactly 5MB = 5242880 bytes. 5242880 / 3 = 1747626.666...
-        // So we need padding. 1747626 * 3 = 5242878, remainder 2.
-        // base64: 1747627 * 4 = 6_990_508 chars, with 1 pad char.
-        // Actually let's use a size that divides evenly: 5242878 bytes (just under 5MB).
-        // 5242878 / 3 = 1747626.0, * 4 = 6_990_504, no padding. decoded = 5242878 < 5242880.
-        let at_limit_b64 = "A".repeat(6_990_504);
+        // Base64 string exactly at the limit — should pass.
+        let at_limit_b64 = "A".repeat(MAX_IMAGE_BYTES);
 
         let messages = vec![
             Message::user()
@@ -1591,7 +1624,7 @@ mod tests {
     fn format_messages_drops_message_if_only_content_was_oversized_image() {
         // Message with only an oversized image — after filtering, content is empty.
         // Empty-content messages should be dropped (same as thinking-only messages).
-        let oversized_b64 = "A".repeat(6_990_508);
+        let oversized_b64 = "A".repeat(MAX_IMAGE_BYTES + 1);
 
         let messages = vec![
             Message::user().with_text("hello"),
@@ -1718,5 +1751,110 @@ mod tests {
         let result_b64 = content[1]["source"]["data"].as_str().unwrap();
         let result_size = BASE64.decode(result_b64).expect("decode").len();
         assert!(result_size <= MAX_IMAGE_BYTES);
+    }
+
+    // ---- exceeds_dimension_limit / many-image dimension cap ----
+
+    #[test]
+    fn exceeds_dimension_limit_true_for_wide_image() {
+        // 2500×500 — width exceeds 2000px limit
+        let b64 = make_png(2500, 500);
+        assert!(exceeds_dimension_limit(&b64));
+    }
+
+    #[test]
+    fn exceeds_dimension_limit_true_for_tall_image() {
+        // 500×2500 — height exceeds 2000px limit
+        let b64 = make_png(500, 2500);
+        assert!(exceeds_dimension_limit(&b64));
+    }
+
+    #[test]
+    fn exceeds_dimension_limit_false_at_exactly_2000() {
+        // 2000×2000 — exactly at the limit, should NOT exceed
+        let b64 = make_png(2000, 2000);
+        assert!(!exceeds_dimension_limit(&b64));
+    }
+
+    #[test]
+    fn exceeds_dimension_limit_false_for_small_image() {
+        let b64 = make_png(100, 100);
+        assert!(!exceeds_dimension_limit(&b64));
+    }
+
+    #[test]
+    fn exceeds_dimension_limit_false_for_invalid_base64() {
+        assert!(!exceeds_dimension_limit("not-valid!!!"));
+    }
+
+    #[test]
+    fn format_image_block_downscales_oversized_dimensions() {
+        // 2100×400 image — under 5MB but exceeds 2000px dimension limit.
+        // Using narrow height to keep total size well under 5MB.
+        let b64 = make_jpeg(2100, 400);
+        let decoded_size = base64_decoded_size(&b64);
+        assert!(
+            decoded_size <= MAX_IMAGE_BYTES,
+            "test image must be under 5MB, got {decoded_size}"
+        );
+
+        let result = format_image_block(&b64, "image/jpeg").expect("should produce a block");
+
+        // Verify the result image has dimensions <= ANTHROPIC_MAX_LONG_EDGE (1568).
+        let result_b64 = result["source"]["data"].as_str().unwrap();
+        let raw = BASE64.decode(result_b64).unwrap();
+        let img = image::load_from_memory(&raw).unwrap();
+        assert!(
+            img.width() <= ANTHROPIC_MAX_LONG_EDGE && img.height() <= ANTHROPIC_MAX_LONG_EDGE,
+            "downscaled image dimensions {}x{} should be <= {}",
+            img.width(),
+            img.height(),
+            ANTHROPIC_MAX_LONG_EDGE
+        );
+    }
+
+    #[test]
+    fn format_image_block_passes_through_small_image() {
+        // 800×600 — well within all limits.
+        let b64 = make_jpeg(800, 600);
+        let result = format_image_block(&b64, "image/jpeg").expect("should produce a block");
+
+        // Data should be unchanged (no downscaling).
+        assert_eq!(result["source"]["data"].as_str().unwrap(), b64);
+    }
+
+    #[test]
+    fn format_messages_downscales_wide_image_under_5mb() {
+        // 2200×400 JPEG — under 5MB but exceeds 2000px dimension limit.
+        let b64 = make_jpeg(2200, 400);
+        let decoded_size = BASE64.decode(&b64).unwrap().len();
+        assert!(
+            decoded_size <= MAX_IMAGE_BYTES,
+            "test image must be under 5MB, got {decoded_size}"
+        );
+
+        let messages = vec![
+            Message::user()
+                .with_text("What's in this?")
+                .with_image(b64, "image/jpeg"),
+        ];
+
+        let formatted = AnthropicProvider::format_messages(&messages, false, None);
+
+        let content = formatted[0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[1]["type"], "image");
+
+        // Verify dimensions are within the limit after downscaling.
+        let result_b64 = content[1]["source"]["data"].as_str().unwrap();
+        let raw = BASE64.decode(result_b64).unwrap();
+        let img = image::load_from_memory(&raw).unwrap();
+        assert!(
+            img.width() <= MAX_IMAGE_DIMENSION && img.height() <= MAX_IMAGE_DIMENSION,
+            "result {}x{} should fit within {}px",
+            img.width(),
+            img.height(),
+            MAX_IMAGE_DIMENSION
+        );
     }
 }
