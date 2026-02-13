@@ -15,6 +15,8 @@
 - cron seems to be flushing all turns at the end to the chat, but still thinks
   it can't send a message
 - cron retry
+- startup notification hook
+- the /status command doesn't update intra request
 
 ## Gateway
 

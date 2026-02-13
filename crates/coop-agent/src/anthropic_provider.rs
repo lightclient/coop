@@ -645,8 +645,8 @@ impl AnthropicProvider {
                     };
                     msg = msg.with_tool_request(id, coop_name, input.clone());
                 }
-                ContentBlock::Thinking { .. } => {
-                    // Skip thinking blocks from interleaved-thinking beta
+                ContentBlock::Thinking { .. } | ContentBlock::Unknown => {
+                    // Skip thinking blocks and unknown types
                 }
             }
         }
@@ -940,7 +940,7 @@ where
                             json_buf: String::new(),
                         });
                     }
-                    SseContentBlock::Thinking => {
+                    SseContentBlock::Thinking | SseContentBlock::Unknown => {
                         self.blocks.push(BlockAccumulator::Thinking);
                     }
                 }
@@ -960,7 +960,9 @@ where
                     }
                     SseAction::Continue
                 }
-                SseDelta::Thinking { .. } | SseDelta::Signature { .. } => SseAction::Continue,
+                SseDelta::Thinking { .. } | SseDelta::Signature { .. } | SseDelta::Unknown => {
+                    SseAction::Continue
+                }
             },
             SseEvent::ContentBlockStop { .. } | SseEvent::Ping => SseAction::Continue,
             SseEvent::MessageDelta { delta, usage } => {
@@ -1038,6 +1040,10 @@ enum ContentBlock {
         #[allow(dead_code)]
         thinking: String,
     },
+    /// Catch-all for unknown content block types (e.g. model-generated images).
+    /// Prevents deserialization failures when Anthropic adds new block types.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1131,6 +1137,9 @@ enum SseContentBlock {
     ToolUse { id: String, name: String },
     #[serde(rename = "thinking")]
     Thinking,
+    /// Catch-all for unknown block types (e.g. model-generated images).
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1150,6 +1159,9 @@ enum SseDelta {
         #[allow(dead_code)]
         signature: String,
     },
+    /// Catch-all for unknown delta types.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Deserialize)]
