@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use coop_core::{Content, Message, Provider, SessionKey, ToolDef, TrustLevel};
-use coop_memory::{NewObservation, min_trust_for_store, trust_to_store};
+use coop_memory::{NewObservation, min_trust_for_store, normalize_file_path, trust_to_store};
 use serde::Deserialize;
 use serde_json::Value;
 use tracing::{debug, instrument, warn};
@@ -169,7 +169,7 @@ fn to_new_observation(
         facts: clean_list(raw.facts, 200),
         tags: clean_list(raw.tags, 50),
         source: "auto_capture".to_owned(),
-        related_files: clean_list(raw.related_files, 200),
+        related_files: normalize_related_files(raw.related_files),
         related_people: clean_list(raw.related_people, 100),
         token_count: None,
         expires_at: None,
@@ -226,6 +226,18 @@ fn clean_list(values: Vec<String>, max_item_chars: usize) -> Vec<String> {
         .filter(|value| !value.is_empty())
         .take(20)
         .collect()
+}
+
+fn normalize_related_files(values: Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    for value in clean_list(values, 200) {
+        let normalized = normalize_file_path(&value);
+        if normalized.is_empty() || out.contains(&normalized) {
+            continue;
+        }
+        out.push(normalized);
+    }
+    out
 }
 
 fn clip(value: &str, max_chars: usize) -> String {

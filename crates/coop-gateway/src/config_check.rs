@@ -356,8 +356,9 @@ fn check_memory(report: &mut CheckReport, config: &Config, config_dir: &Path) {
         passed: prompt_index_valid,
         message: if prompt_index_valid {
             format!(
-                "memory.prompt_index: enabled={}, limit={}, max_tokens={}, recent_days={}",
+                "memory.prompt_index: enabled={}, include_file_links={}, limit={}, max_tokens={}, recent_days={}",
                 prompt_index.enabled,
+                prompt_index.include_file_links,
                 prompt_index.limit,
                 prompt_index.max_tokens,
                 prompt_index.recent_days

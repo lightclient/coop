@@ -8,7 +8,8 @@ use std::sync::{Arc, Mutex};
 use crate::traits::{EmbeddingProvider, Memory, Reconciler};
 use crate::types::{
     MemoryMaintenanceConfig, MemoryQuery, NewObservation, ReconcileDecision, ReconcileObservation,
-    ReconcileRequest, WriteOutcome, min_trust_for_store, trust_from_str, trust_to_str,
+    ReconcileRequest, WriteOutcome, min_trust_for_store, normalize_file_path, trust_from_str,
+    trust_to_str,
 };
 use coop_core::{SessionKey, SessionKind, TrustLevel};
 
@@ -1002,6 +1003,107 @@ async fn rebuild_index_via_trait() {
     let rebuilt = Memory::rebuild_index(&memory).await.unwrap();
     assert_eq!(rebuilt, 1);
     assert_eq!(vec_row_count(&memory), 1);
+}
+
+#[tokio::test]
+async fn search_by_file_exact_match() {
+    let memory = memory();
+
+    let mut first = sample_obs("alpha", &["one"]);
+    first.related_files = vec!["src/main.rs".to_owned(), "src/lib.rs".to_owned()];
+    let first_outcome = memory.write(first).await.unwrap();
+    let WriteOutcome::Added(first_id) = first_outcome else {
+        panic!("expected add");
+    };
+
+    let mut second = sample_obs("beta", &["two"]);
+    second.related_files = vec!["src/lib.rs".to_owned()];
+    let second_outcome = memory.write(second).await.unwrap();
+    let WriteOutcome::Added(second_id) = second_outcome else {
+        panic!("expected add");
+    };
+
+    let hits = memory
+        .search_by_file("src/main.rs", false, 10)
+        .await
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].id, first_id);
+
+    let lib_hits = memory
+        .search_by_file("src/lib.rs", false, 10)
+        .await
+        .unwrap();
+    let mut ids = lib_hits.iter().map(|row| row.id).collect::<Vec<_>>();
+    ids.sort_unstable();
+
+    let mut expected = vec![first_id, second_id];
+    expected.sort_unstable();
+    assert_eq!(ids, expected);
+}
+
+#[tokio::test]
+async fn search_by_file_prefix_match() {
+    let memory = memory();
+
+    let mut first = sample_obs("gateway file", &["one"]);
+    first.related_files = vec![
+        "crates/coop-gateway/src/main.rs".to_owned(),
+        "crates/coop-gateway/src/gateway.rs".to_owned(),
+    ];
+    memory.write(first).await.unwrap();
+
+    let mut second = sample_obs("memory file", &["two"]);
+    second.related_files = vec!["crates/coop-memory/src/lib.rs".to_owned()];
+    memory.write(second).await.unwrap();
+
+    let hits = memory
+        .search_by_file("crates/coop-gateway/", true, 10)
+        .await
+        .unwrap();
+
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].title, "gateway file");
+}
+
+#[tokio::test]
+async fn search_by_file_respects_expiry() {
+    let memory = memory();
+
+    let mut expiring = sample_obs("expires soon", &["one"]);
+    expiring.related_files = vec!["src/expired.rs".to_owned()];
+    expiring.expires_at = Some(chrono::Utc::now() - chrono::Duration::seconds(1));
+    memory.write(expiring).await.unwrap();
+
+    let hits = memory
+        .search_by_file("src/expired.rs", false, 10)
+        .await
+        .unwrap();
+    assert!(hits.is_empty());
+}
+
+#[tokio::test]
+async fn search_by_file_empty_results() {
+    let memory = memory();
+    memory.write(sample_obs("present", &["one"])).await.unwrap();
+
+    let hits = memory
+        .search_by_file("does/not/exist.rs", false, 10)
+        .await
+        .unwrap();
+    assert!(hits.is_empty());
+}
+
+#[test]
+fn normalize_file_path_cases() {
+    assert_eq!(normalize_file_path("./foo/bar.rs"), "foo/bar.rs");
+    assert_eq!(normalize_file_path("foo//bar.rs"), "foo/bar.rs");
+    assert_eq!(normalize_file_path("foo\\bar.rs"), "foo/bar.rs");
+    assert_eq!(normalize_file_path("foo/./bar/../baz.rs"), "foo/baz.rs");
+    assert_eq!(
+        normalize_file_path("crates/coop-gateway/"),
+        "crates/coop-gateway/"
+    );
 }
 
 #[test]

@@ -6,9 +6,11 @@ use coop_core::traits::{ToolContext, ToolExecutor};
 use coop_core::types::{ToolDef, ToolOutput};
 use coop_memory::{
     Memory, MemoryQuery, NewObservation, WriteOutcome, accessible_stores, min_trust_for_store,
-    trust_to_store,
+    normalize_file_path, trust_to_store,
 };
 use serde_json::Value;
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::Arc;
 use tracing::{debug, instrument};
 
@@ -45,11 +47,42 @@ impl MemoryToolExecutor {
                             "type": "array",
                             "items": { "type": "string" }
                         },
+                        "file": {
+                            "type": "string",
+                            "description": "Filter to observations referencing this file path"
+                        },
                         "after_ms": { "type": "integer" },
                         "before_ms": { "type": "integer" },
                         "limit": { "type": "integer", "minimum": 1, "maximum": 50 },
                         "max_tokens": { "type": "integer", "minimum": 1 }
                     }
+                }),
+            ),
+            ToolDef::new(
+                "memory_files",
+                "Find observations linked to a file path. Supports exact match or directory prefix.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "File path to search (for example: 'src/main.rs' or 'crates/coop-gateway/')"
+                        },
+                        "prefix": {
+                            "type": "boolean",
+                            "description": "If true, match all files under this directory prefix"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 50
+                        },
+                        "check_exists": {
+                            "type": "boolean",
+                            "description": "If true, check which referenced files still exist on disk"
+                        }
+                    },
+                    "required": ["path"]
                 }),
             ),
             ToolDef::new(
@@ -166,6 +199,12 @@ impl MemoryToolExecutor {
             .unwrap_or(10)
             .min(50);
 
+        let file_filter = arguments
+            .get("file")
+            .and_then(Value::as_str)
+            .map(normalize_file_path)
+            .filter(|path| !path.is_empty());
+
         let query = MemoryQuery {
             text: arguments
                 .get("query")
@@ -185,14 +224,137 @@ impl MemoryToolExecutor {
                 .and_then(|v| usize::try_from(v).ok()),
         };
 
-        let results = self.memory.search(&query).await?;
+        let mut results = self.memory.search(&query).await?;
 
+        if let Some(path) = file_filter.as_ref() {
+            let ids = results.iter().map(|result| result.id).collect::<Vec<_>>();
+            let observations = self.memory.get(&ids).await?;
+
+            let matching_ids = observations
+                .into_iter()
+                .filter(|obs| {
+                    obs.related_files
+                        .iter()
+                        .map(|file| normalize_file_path(file))
+                        .any(|file| file == *path)
+                })
+                .map(|obs| obs.id)
+                .collect::<HashSet<_>>();
+
+            results.retain(|result| matching_ids.contains(&result.id));
+        }
+
+        let result_count = results.len();
         let payload = serde_json::json!({
-            "count": results.len(),
+            "count": result_count,
             "results": results,
         });
 
-        debug!(count = results.len(), "memory_search complete");
+        debug!(
+            count = result_count,
+            has_file_filter = file_filter.is_some(),
+            "memory_search complete"
+        );
+        Ok(ToolOutput::success(serde_json::to_string_pretty(&payload)?))
+    }
+
+    #[instrument(skip(self, arguments, ctx))]
+    async fn exec_files(&self, arguments: Value, ctx: &ToolContext) -> Result<ToolOutput> {
+        let raw_path = arguments
+            .get("path")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("missing required parameter: path"))?;
+
+        let path = normalize_file_path(raw_path);
+        if path.is_empty() {
+            return Ok(ToolOutput::error("path cannot be empty"));
+        }
+
+        let prefix = arguments
+            .get("prefix")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let check_exists = arguments
+            .get("check_exists")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let limit = arguments
+            .get("limit")
+            .and_then(Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .unwrap_or(10)
+            .clamp(1, 50);
+
+        let allowed = accessible_stores(ctx.trust);
+        if allowed.is_empty() {
+            let payload = serde_json::json!({
+                "count": 0,
+                "path": path,
+                "results": [],
+            });
+            return Ok(ToolOutput::success(serde_json::to_string_pretty(&payload)?));
+        }
+
+        let mut results = self.memory.search_by_file(&path, prefix, limit).await?;
+        results.retain(|row| allowed.contains(&row.store));
+
+        let ids = results.iter().map(|row| row.id).collect::<Vec<_>>();
+        let observations = self.memory.get(&ids).await?;
+        let related_files_by_id = observations
+            .into_iter()
+            .map(|obs| (obs.id, normalize_file_list(obs.related_files)))
+            .collect::<HashMap<_, _>>();
+
+        let mut stale_file_count = 0usize;
+        let mut rendered_results = Vec::with_capacity(results.len());
+
+        for result in results {
+            let files = related_files_by_id
+                .get(&result.id)
+                .cloned()
+                .unwrap_or_default();
+
+            let rendered_files = files
+                .into_iter()
+                .map(|file| {
+                    if check_exists {
+                        let exists = file_exists_in_workspace(&ctx.workspace, &file);
+                        if !exists {
+                            stale_file_count = stale_file_count.saturating_add(1);
+                        }
+                        serde_json::json!({"path": file, "exists": exists})
+                    } else {
+                        serde_json::json!({"path": file})
+                    }
+                })
+                .collect::<Vec<_>>();
+
+            rendered_results.push(serde_json::json!({
+                "id": result.id,
+                "title": result.title,
+                "type": result.obs_type,
+                "store": result.store,
+                "created": result.created_at.format("%Y-%m-%d").to_string(),
+                "files": rendered_files,
+            }));
+        }
+
+        debug!(
+            path = %path,
+            prefix,
+            result_count = rendered_results.len(),
+            stale_file_count,
+            "memory_files complete"
+        );
+
+        let payload = serde_json::json!({
+            "count": rendered_results.len(),
+            "path": path,
+            "results": rendered_results,
+        });
+
         Ok(ToolOutput::success(serde_json::to_string_pretty(&payload)?))
     }
 
@@ -293,7 +455,7 @@ impl MemoryToolExecutor {
                 .and_then(Value::as_str)
                 .unwrap_or("agent")
                 .to_owned(),
-            related_files: string_array(arguments.get("related_files")),
+            related_files: normalize_file_list(string_array(arguments.get("related_files"))),
             related_people: string_array(arguments.get("related_people")),
             token_count: arguments
                 .get("token_count")
@@ -388,6 +550,7 @@ impl ToolExecutor for MemoryToolExecutor {
     async fn execute(&self, name: &str, arguments: Value, ctx: &ToolContext) -> Result<ToolOutput> {
         match name {
             "memory_search" => self.exec_search(arguments, ctx).await,
+            "memory_files" => self.exec_files(arguments, ctx).await,
             "memory_timeline" => self.exec_timeline(arguments, ctx).await,
             "memory_get" => self.exec_get(arguments, ctx).await,
             "memory_write" => self.exec_write(arguments, ctx).await,
@@ -430,19 +593,45 @@ fn millis_to_datetime(value: Option<&Value>) -> Option<chrono::DateTime<Utc>> {
     Utc.timestamp_millis_opt(millis).single()
 }
 
+fn normalize_file_list(files: Vec<String>) -> Vec<String> {
+    let mut normalized = Vec::new();
+    for file in files {
+        let path = normalize_file_path(&file);
+        if path.is_empty() || normalized.contains(&path) {
+            continue;
+        }
+        normalized.push(path);
+    }
+    normalized
+}
+
+fn file_exists_in_workspace(workspace: &Path, file: &str) -> bool {
+    let path = Path::new(file);
+    let resolved = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        workspace.join(path)
+    };
+    resolved.exists()
+}
+
 #[allow(clippy::unwrap_used)]
 #[cfg(test)]
 mod tests {
     use super::*;
     use coop_core::{SessionKey, SessionKind, TrustLevel};
     use coop_memory::SqliteMemory;
-    use std::path::PathBuf;
+    use std::path::Path;
 
     fn ctx(trust: TrustLevel) -> ToolContext {
+        ctx_in(trust, Path::new("."))
+    }
+
+    fn ctx_in(trust: TrustLevel, workspace: &Path) -> ToolContext {
         ToolContext {
             session_id: "coop:main".to_owned(),
             trust,
-            workspace: PathBuf::from("."),
+            workspace: workspace.to_path_buf(),
             user_name: None,
         }
     }
@@ -555,5 +744,180 @@ mod tests {
         assert!(!out.is_error);
         assert!(out.content.contains("\"count\": 1"));
         assert!(out.content.contains("Use SQLite for memory"));
+    }
+
+    #[tokio::test]
+    async fn memory_search_file_filter_matches_related_file() {
+        let (exec, memory) = executor_with_memory();
+
+        let first = memory
+            .write(NewObservation {
+                session_key: Some("coop:main".to_owned()),
+                store: "shared".to_owned(),
+                obs_type: "technical".to_owned(),
+                title: "match first".to_owned(),
+                narrative: String::new(),
+                facts: vec!["alpha".to_owned()],
+                tags: vec![],
+                source: "test".to_owned(),
+                related_files: vec!["./src//main.rs".to_owned()],
+                related_people: vec![],
+                token_count: Some(8),
+                expires_at: None,
+                min_trust: min_trust_for_store("shared"),
+            })
+            .await
+            .unwrap();
+        let WriteOutcome::Added(first_id) = first else {
+            panic!("expected add");
+        };
+
+        memory
+            .write(NewObservation {
+                session_key: Some("coop:main".to_owned()),
+                store: "shared".to_owned(),
+                obs_type: "technical".to_owned(),
+                title: "match second".to_owned(),
+                narrative: String::new(),
+                facts: vec!["beta".to_owned()],
+                tags: vec![],
+                source: "test".to_owned(),
+                related_files: vec!["src/lib.rs".to_owned()],
+                related_people: vec![],
+                token_count: Some(8),
+                expires_at: None,
+                min_trust: min_trust_for_store("shared"),
+            })
+            .await
+            .unwrap();
+
+        let out = exec
+            .execute(
+                "memory_search",
+                serde_json::json!({
+                    "query": "match",
+                    "file": "src/main.rs"
+                }),
+                &ctx(TrustLevel::Inner),
+            )
+            .await
+            .unwrap();
+
+        assert!(!out.is_error);
+        let payload: Value = serde_json::from_str(&out.content).unwrap();
+        assert_eq!(payload["count"], 1);
+        assert_eq!(payload["results"][0]["id"], first_id);
+    }
+
+    #[tokio::test]
+    async fn memory_files_respects_trust_gating() {
+        let (exec, memory) = executor_with_memory();
+
+        memory
+            .write(NewObservation {
+                session_key: Some("coop:main".to_owned()),
+                store: "private".to_owned(),
+                obs_type: "decision".to_owned(),
+                title: "private note".to_owned(),
+                narrative: String::new(),
+                facts: vec![],
+                tags: vec![],
+                source: "test".to_owned(),
+                related_files: vec!["src/main.rs".to_owned()],
+                related_people: vec![],
+                token_count: Some(8),
+                expires_at: None,
+                min_trust: min_trust_for_store("private"),
+            })
+            .await
+            .unwrap();
+
+        memory
+            .write(NewObservation {
+                session_key: Some("coop:main".to_owned()),
+                store: "social".to_owned(),
+                obs_type: "decision".to_owned(),
+                title: "social note".to_owned(),
+                narrative: String::new(),
+                facts: vec![],
+                tags: vec![],
+                source: "test".to_owned(),
+                related_files: vec!["src/main.rs".to_owned()],
+                related_people: vec![],
+                token_count: Some(8),
+                expires_at: None,
+                min_trust: min_trust_for_store("social"),
+            })
+            .await
+            .unwrap();
+
+        let out = exec
+            .execute(
+                "memory_files",
+                serde_json::json!({"path": "src/main.rs"}),
+                &ctx(TrustLevel::Familiar),
+            )
+            .await
+            .unwrap();
+
+        assert!(!out.is_error);
+        let payload: Value = serde_json::from_str(&out.content).unwrap();
+        assert_eq!(payload["count"], 1);
+        assert_eq!(payload["results"][0]["store"], "social");
+    }
+
+    #[tokio::test]
+    async fn memory_files_check_exists_reports_flags() {
+        let (exec, memory) = executor_with_memory();
+        let dir = tempfile::tempdir().unwrap();
+        let existing_file = dir.path().join("existing.rs");
+        std::fs::write(&existing_file, "fn main() {}\n").unwrap();
+
+        memory
+            .write(NewObservation {
+                session_key: Some("coop:main".to_owned()),
+                store: "shared".to_owned(),
+                obs_type: "technical".to_owned(),
+                title: "file state".to_owned(),
+                narrative: String::new(),
+                facts: vec![],
+                tags: vec![],
+                source: "test".to_owned(),
+                related_files: vec!["existing.rs".to_owned(), "missing.rs".to_owned()],
+                related_people: vec![],
+                token_count: Some(8),
+                expires_at: None,
+                min_trust: min_trust_for_store("shared"),
+            })
+            .await
+            .unwrap();
+
+        let out = exec
+            .execute(
+                "memory_files",
+                serde_json::json!({
+                    "path": "existing.rs",
+                    "check_exists": true
+                }),
+                &ctx_in(TrustLevel::Inner, dir.path()),
+            )
+            .await
+            .unwrap();
+
+        assert!(!out.is_error);
+        let payload: Value = serde_json::from_str(&out.content).unwrap();
+
+        let files = payload["results"][0]["files"].as_array().unwrap();
+        let existing = files
+            .iter()
+            .find(|row| row["path"] == "existing.rs")
+            .unwrap();
+        let missing = files
+            .iter()
+            .find(|row| row["path"] == "missing.rs")
+            .unwrap();
+
+        assert_eq!(existing["exists"], true);
+        assert_eq!(missing["exists"], false);
     }
 }

@@ -249,6 +249,8 @@ impl Default for MemoryConfig {
 pub(crate) struct MemoryPromptIndexConfig {
     #[serde(default = "default_prompt_index_enabled")]
     pub enabled: bool,
+    #[serde(default = "default_prompt_index_include_file_links")]
+    pub include_file_links: bool,
     #[serde(default = "default_prompt_index_limit")]
     pub limit: usize,
     #[serde(default = "default_prompt_index_max_tokens")]
@@ -261,6 +263,7 @@ impl Default for MemoryPromptIndexConfig {
     fn default() -> Self {
         Self {
             enabled: default_prompt_index_enabled(),
+            include_file_links: default_prompt_index_include_file_links(),
             limit: default_prompt_index_limit(),
             max_tokens: default_prompt_index_max_tokens(),
             recent_days: default_prompt_index_recent_days(),
@@ -392,6 +395,10 @@ fn default_memory_db_path() -> String {
 }
 
 const fn default_prompt_index_enabled() -> bool {
+    true
+}
+
+const fn default_prompt_index_include_file_links() -> bool {
     true
 }
 
@@ -528,6 +535,7 @@ model = "anthropic/claude-sonnet-4-20250514"
         assert!(config.channels.signal.is_none());
         assert_eq!(config.memory.db_path, "./db/memory.db");
         assert!(config.memory.prompt_index.enabled);
+        assert!(config.memory.prompt_index.include_file_links);
         assert_eq!(config.memory.prompt_index.limit, 30);
         assert_eq!(config.memory.prompt_index.max_tokens, 3_000);
         assert_eq!(config.memory.prompt_index.recent_days, 3);
@@ -578,6 +586,7 @@ name = "anthropic"
         assert_eq!(config.provider.name, "anthropic");
         assert_eq!(config.memory.db_path, "./db/memory.db");
         assert!(config.memory.prompt_index.enabled);
+        assert!(config.memory.prompt_index.include_file_links);
         assert_eq!(config.memory.prompt_index.limit, 30);
         assert_eq!(config.memory.prompt_index.max_tokens, 3_000);
         assert_eq!(config.memory.prompt_index.recent_days, 3);
@@ -676,6 +685,7 @@ db_path = "./state/memory.db"
 
 [memory.prompt_index]
 enabled = false
+include_file_links = false
 limit = 5
 max_tokens = 300
 recent_days = 7
@@ -700,6 +710,7 @@ dimensions = 1024
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.memory.db_path, "./state/memory.db");
         assert!(!config.memory.prompt_index.enabled);
+        assert!(!config.memory.prompt_index.include_file_links);
         assert_eq!(config.memory.prompt_index.limit, 5);
         assert_eq!(config.memory.prompt_index.max_tokens, 300);
         assert_eq!(config.memory.prompt_index.recent_days, 7);

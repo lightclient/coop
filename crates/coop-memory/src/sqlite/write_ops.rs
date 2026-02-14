@@ -6,7 +6,7 @@ use tracing::{debug, warn};
 use crate::types::{
     MemoryQuery, NewObservation, Observation, ObservationHistoryEntry, Person, ReconcileCandidate,
     ReconcileDecision, ReconcileObservation, ReconcileRequest, SessionSummary, WriteOutcome,
-    min_trust_for_store, trust_to_str,
+    min_trust_for_store, normalize_file_path, trust_to_str,
 };
 
 use super::{SqliteMemory, helpers, query};
@@ -49,7 +49,7 @@ impl ObservationPayload {
             facts: obs.facts,
             tags: obs.tags,
             source: obs.source,
-            related_files: obs.related_files,
+            related_files: normalize_related_files(obs.related_files),
             related_people: obs.related_people,
             token_count,
             expires_at: obs.expires_at.map(helpers::ms_from_dt),
@@ -87,7 +87,7 @@ impl ObservationPayload {
             facts: merged.facts,
             tags: merged.tags,
             source: base.source.clone(),
-            related_files: merged.related_files,
+            related_files: normalize_related_files(merged.related_files),
             related_people: merged.related_people,
             token_count,
             expires_at: base.expires_at,
@@ -655,6 +655,18 @@ fn decision_candidate_in_range(decision: &ReconcileDecision, candidate_count: us
         | ReconcileDecision::Delete { candidate_index }
         | ReconcileDecision::None { candidate_index } => *candidate_index < candidate_count,
     }
+}
+
+fn normalize_related_files(files: Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    for file in files {
+        let normalized = normalize_file_path(&file);
+        if normalized.is_empty() || out.contains(&normalized) {
+            continue;
+        }
+        out.push(normalized);
+    }
+    out
 }
 
 pub(super) fn people(memory: &SqliteMemory, query: &str) -> Result<Vec<Person>> {

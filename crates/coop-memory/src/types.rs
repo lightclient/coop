@@ -208,6 +208,56 @@ pub fn embedding_text(title: &str, facts: &[String]) -> String {
     format!("{title}; {}", facts.join("; "))
 }
 
+pub fn normalize_file_path(path: &str) -> String {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let mut normalized = trimmed.replace('\\', "/");
+    while normalized.starts_with("./") {
+        normalized = normalized[2..].to_owned();
+    }
+
+    let is_absolute = normalized.starts_with('/');
+    let keep_trailing_slash = normalized.ends_with('/');
+
+    let mut segments = Vec::new();
+    for segment in normalized.split('/') {
+        if segment.is_empty() || segment == "." {
+            continue;
+        }
+
+        if segment == ".." {
+            if let Some(last) = segments.last()
+                && *last != ".."
+            {
+                segments.pop();
+                continue;
+            }
+
+            if !is_absolute {
+                segments.push(segment);
+            }
+            continue;
+        }
+
+        segments.push(segment);
+    }
+
+    let mut out = String::new();
+    if is_absolute {
+        out.push('/');
+    }
+    out.push_str(&segments.join("/"));
+
+    if keep_trailing_slash && !out.is_empty() && !out.ends_with('/') {
+        out.push('/');
+    }
+
+    out
+}
+
 pub fn trust_to_store(trust: TrustLevel) -> &'static str {
     match trust {
         TrustLevel::Full => "private",

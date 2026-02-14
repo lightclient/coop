@@ -72,6 +72,8 @@ pub(super) fn init_schema(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_obs_created ON observations(created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_obs_trust ON observations(min_trust);
         CREATE INDEX IF NOT EXISTS idx_obs_hash ON observations(agent_id, hash);
+        CREATE INDEX IF NOT EXISTS idx_obs_files ON observations(agent_id)
+            WHERE related_files != '[]';
 
         CREATE TABLE IF NOT EXISTS observation_embeddings (
             observation_id INTEGER PRIMARY KEY,

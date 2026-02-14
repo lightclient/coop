@@ -32,6 +32,15 @@ pub trait Reconciler: Send + Sync {
 pub trait Memory: Send + Sync {
     async fn search(&self, query: &MemoryQuery) -> Result<Vec<ObservationIndex>>;
 
+    async fn search_by_file(
+        &self,
+        _path: &str,
+        _prefix_match: bool,
+        _limit: usize,
+    ) -> Result<Vec<ObservationIndex>> {
+        Ok(Vec::new())
+    }
+
     async fn timeline(
         &self,
         anchor: i64,

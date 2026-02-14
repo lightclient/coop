@@ -790,3 +790,20 @@ async fn token_budget_prefers_recent_rows_and_truncates_relevance_rows() {
     assert!(!block.contains("relevance hit archived docs"));
     assert!(!block.contains("relevance hit old incident"));
 }
+
+#[tokio::test]
+async fn prompt_index_file_enrichment_adds_file_linked_section() {
+    let config = config_with_prompt_index(true, 12, 2_000, 3);
+    let (harness, memory) = PromptHarness::with_sqlite(config);
+
+    seed(&memory, "shared", "gateway refactor memory").await;
+
+    harness.provider.queue_text_response("ok");
+    let _ = harness
+        .run_turn_with_input("Please check src/main.rs", TrustLevel::Full)
+        .await;
+
+    let prompt = harness.provider.last_system_prompt();
+    assert!(prompt.contains("### File-linked observations"));
+    assert!(prompt.contains("files=[main.rs]"));
+}

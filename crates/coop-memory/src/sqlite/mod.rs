@@ -1,3 +1,4 @@
+mod file_query;
 mod helpers;
 mod maintenance;
 mod query;
@@ -20,7 +21,7 @@ use crate::traits::{EmbeddingProvider, Memory, Reconciler};
 use crate::types::{
     MemoryMaintenanceConfig, MemoryMaintenanceReport, MemoryQuery, NewObservation, Observation,
     ObservationHistoryEntry, ObservationIndex, Person, SessionSummary, WriteOutcome,
-    embedding_text,
+    embedding_text, normalize_file_path,
 };
 
 const DAY_MS: f32 = 86_400_000.0;
@@ -489,6 +490,34 @@ impl Memory for SqliteMemory {
     async fn search(&self, query: &MemoryQuery) -> Result<Vec<ObservationIndex>> {
         let query_embedding = self.embedding_for_query(query).await;
         query::search(self, query, query_embedding.as_deref())
+    }
+
+    #[instrument(skip(self), fields(path = %path, prefix_match, limit))]
+    async fn search_by_file(
+        &self,
+        path: &str,
+        prefix_match: bool,
+        limit: usize,
+    ) -> Result<Vec<ObservationIndex>> {
+        let normalized_path = normalize_file_path(path);
+        if normalized_path.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let rows = file_query::search_by_file(self, &normalized_path, prefix_match, limit)?;
+        let indexes = rows
+            .into_iter()
+            .map(|row| helpers::to_index(row, 0.0))
+            .collect::<Vec<_>>();
+
+        debug!(
+            path = %normalized_path,
+            result_count = indexes.len(),
+            prefix_match,
+            "memory file search complete"
+        );
+
+        Ok(indexes)
     }
 
     #[instrument(skip(self))]

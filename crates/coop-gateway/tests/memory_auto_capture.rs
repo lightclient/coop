@@ -162,7 +162,7 @@ async fn wait_for_observation(memory: &SqliteMemory, title_fragment: &str) -> bo
 #[tokio::test]
 async fn auto_capture_writes_observations_after_turn() {
     let provider: Arc<dyn Provider> = Arc::new(FakeProvider::new(
-        r#"[{"title":"Captured build discovery","narrative":"Fixed failing build in turn","facts":["cargo fmt ran"],"type":"discovery","tags":["build"],"related_people":["alice"],"related_files":["crates/coop-gateway/src/gateway.rs"]}]"#,
+        r#"[{"title":"Captured build discovery","narrative":"Fixed failing build in turn","facts":["cargo fmt ran"],"type":"discovery","tags":["build"],"related_people":["alice"],"related_files":["./crates\\coop-gateway//src/gateway.rs"]}]"#,
     ));
 
     let harness = AutoCaptureHarness::new(config_with_auto_capture(true, 1), provider);
@@ -171,6 +171,24 @@ async fn auto_capture_writes_observations_after_turn() {
     assert!(
         wait_for_observation(&harness.memory, "Captured build discovery").await,
         "expected auto-capture observation to be written"
+    );
+
+    let rows = harness
+        .memory
+        .search(&MemoryQuery {
+            text: Some("Captured build discovery".to_owned()),
+            stores: vec!["shared".to_owned()],
+            limit: 5,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+
+    let observations = harness.memory.get(&[rows[0].id]).await.unwrap();
+    assert_eq!(
+        observations[0].related_files,
+        vec!["crates/coop-gateway/src/gateway.rs"]
     );
 }
 

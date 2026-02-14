@@ -195,6 +195,7 @@ async fn fixture_recency_window_is_always_first_under_load() {
     let memory = HistoricalMemory::load();
     let settings = MemoryPromptIndexConfig {
         enabled: true,
+        include_file_links: true,
         limit: 8,
         max_tokens: 3_000,
         recent_days: 3,
@@ -237,6 +238,7 @@ async fn fixture_with_no_recent_rows_allocates_full_limit_to_relevance() {
     let older_only = HistoricalMemory::load().only_older_than_days(5);
     let settings = MemoryPromptIndexConfig {
         enabled: true,
+        include_file_links: true,
         limit: 6,
         max_tokens: 3_000,
         recent_days: 3,
