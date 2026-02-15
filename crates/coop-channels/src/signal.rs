@@ -499,6 +499,32 @@ async fn send_task(
 
         debug!(action = ?action, "sending signal action");
 
+        // Flush stale websockets before sending real messages.
+        //
+        // Presage multiplexes send and receive over a shared identified
+        // websocket with a 55-second keepalive. If the underlying TCP
+        // connection dies silently (NAT timeout, ISP maintenance, etc.),
+        // up to 55 seconds can pass before the keepalive detects the
+        // failure and marks the socket as closed.  During that window
+        // `is_closed()` still returns false, so `Manager::send_message`
+        // will try to push through the dead connection, fail with a
+        // non-retryable `WsClosing` error, and the message is lost.
+        //
+        // `whoami()` is a lightweight authenticated request that forces
+        // presage to use (and therefore test) the identified websocket.
+        // If the connection is dead it will fail fast and presage will
+        // replace the cached socket on the next call.  The actual
+        // `send_signal_action` that follows will then get a fresh
+        // connection.
+        //
+        // We skip the probe for ephemeral actions (typing indicators,
+        // receipts) where a dropped message is harmless.
+        if is_durable_action(&action)
+            && let Err(error) = Box::pin(manager.whoami()).await
+        {
+            warn!(error = %error, "pre-send websocket probe failed, connection will be refreshed");
+        }
+
         match send_signal_action(&mut manager, action).await {
             Ok(()) => set_health(&health, ChannelHealth::Healthy),
             Err(error) => {
@@ -515,6 +541,13 @@ async fn send_task(
         &health,
         ChannelHealth::Unhealthy("signal sender task stopped".to_owned()),
     );
+}
+
+fn is_durable_action(action: &SignalAction) -> bool {
+    !matches!(
+        action,
+        SignalAction::Typing { .. } | SignalAction::SendReceipt { .. }
+    )
 }
 
 #[allow(clippy::large_futures, clippy::too_many_lines)]

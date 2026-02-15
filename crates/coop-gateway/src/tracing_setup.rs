@@ -213,7 +213,7 @@ pub(crate) fn init(console: bool) -> TracingGuard {
 
     let console_layer = console.then(|| {
         let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-            EnvFilter::new("info,libsignal_service=warn,libsignal_service::websocket=error,libsignal_protocol=warn,presage=warn,presage_store_sqlite=warn,sqlx=warn,hyper_util=warn,reqwest_websocket=warn")
+            EnvFilter::new("info,libsignal_service=info,libsignal_service::sender=debug,libsignal_service::websocket=warn,libsignal_protocol=warn,presage=info,presage::manager::registered=debug,presage_store_sqlite=warn,sqlx=warn,hyper_util=warn,reqwest_websocket=warn")
         });
         fmt::layer()
             .compact()
@@ -235,7 +235,7 @@ pub(crate) fn init(console: bool) -> TracingGuard {
         guards.push(guard);
 
         let jsonl_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-            EnvFilter::new("debug,libsignal_service=warn,libsignal_service::websocket=error,libsignal_protocol=warn,presage=warn,presage_store_sqlite=warn,sqlx=warn,hyper_util=warn,reqwest_websocket=warn")
+            EnvFilter::new("debug,libsignal_service=info,libsignal_service::sender=debug,libsignal_service::websocket=debug,libsignal_protocol=warn,presage=info,presage::manager::registered=debug,presage_store_sqlite=warn,sqlx=warn,hyper_util=warn,reqwest_websocket=warn")
         });
 
         Some(
