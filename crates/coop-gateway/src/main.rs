@@ -21,6 +21,7 @@ mod memory_tools;
 mod reminder;
 mod router;
 mod scheduler;
+mod service;
 mod session_store;
 #[cfg(feature = "signal")]
 mod signal_loop;
@@ -52,7 +53,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, info, info_span, warn};
 
-use crate::cli::{Cli, Commands, MemoryCommands, SignalCommands};
+use crate::cli::{Cli, Commands, GatewayCommands, MemoryCommands, SignalCommands};
 use crate::config::{Config, SharedConfig, shared_config};
 use crate::gateway::Gateway;
 use crate::memory_embedding::build_embedder;
@@ -83,6 +84,7 @@ async fn main() -> Result<()> {
     let console_log = matches!(
         cli.command,
         Commands::Start
+            | Commands::Gateway { .. }
             | Commands::Signal { .. }
             | Commands::Memory { .. }
             | Commands::Version
@@ -100,6 +102,7 @@ async fn main() -> Result<()> {
         Commands::Init { dir } => init::cmd_init(dir.as_deref()),
         Commands::Check { format } => cmd_check(cli.config.as_deref(), &format),
         Commands::Start => cmd_start(cli.config.as_deref()).await,
+        Commands::Gateway { command } => cmd_gateway(cli.config.as_deref(), command).await,
         Commands::Chat { user } => cmd_chat(cli.config.as_deref(), user.as_deref()).await,
         Commands::Attach { session } => cmd_attach(cli.config.as_deref(), &session).await,
         Commands::Signal { command } => cmd_signal(cli.config.as_deref(), command).await,
@@ -183,6 +186,10 @@ fn cmd_check(config_path: Option<&str>, format: &str) -> Result<()> {
         std::process::exit(1);
     }
     Ok(())
+}
+
+async fn cmd_gateway(config_path: Option<&str>, command: GatewayCommands) -> Result<()> {
+    service::cmd_gateway(config_path, command).await
 }
 
 fn init_memory_store(
@@ -474,7 +481,15 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
     );
 
     let socket = socket_path(&agent_id);
-    let server = IpcServer::bind(&socket)?;
+    let pid_file = service::write_pid_file(&agent_id)?;
+    let server = match IpcServer::bind(&socket) {
+        Ok(server) => server,
+        Err(error) => {
+            service::remove_pid_file(&agent_id);
+            return Err(error);
+        }
+    };
+    info!(path = %pid_file.display(), pid = std::process::id(), "pid file written");
 
     let shutdown_token = CancellationToken::new();
 
@@ -583,6 +598,9 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
         // Brief grace period for the signal runtime to close the websocket cleanly.
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
+
+    service::remove_pid_file(&agent_id);
+    info!("pid file removed");
 
     Ok(())
 }

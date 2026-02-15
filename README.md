@@ -46,7 +46,7 @@ RUSTC_WRAPPER="" CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=cc cargo install -
 
 This builds and installs the `coop` binary to `~/.cargo/bin/`.
 
-## Quick start
+## Quick start (gateway service, recommended)
 
 ```bash
 coop init
@@ -54,11 +54,40 @@ coop init
 # Set your API key (standard Anthropic key or Claude Code OAuth token)
 export ANTHROPIC_API_KEY="sk-ant-..."
 
-coop start
+# Install and start the user service (systemd on Linux, launchd on macOS)
+coop gateway install
 
-# In another terminal, attach a TUI session
+# Verify gateway health
+coop gateway status
+
+# Attach a TUI session
 coop attach
 ```
+
+The gateway install step persists the resolved runtime environment (including
+API key variables) in a per-agent env file with mode `0600`, so restarts and
+reboots don't depend on your current shell exports.
+
+### Common gateway commands
+
+```bash
+coop gateway status          # health + socket status
+coop gateway logs -f         # follow structured gateway logs
+coop gateway restart         # restart daemon process
+coop gateway rollback        # restore coop.toml.bak and restart
+coop gateway uninstall       # remove service files
+```
+
+If your platform doesn't have systemd/launchd, use:
+
+```bash
+coop gateway install --print   # print service templates/env for manual setup
+coop gateway start             # fallback background process (PID-based)
+```
+
+`coop start` (foreground daemon) and `coop chat` (embedded standalone mode)
+still work for development/debugging, but for normal use, prefer
+`coop gateway install`.
 
 ## Configuration
 
@@ -257,12 +286,15 @@ coop signal link
 
 This displays a QR code — scan it with Signal on your phone (Settings → Linked Devices → Link New Device).
 
-To find your Signal UUID for the `match` field, send a message to the linked device and check the trace output:
+To find your Signal UUID for the `match` field, make sure the gateway is running, then send a message to the linked device and inspect the trace file:
 
 ```bash
-COOP_TRACE_FILE=traces.jsonl coop start
-# Send a message from your phone, then:
-grep '"signal"' traces.jsonl | head -5
+coop gateway status
+# if not running: coop gateway start
+
+# Send a message from your phone, then inspect traces.
+# Default trace file is next to coop.toml (usually ~/.coop/traces.jsonl).
+grep '"signal"' ~/.coop/traces.jsonl | head -5
 ```
 
 The sender UUID in the trace is what goes in your config:

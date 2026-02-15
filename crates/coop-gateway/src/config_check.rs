@@ -311,6 +311,9 @@ pub(crate) fn validate_config(config_path: &Path, config_dir: &Path) -> CheckRep
     // 11-13. cron checks
     check_cron(&mut report, &config);
 
+    // 14. binary_exists
+    check_binary_exists(&mut report);
+
     report
 }
 
@@ -724,6 +727,44 @@ fn check_cron(report: &mut CheckReport, config: &Config) {
                     ),
                 });
             }
+        }
+    }
+}
+
+fn check_binary_exists(report: &mut CheckReport) {
+    match std::env::current_exe() {
+        Ok(path) => {
+            let path_str = path.to_string_lossy();
+            let in_build_dir =
+                path_str.contains("target/debug") || path_str.contains("target/release");
+            let exists = path.exists();
+            let passed = exists && !in_build_dir;
+
+            let message = if !exists {
+                format!("current executable does not exist: {}", path.display())
+            } else if in_build_dir {
+                format!(
+                    "binary is in a build directory: {} (service may break if binary moves)",
+                    path.display()
+                )
+            } else {
+                format!("binary: {}", path.display())
+            };
+
+            report.push(CheckResult {
+                name: "binary_exists",
+                severity: Severity::Warning,
+                passed,
+                message,
+            });
+        }
+        Err(error) => {
+            report.push(CheckResult {
+                name: "binary_exists",
+                severity: Severity::Warning,
+                passed: false,
+                message: format!("failed to resolve current executable: {error}"),
+            });
         }
     }
 }
