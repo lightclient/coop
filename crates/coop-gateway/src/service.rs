@@ -490,7 +490,10 @@ async fn gateway_start(ctx: &GatewayContext, config: &Config) -> Result<()> {
         Platform::Launchd if ctx.installed() => {
             let uid = run_cmd("id", &["-u"])?;
             let domain = format!("gui/{uid}/{}", ctx.service_name);
-            let bootstrap = run_cmd_allow_failure(
+            // bootstrap may fail if the service is already loaded (errno 5 /
+            // "Input/output error" on newer macOS, or "already loaded" on
+            // older versions). Ignore — kickstart -k works regardless.
+            run_cmd_ignore_failure(
                 "launchctl",
                 &[
                     "bootstrap",
@@ -498,12 +501,6 @@ async fn gateway_start(ctx: &GatewayContext, config: &Config) -> Result<()> {
                     &display(&ctx.paths.unit_file),
                 ],
             )?;
-            if !bootstrap.success
-                && !bootstrap.stderr.contains("already")
-                && !bootstrap.stderr.contains("in use")
-            {
-                bail!("launchctl bootstrap failed: {}", bootstrap.stderr.trim());
-            }
             run_cmd("launchctl", &["kickstart", "-k", &domain])?;
         }
         _ => {
