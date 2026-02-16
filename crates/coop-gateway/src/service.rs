@@ -903,6 +903,12 @@ where
         }
     }
 
+    if let Some(embedding) = &config.memory.embedding
+        && let Some(env_var) = embedding.required_api_key_env()
+    {
+        capture_keys.insert(env_var);
+    }
+
     for key in capture_keys {
         if let Some(value) = lookup(&key) {
             env.insert(key, value);
@@ -1777,6 +1783,44 @@ mod tests {
         assert!(env.contains_key("OPENAI_API_KEY"));
         assert!(!env.contains_key("HOME"));
         assert!(!env.contains_key("PATH"));
+    }
+
+    #[test]
+    fn environment_captures_embedding_api_key() {
+        let mut config = test_config();
+        config.memory.embedding = Some(crate::config::MemoryEmbeddingConfig {
+            provider: "openai-compatible".to_owned(),
+            model: "text-embedding-3-small".to_owned(),
+            dimensions: 1536,
+            base_url: Some("https://openrouter.ai/api/v1".to_owned()),
+            api_key_env: Some("OPENROUTER_API_KEY".to_owned()),
+        });
+
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = ServicePaths {
+            binary: tmp.path().join("coop"),
+            config: tmp.path().join("coop.toml"),
+            unit_file: tmp.path().join("coop.service"),
+            env_file: tmp.path().join("service.env"),
+            launchd_wrapper: tmp.path().join("wrapper.sh"),
+            trace_file: tmp.path().join("traces.jsonl"),
+            stdout_log: tmp.path().join("stdout.log"),
+            stderr_log: tmp.path().join("stderr.log"),
+        };
+
+        let source = BTreeMap::from([
+            ("ANTHROPIC_API_KEY".to_owned(), "a".to_owned()),
+            ("OPENROUTER_API_KEY".to_owned(), "r".to_owned()),
+        ]);
+
+        let env =
+            resolve_effective_env_with_lookup(&config, &paths, &[], None, None, None, |key| {
+                source.get(key).cloned()
+            })
+            .unwrap();
+
+        assert!(env.contains_key("OPENROUTER_API_KEY"));
+        assert_eq!(env["OPENROUTER_API_KEY"], "r");
     }
 
     #[test]
