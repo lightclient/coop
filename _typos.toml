@@ -15,5 +15,5 @@ hax = "hax"
 unparseable = "unparseable"
 
 [files]
-# Don't check generated files
-extend-exclude = ["supply-chain/", "target/"]
+# Don't check generated files or vendored third-party code
+extend-exclude = ["supply-chain/", "target/", "vendor/"]
