@@ -200,6 +200,56 @@ This explains why the problem is "worst on phones and worst in the morning after
 
 **`vendor/libsignal-service-rs/src/sender.rs`**: Added sealed-sender fallback to identified sender for `WsError`, `WsClosing`, `Timeout`, and `SendError` — not just `Unauthorized`. If the unidentified websocket is dead/degraded, these transport errors now cause a retry via the identified websocket. Defense-in-depth for H1 (dead unidentified websocket).
 
+## Bug: Stale Certificate Cache (2026-02-20)
+
+### Problem
+
+The Feb 19 fix (`get_sender_certificate()` instead of `get_uuid_only_sender_certificate()`) was deployed at 06:03 UTC on Feb 20. Coop restarted at 06:09. The morning briefing fired at 11:30. **The message still didn't reach the phone** despite the code fix being in place.
+
+### Root cause: sender certificate persisted in SQLite
+
+The sender certificate is cached in two layers:
+
+1. **SQLite persistent store** (`kv` table, key `'sender_certificate'`)
+2. **In-memory `Mutex<Option<SenderCertificate>>`**
+
+On startup, `load_registered()` loads the cached cert from SQLite into memory (line 172). The `needs_renewal()` closure only checks **expiration** (within 600s of expiry), not **certificate type**. Signal sender certs last 24 hours.
+
+**Sequence:**
+1. Before fix: presage fetches UUID-only cert, stores in SQLite
+2. Fix deployed, coop restarts at 06:09 — loads stale UUID-only cert from SQLite
+3. `needs_renewal()` → cert not expired → uses cached UUID-only cert
+4. Morning briefing at 11:30 → sent with UUID-only cert → phone doesn't receive it
+5. The new `get_sender_certificate()` code is never reached until the old cert expires
+
+### Trace evidence (bug.jsonl)
+
+The trace confirmed the send path was clean — 4 devices encrypted, sealed sender accepted, both websockets healthy, zero errors. Three delivery receipts came back from the recipient (from other linked devices). But the phone never received the message. The send used the cached UUID-only cert, defeating the fix.
+
+### Fix
+
+**`vendor/presage/presage/src/manager/registered.rs`**: Added E164 check to `needs_renewal()`. If the cached certificate has no E164 (UUID-only), it's treated as expired and a new full certificate is fetched. Also added `info!` tracing when a new cert is fetched, logging `has_e164` so future traces can confirm the cert type.
+
+```rust
+// Reject UUID-only certificates (missing E164)
+if let Some(cert) = sender_certificate {
+    if let Ok(e164) = cert.sender_e164() {
+        if e164.is_none() {
+            return true; // force renewal
+        }
+    }
+}
+```
+
+### Verification
+
+After deploying this fix, check the trace for:
+```
+"fetched new sender certificate" with has_e164=true
+```
+
+This should appear on the first send after restart. If it doesn't appear, the cert was already a full cert (good). If it appears with `has_e164=false`, the `get_sender_certificate()` API isn't returning an E164 cert — which would point to an account registration issue.
+
 ## Recommended Next Steps
 
 ### Immediate

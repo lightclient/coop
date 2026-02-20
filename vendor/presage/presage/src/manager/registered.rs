@@ -307,6 +307,20 @@ impl<S: Store> Manager<S, Registered> {
                 return true;
             }
 
+            // Reject UUID-only certificates (missing E164). We need the full
+            // sender certificate with E164 for reliable delivery to sleeping
+            // phones via push notifications.
+            if let Some(cert) = sender_certificate {
+                if let Ok(e164) = cert.sender_e164() {
+                    if e164.is_none() {
+                        tracing::info!(
+                            "sender certificate missing E164, forcing renewal"
+                        );
+                        return true;
+                    }
+                }
+            }
+
             let seconds_since_epoch = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .expect("Time went backwards")
@@ -332,6 +346,15 @@ impl<S: Store> Manager<S, Registered> {
                 .await?
                 .get_sender_certificate()
                 .await?;
+            let has_e164 = sender_certificate
+                .sender_e164()
+                .ok()
+                .flatten()
+                .is_some();
+            tracing::info!(
+                has_e164,
+                "fetched new sender certificate"
+            );
             self.store
                 .save_sender_certificate(&sender_certificate)
                 .await?;
