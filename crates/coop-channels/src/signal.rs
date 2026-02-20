@@ -659,6 +659,7 @@ async fn send_signal_action(manager: &mut SignalManager, action: SignalAction) -
                     remove: Some(remove),
                     target_author_aci: Some(target_author_aci),
                     target_sent_timestamp: Some(target_sent_timestamp),
+                    target_author_aci_binary: None,
                 }),
                 group_v2: group_context_for_target(&target),
                 ..Default::default()

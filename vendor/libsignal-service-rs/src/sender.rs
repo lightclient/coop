@@ -364,10 +364,11 @@ where
         let message_to_self = recipient == &self.local_aci;
         let sync_message =
             matches!(content_body, ContentBody::SynchronizeMessage(..));
-        let syncable = is_syncable(&content_body);
         let is_multi_device = self.is_multi_device().await;
 
         use crate::proto::data_message::Flags;
+
+        let syncable = is_syncable(&content_body);
 
         let end_session = match &content_body {
             ContentBody::DataMessage(message) => {
@@ -835,6 +836,7 @@ where
                 );
                 MessageRequestResponse {
                     thread_aci: Some(aci.to_string()),
+                    thread_aci_binary: Some(aci.into_bytes().to_vec()),
                     group_id: None,
                     r#type: Some(action.into()),
                 }
@@ -847,6 +849,7 @@ where
                 );
                 MessageRequestResponse {
                     thread_aci: None,
+                    thread_aci_binary: None,
                     group_id: Some(id.to_vec()),
                     r#type: Some(action.into()),
                 }
@@ -1163,6 +1166,9 @@ where
                     UnidentifiedDeliveryStatus {
                         destination_service_id: Some(
                             recipient.service_id_string(),
+                        ),
+                        destination_service_id_binary: Some(
+                            recipient.service_id_binary(),
                         ),
                         unidentified: Some(*unidentified),
                         destination_pni_identity_key: Some(
