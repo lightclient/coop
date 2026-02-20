@@ -322,10 +322,15 @@ impl<S: Store> Manager<S, Registered> {
         let mut unidentified_sender_certificate =
             self.state.unidentified_sender_certificate.lock().await;
         if needs_renewal(unidentified_sender_certificate.as_ref()) {
+            // Use the full sender certificate (includes E164 phone number) instead of
+            // UUID-only. signal-cli uses the full certificate and reliably delivers to
+            // sleeping phones; presage with UUID-only certs does not. The recipient's
+            // sealed-sender processing may require the E164 to match the sender to a
+            // contact, especially in the push-notification delivery path.
             let sender_certificate = self
                 .identified_websocket(false)
                 .await?
-                .get_uuid_only_sender_certificate()
+                .get_sender_certificate()
                 .await?;
             self.store
                 .save_sender_certificate(&sender_certificate)

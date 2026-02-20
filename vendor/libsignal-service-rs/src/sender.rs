@@ -645,6 +645,46 @@ where
                     );
                     unidentified_access = None;
                 },
+                Err(ref e @ ServiceError::WsError { .. })
+                    if unidentified_access.is_some() =>
+                {
+                    tracing::warn!(
+                        recipient = %recipient.service_id_string(),
+                        error = %e,
+                        "sealed sender websocket error — falling back to identified sender"
+                    );
+                    unidentified_access = None;
+                },
+                Err(ref e @ ServiceError::WsClosing { .. })
+                    if unidentified_access.is_some() =>
+                {
+                    tracing::warn!(
+                        recipient = %recipient.service_id_string(),
+                        error = %e,
+                        "sealed sender websocket closing — falling back to identified sender"
+                    );
+                    unidentified_access = None;
+                },
+                Err(ref e @ ServiceError::Timeout { .. })
+                    if unidentified_access.is_some() =>
+                {
+                    tracing::warn!(
+                        recipient = %recipient.service_id_string(),
+                        error = %e,
+                        "sealed sender timeout — falling back to identified sender"
+                    );
+                    unidentified_access = None;
+                },
+                Err(ref e @ ServiceError::SendError { .. })
+                    if unidentified_access.is_some() =>
+                {
+                    tracing::warn!(
+                        recipient = %recipient.service_id_string(),
+                        error = %e,
+                        "sealed sender send error — falling back to identified sender"
+                    );
+                    unidentified_access = None;
+                },
                 Err(ServiceError::MismatchedDevicesException(ref m)) => {
                     tracing::warn!(
                         recipient = %recipient.service_id_string(),
