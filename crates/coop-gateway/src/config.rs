@@ -30,6 +30,8 @@ pub(crate) struct Config {
     #[serde(default)]
     pub memory: MemoryConfig,
     #[serde(default)]
+    pub tools: ToolsConfig,
+    #[serde(default)]
     pub cron: Vec<CronConfig>,
 }
 
@@ -384,6 +386,82 @@ pub(crate) struct CronConfig {
     pub user: Option<String>,
     #[serde(default)]
     pub deliver: Option<CronDelivery>,
+}
+
+// ---------------------------------------------------------------------------
+// Tools config
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub(crate) struct ToolsConfig {
+    #[serde(default)]
+    pub web: WebToolConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub(crate) struct WebToolConfig {
+    #[serde(default)]
+    pub search: WebSearchConfig,
+    #[serde(default)]
+    pub fetch: WebFetchConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub(crate) struct WebSearchConfig {
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub max_results: Option<usize>,
+    #[serde(default)]
+    pub timeout_seconds: Option<u32>,
+    #[serde(default)]
+    pub cache_ttl_minutes: Option<u32>,
+    #[serde(default)]
+    pub brave: WebSearchBraveConfig,
+    #[serde(default)]
+    pub perplexity: WebSearchPerplexityConfig,
+    #[serde(default)]
+    pub grok: WebSearchGrokConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub(crate) struct WebSearchBraveConfig {
+    #[serde(default)]
+    pub api_key: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub(crate) struct WebSearchPerplexityConfig {
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub(crate) struct WebSearchGrokConfig {
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub(crate) struct WebFetchConfig {
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub max_chars: Option<usize>,
+    #[serde(default)]
+    pub timeout_seconds: Option<u32>,
+    #[serde(default)]
+    pub cache_ttl_minutes: Option<u32>,
+    #[serde(default)]
+    pub max_redirects: Option<usize>,
+    #[serde(default)]
+    pub user_agent: Option<String>,
 }
 
 fn default_provider() -> String {

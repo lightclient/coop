@@ -1647,6 +1647,7 @@ mod tests {
             },
             prompt: crate::config::PromptConfig::default(),
             memory: crate::config::MemoryConfig::default(),
+            tools: crate::config::ToolsConfig::default(),
             cron: Vec::new(),
         }
     }

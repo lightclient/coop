@@ -28,6 +28,11 @@ mod signal_loop;
 mod tracing_setup;
 mod trust;
 mod tui_helpers;
+mod web_cache;
+mod web_fetch;
+mod web_search;
+mod web_security;
+mod web_tools;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -408,6 +413,7 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
     // SharedConfig is created early so it can be shared with tool executors.
     let agent_id = config.agent.id.clone();
     let agent_model = config.agent.model.clone();
+    let web_tool_config = config.tools.web.clone();
 
     let shared = shared_config(config);
 
@@ -432,6 +438,7 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
         Arc::clone(&shared),
         Arc::clone(&scheduler_notify),
     );
+    let web_executor = web_tools::WebToolExecutor::new(&web_tool_config);
 
     #[allow(unused_mut)]
     let mut executors: Vec<Box<dyn coop_core::ToolExecutor>> = vec![
@@ -439,6 +446,7 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
         Box::new(config_executor),
         Box::new(memory_executor),
         Box::new(reminder_executor),
+        Box::new(web_executor),
     ];
 
     #[cfg(feature = "signal")]
@@ -754,10 +762,12 @@ async fn cmd_chat(config_path: Option<&str>, user_flag: Option<&str>) -> Result<
     let default_executor = DefaultExecutor::new();
     let config_executor = config_tool::ConfigToolExecutor::new(config_file.clone());
     let memory_executor = MemoryToolExecutor::new(Arc::clone(&memory));
+    let web_executor = web_tools::WebToolExecutor::new(&config.tools.web);
     let executor: Arc<dyn coop_core::ToolExecutor> = Arc::new(CompositeExecutor::new(vec![
         Box::new(default_executor),
         Box::new(config_executor),
         Box::new(memory_executor),
+        Box::new(web_executor),
     ]));
 
     let agent_id = config.agent.id.clone();

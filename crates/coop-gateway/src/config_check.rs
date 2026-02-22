@@ -311,7 +311,10 @@ pub(crate) fn validate_config(config_path: &Path, config_dir: &Path) -> CheckRep
     // 11-13. cron checks
     check_cron(&mut report, &config);
 
-    // 14. binary_exists
+    // 14. web tools config
+    check_web_tools(&mut report, &config);
+
+    // 15. binary_exists
     check_binary_exists(&mut report);
 
     report
@@ -728,6 +731,70 @@ fn check_cron(report: &mut CheckReport, config: &Config) {
                 });
             }
         }
+    }
+}
+
+fn check_web_tools(report: &mut CheckReport, config: &Config) {
+    let web = &config.tools.web;
+
+    if let Some(ref provider) = web.search.provider {
+        let valid = matches!(provider.as_str(), "brave" | "perplexity" | "grok");
+        report.push(CheckResult {
+            name: "web_search_provider",
+            severity: Severity::Error,
+            passed: valid,
+            message: if valid {
+                format!("tools.web.search.provider: {provider}")
+            } else {
+                format!(
+                    "tools.web.search.provider '{provider}' is invalid (must be brave, perplexity, or grok)"
+                )
+            },
+        });
+    }
+
+    if let Some(timeout) = web.search.timeout_seconds
+        && timeout == 0
+    {
+        report.push(CheckResult {
+            name: "web_search_timeout",
+            severity: Severity::Error,
+            passed: false,
+            message: "tools.web.search.timeout_seconds must be positive".to_owned(),
+        });
+    }
+
+    if let Some(max_results) = web.search.max_results
+        && !(1..=10).contains(&max_results)
+    {
+        report.push(CheckResult {
+            name: "web_search_max_results",
+            severity: Severity::Error,
+            passed: false,
+            message: "tools.web.search.max_results must be 1-10".to_owned(),
+        });
+    }
+
+    if let Some(max_chars) = web.fetch.max_chars
+        && max_chars < 100
+    {
+        report.push(CheckResult {
+            name: "web_fetch_max_chars",
+            severity: Severity::Error,
+            passed: false,
+            message: "tools.web.fetch.max_chars must be >= 100".to_owned(),
+        });
+    }
+
+    if let Some(timeout) = web.fetch.timeout_seconds
+        && timeout == 0
+    {
+        report.push(CheckResult {
+            name: "web_fetch_timeout",
+            severity: Severity::Error,
+            passed: false,
+            message: "tools.web.fetch.timeout_seconds must be positive".to_owned(),
+        });
     }
 }
 
