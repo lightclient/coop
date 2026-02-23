@@ -158,6 +158,9 @@ fn check_restart_only_fields(current: &Config, new: &Config) -> Option<Vec<&'sta
     if new.memory.embedding != current.memory.embedding {
         reasons.push("memory.embedding");
     }
+    if new.sandbox.enabled != current.sandbox.enabled {
+        reasons.push("sandbox.enabled");
+    }
 
     if reasons.is_empty() {
         None
@@ -223,6 +226,17 @@ mod tests {
         let b: Config = toml::from_str(&minimal_toml("b", "m", ws)).unwrap();
         let reasons = check_restart_only_fields(&a, &b).unwrap();
         assert!(reasons.contains(&"agent.id"));
+    }
+
+    #[test]
+    fn check_restart_only_rejects_sandbox_enabled_change() {
+        let ws = "/tmp/ws";
+        let mut a: Config = toml::from_str(&minimal_toml("a", "m", ws)).unwrap();
+        let mut b: Config = toml::from_str(&minimal_toml("a", "m", ws)).unwrap();
+        a.sandbox.enabled = false;
+        b.sandbox.enabled = true;
+        let reasons = check_restart_only_fields(&a, &b).unwrap();
+        assert!(reasons.contains(&"sandbox.enabled"));
     }
 
     #[test]
