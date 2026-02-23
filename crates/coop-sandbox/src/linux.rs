@@ -87,7 +87,10 @@ fn check_cgroups_v2() -> bool {
 ///
 /// Uses user/mount/network/PID namespaces for isolation. The workspace
 /// directory is mounted read-write; host tooling paths are read-only.
-pub async fn exec(policy: &SandboxPolicy, command: &str, timeout: Duration) -> Result<ExecOutput> {
+pub async fn exec(policy: &SandboxPolicy, command: &str, timeout: Duration, user_name: Option<&str>, user_trust: Option<coop_core::TrustLevel>) -> Result<ExecOutput> {
+    // User information not yet used in Linux implementation but kept for API compatibility
+    let _ = (user_name, user_trust);
+    
     debug!(
         command_len = command.len(),
         workspace = %policy.workspace.display(),

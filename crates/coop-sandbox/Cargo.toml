@@ -9,6 +9,7 @@ workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
+coop-core = { path = "../coop-core" }
 tokio = { version = "1", features = ["process", "sync", "time"] }
 tracing = { workspace = true }
 

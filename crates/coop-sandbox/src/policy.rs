@@ -11,6 +11,10 @@ pub struct SandboxPolicy {
     pub memory_limit: u64,
     /// Max number of PIDs (fork bomb protection). 0 = no limit.
     pub pids_limit: u32,
+    /// Whether to use long-lived containers (persistent between commands).
+    /// When false, containers are ephemeral and removed after each command.
+    /// Default: true for better user experience.
+    pub long_lived: bool,
 }
 
 impl Default for SandboxPolicy {
@@ -20,6 +24,7 @@ impl Default for SandboxPolicy {
             allow_network: false,
             memory_limit: 2 * 1024 * 1024 * 1024, // 2 GiB
             pids_limit: 512,
+            long_lived: true, // Default to long-lived containers for user customization
         }
     }
 }

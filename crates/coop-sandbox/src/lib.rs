@@ -14,6 +14,9 @@ pub mod apple;
 
 pub use policy::{ExecOutput, SandboxCapabilities, SandboxInfo, SandboxPolicy, parse_memory_size};
 
+#[cfg(target_os = "macos")]
+pub use apple::ContainerCleanupPolicy;
+
 use anyhow::Result;
 use std::time::Duration;
 
@@ -24,19 +27,32 @@ use std::time::Duration;
 ///
 /// Returns stdout, stderr, exit code.
 pub async fn exec(policy: &SandboxPolicy, command: &str, timeout: Duration) -> Result<ExecOutput> {
+    exec_with_user_context(policy, command, timeout, None, None).await
+}
+
+/// Run a command inside a sandboxed environment with user context for cleanup policy.
+///
+/// The user information is used to determine cleanup behavior for long-lived containers.
+pub async fn exec_with_user_context(
+    policy: &SandboxPolicy, 
+    command: &str, 
+    timeout: Duration, 
+    user_name: Option<&str>, 
+    user_trust: Option<coop_core::TrustLevel>
+) -> Result<ExecOutput> {
     #[cfg(target_os = "linux")]
     {
-        linux::exec(policy, command, timeout).await
+        linux::exec(policy, command, timeout, user_name, user_trust).await
     }
 
     #[cfg(target_os = "macos")]
     {
-        apple::exec(policy, command, timeout).await
+        apple::exec(policy, command, timeout, user_name, user_trust).await
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
-        let _ = (policy, command, timeout);
+        let _ = (policy, command, timeout, user_name, user_trust);
         anyhow::bail!("sandboxing not supported on this platform");
     }
 }
@@ -58,4 +74,25 @@ pub fn probe() -> Result<SandboxInfo> {
     {
         anyhow::bail!("sandboxing not supported on this platform");
     }
+}
+
+/// Clean up old unused containers (platform-specific).
+/// This should be called periodically to prevent accumulation of stale containers.
+pub async fn cleanup_old_containers() -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        apple::cleanup_old_containers().await
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        // No cleanup needed for other platforms currently
+        Ok(())
+    }
+}
+
+/// Clean up old unused containers with specific cleanup policy (platform-specific).
+#[cfg(target_os = "macos")]
+pub async fn cleanup_old_containers_with_policy(policy: Option<&ContainerCleanupPolicy>) -> Result<()> {
+    apple::cleanup_old_containers_with_policy(policy).await
 }

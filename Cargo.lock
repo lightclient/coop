@@ -620,6 +620,7 @@ name = "coop-sandbox"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "coop-core",
  "tempfile",
  "tokio",
  "tracing",

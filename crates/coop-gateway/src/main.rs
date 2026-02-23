@@ -523,6 +523,7 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
             memory_limit: coop_sandbox::parse_memory_size(&shared.load().sandbox.memory)
                 .unwrap_or(2 * 1024 * 1024 * 1024),
             pids_limit: shared.load().sandbox.pids_limit,
+            long_lived: shared.load().sandbox.long_lived,
         };
         Arc::new(sandbox_executor::SandboxExecutor::new(
             executor,

@@ -79,6 +79,7 @@ impl SandboxExecutor {
             memory_limit: coop_sandbox::parse_memory_size(&cfg.sandbox.memory)
                 .unwrap_or(self.base_policy.memory_limit),
             pids_limit: cfg.sandbox.pids_limit,
+            long_lived: cfg.sandbox.long_lived,
         };
 
         if let Some(user_name) = &ctx.user_name
@@ -95,6 +96,9 @@ impl SandboxExecutor {
             }
             if let Some(pids_limit) = overrides.pids_limit {
                 policy.pids_limit = pids_limit;
+            }
+            if let Some(long_lived) = overrides.long_lived {
+                policy.long_lived = long_lived;
             }
         }
 
@@ -126,7 +130,13 @@ impl SandboxExecutor {
             "sandbox: routing bash through sandboxed exec"
         );
 
-        let result = coop_sandbox::exec(&policy, command, SANDBOX_TIMEOUT).await;
+        let result = coop_sandbox::exec_with_user_context(
+            &policy, 
+            command, 
+            SANDBOX_TIMEOUT,
+            ctx.user_name.as_deref(),
+            Some(ctx.trust),
+        ).await;
 
         match result {
             Err(e) => Ok(ToolOutput::error(format!("sandbox exec failed: {e}"))),
@@ -184,6 +194,7 @@ enabled = true
 allow_network = false
 memory = "1g"
 pids_limit = 256
+long_lived = true
 
 [[users]]
 name = "alice"
@@ -218,6 +229,7 @@ enabled = true
 allow_network = false
 memory = "1g"
 pids_limit = 256
+long_lived = true
 
 [[users]]
 name = "alice"
@@ -228,7 +240,7 @@ match = ["terminal:default"]
 name = "bob"
 trust = "full"
 match = ["signal:bob-uuid"]
-sandbox = { allow_network = true, memory = "4g", pids_limit = 1024 }
+sandbox = { allow_network = true, memory = "4g", pids_limit = 1024, long_lived = false }
 "#,
         )
         .expect("test config should parse")
@@ -333,17 +345,19 @@ sandbox = { allow_network = true, memory = "4g", pids_limit = 1024 }
             allow_network: true,
             memory_limit: 999,
             pids_limit: 999,
+            long_lived: false,
         };
         let executor = SandboxExecutor::new(Arc::new(SimpleExecutor::new()), base_policy, shared);
 
         let ctx = tool_context_with_user(TrustLevel::Full, "carol");
         let policy = executor.resolve_policy(&ctx);
 
-        // Should reflect config values (allow_network=false, memory="1g", pids_limit=256),
+        // Should reflect config values (allow_network=false, memory="1g", pids_limit=256, long_lived=true),
         // not the stale base_policy
         assert!(!policy.allow_network);
         assert_eq!(policy.memory_limit, 1024 * 1024 * 1024);
         assert_eq!(policy.pids_limit, 256);
+        assert!(policy.long_lived);
     }
 
     #[test]
@@ -359,6 +373,7 @@ sandbox = { allow_network = true, memory = "4g", pids_limit = 1024 }
         assert!(policy.allow_network);
         assert_eq!(policy.memory_limit, 4 * 1024 * 1024 * 1024);
         assert_eq!(policy.pids_limit, 1024);
+        assert!(!policy.long_lived); // Bob overrides to false
     }
 
     #[test]
@@ -371,10 +386,11 @@ sandbox = { allow_network = true, memory = "4g", pids_limit = 1024 }
         let ctx = tool_context_with_user(TrustLevel::Full, "mallory");
         let policy = executor.resolve_policy(&ctx);
 
-        // Should use config globals (allow_network=false, memory="1g", pids_limit=256)
+        // Should use config globals (allow_network=false, memory="1g", pids_limit=256, long_lived=true)
         assert!(!policy.allow_network);
         assert_eq!(policy.memory_limit, 1024 * 1024 * 1024);
         assert_eq!(policy.pids_limit, 256);
+        assert!(policy.long_lived);
     }
 
     #[test]
@@ -394,12 +410,14 @@ sandbox = { allow_network = true, memory = "4g", pids_limit = 1024 }
         assert!(!policy.allow_network);
         assert_eq!(policy.memory_limit, 1024 * 1024 * 1024); // "1g"
         assert_eq!(policy.pids_limit, 256);
+        assert!(policy.long_lived);
 
         // Simulate hot-reload: change global sandbox settings
         let mut new_config = test_config();
         new_config.sandbox.allow_network = true;
         new_config.sandbox.memory = "4g".to_owned();
         new_config.sandbox.pids_limit = 1024;
+        new_config.sandbox.long_lived = false;
         shared.store(Arc::new(new_config));
 
         // Same executor, same ctx — should pick up new globals
@@ -407,5 +425,6 @@ sandbox = { allow_network = true, memory = "4g", pids_limit = 1024 }
         assert!(policy.allow_network);
         assert_eq!(policy.memory_limit, 4 * 1024 * 1024 * 1024);
         assert_eq!(policy.pids_limit, 1024);
+        assert!(!policy.long_lived);
     }
 }

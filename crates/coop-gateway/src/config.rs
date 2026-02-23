@@ -485,6 +485,12 @@ pub(crate) struct SandboxConfig {
     pub memory: String,
     #[serde(default = "default_sandbox_pids")]
     pub pids_limit: u32,
+    #[serde(default = "default_sandbox_long_lived")]
+    pub long_lived: bool,
+    #[serde(default = "default_sandbox_cleanup_after_days")]
+    pub cleanup_after_days: u64,
+    #[serde(default = "default_sandbox_protect_full_trust")]
+    pub protect_full_trust: bool,
 }
 
 impl Default for SandboxConfig {
@@ -494,6 +500,9 @@ impl Default for SandboxConfig {
             allow_network: false,
             memory: default_sandbox_memory(),
             pids_limit: default_sandbox_pids(),
+            long_lived: default_sandbox_long_lived(),
+            cleanup_after_days: default_sandbox_cleanup_after_days(),
+            protect_full_trust: default_sandbox_protect_full_trust(),
         }
     }
 }
@@ -507,6 +516,8 @@ pub(crate) struct SandboxOverrides {
     pub memory: Option<String>,
     #[serde(default)]
     pub pids_limit: Option<u32>,
+    #[serde(default)]
+    pub long_lived: Option<bool>,
 }
 
 fn default_sandbox_memory() -> String {
@@ -515,6 +526,18 @@ fn default_sandbox_memory() -> String {
 
 const fn default_sandbox_pids() -> u32 {
     512
+}
+
+const fn default_sandbox_long_lived() -> bool {
+    true
+}
+
+const fn default_sandbox_cleanup_after_days() -> u64 {
+    30 // 1 month
+}
+
+const fn default_sandbox_protect_full_trust() -> bool {
+    true // Protect full trust users by default
 }
 
 fn default_provider() -> String {
@@ -1097,6 +1120,9 @@ model = "test-model"
         assert!(!config.sandbox.allow_network);
         assert_eq!(config.sandbox.memory, "2g");
         assert_eq!(config.sandbox.pids_limit, 512);
+        assert!(config.sandbox.long_lived); // Default to true for user customization
+        assert_eq!(config.sandbox.cleanup_after_days, 30); // 1 month default
+        assert!(config.sandbox.protect_full_trust); // Protect full trust users by default
     }
 
     #[test]
@@ -1111,12 +1137,18 @@ enabled = true
 allow_network = true
 memory = "4g"
 pids_limit = 1024
+long_lived = false
+cleanup_after_days = 7
+protect_full_trust = false
 "#;
         let config: Config = toml::from_str(toml_str).unwrap();
         assert!(config.sandbox.enabled);
         assert!(config.sandbox.allow_network);
         assert_eq!(config.sandbox.memory, "4g");
         assert_eq!(config.sandbox.pids_limit, 1024);
+        assert!(!config.sandbox.long_lived);
+        assert_eq!(config.sandbox.cleanup_after_days, 7);
+        assert!(!config.sandbox.protect_full_trust);
     }
 
     #[test]
@@ -1130,7 +1162,7 @@ model = "test-model"
 name = "bob"
 trust = "full"
 match = ["signal:bob-uuid"]
-sandbox = { allow_network = true, memory = "8g", pids_limit = 2048 }
+sandbox = { allow_network = true, memory = "8g", pids_limit = 2048, long_lived = false }
 "#;
         let config: Config = toml::from_str(toml_str).unwrap();
         let bob = &config.users[0];
@@ -1138,6 +1170,7 @@ sandbox = { allow_network = true, memory = "8g", pids_limit = 2048 }
         assert_eq!(overrides.allow_network, Some(true));
         assert_eq!(overrides.memory.as_deref(), Some("8g"));
         assert_eq!(overrides.pids_limit, Some(2048));
+        assert_eq!(overrides.long_lived, Some(false));
     }
 
     #[test]

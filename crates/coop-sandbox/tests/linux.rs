@@ -17,6 +17,7 @@ fn test_policy(workspace: &std::path::Path) -> SandboxPolicy {
         allow_network: false,
         memory_limit: 512 * 1024 * 1024, // 512 MB
         pids_limit: 64,
+        long_lived: false, // Use ephemeral containers for tests
     }
 }
 
