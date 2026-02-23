@@ -499,7 +499,7 @@ impl Gateway {
                             "provider request failed, rolling back session"
                         );
                         self.truncate_session(session_key, session_len_before);
-                        let user_msg = if trust == TrustLevel::Full {
+                        let user_msg = if trust <= TrustLevel::Full {
                             format!("{err:#}")
                         } else {
                             "Something went wrong. Please try again later.".to_owned()

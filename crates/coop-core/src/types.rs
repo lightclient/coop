@@ -17,6 +17,7 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TrustLevel {
+    Owner,
     Full,
     Inner,
     Familiar,
@@ -26,10 +27,11 @@ pub enum TrustLevel {
 impl TrustLevel {
     fn rank(self) -> u8 {
         match self {
-            Self::Full => 0,
-            Self::Inner => 1,
-            Self::Familiar => 2,
-            Self::Public => 3,
+            Self::Owner => 0,
+            Self::Full => 1,
+            Self::Inner => 2,
+            Self::Familiar => 3,
+            Self::Public => 4,
         }
     }
 }
@@ -666,9 +668,18 @@ mod tests {
 
     #[test]
     fn trust_ordering() {
+        assert!(TrustLevel::Owner < TrustLevel::Full);
         assert!(TrustLevel::Full < TrustLevel::Inner);
         assert!(TrustLevel::Inner < TrustLevel::Familiar);
         assert!(TrustLevel::Familiar < TrustLevel::Public);
+    }
+
+    #[test]
+    fn trust_owner_serde_roundtrip() {
+        let json = serde_json::to_string(&TrustLevel::Owner).unwrap();
+        assert_eq!(json, "\"owner\"");
+        let parsed: TrustLevel = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, TrustLevel::Owner);
     }
 
     #[test]

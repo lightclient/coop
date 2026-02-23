@@ -1,8 +1,9 @@
 use coop_core::TrustLevel;
 
-/// Resolve effective trust: always the minimum of user trust and situation ceiling.
-/// TrustLevel ordering: Full < Inner < Familiar < Public (Full is most trusted, "smallest").
-/// We want the *least* privileged of the two, which is the *max* in our Ord.
+/// Resolve effective trust: the *least* privileged of user trust and situation ceiling.
+///
+/// TrustLevel ordering: Owner < Full < Inner < Familiar < Public (most trusted is "smallest").
+/// We pick the max in our Ord, which is the least trusted of the two.
 pub(crate) fn resolve_trust(user_trust: TrustLevel, situation_ceiling: TrustLevel) -> TrustLevel {
     std::cmp::max(user_trust, situation_ceiling)
 }
@@ -11,7 +12,7 @@ pub(crate) fn resolve_trust(user_trust: TrustLevel, situation_ceiling: TrustLeve
 #[allow(dead_code)]
 pub(crate) fn accessible_stores(trust: TrustLevel) -> Vec<&'static str> {
     match trust {
-        TrustLevel::Full => vec!["private", "shared", "social"],
+        TrustLevel::Owner | TrustLevel::Full => vec!["private", "shared", "social"],
         TrustLevel::Inner => vec!["shared", "social"],
         TrustLevel::Familiar => vec!["social"],
         TrustLevel::Public => vec![],
@@ -22,6 +23,39 @@ pub(crate) fn accessible_stores(trust: TrustLevel) -> Vec<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owner_in_dm_gets_owner() {
+        // DM ceiling is Owner (most permissive non-group context)
+        assert_eq!(
+            resolve_trust(TrustLevel::Owner, TrustLevel::Owner),
+            TrustLevel::Owner
+        );
+    }
+
+    #[test]
+    fn full_user_still_full_with_owner_ceiling() {
+        assert_eq!(
+            resolve_trust(TrustLevel::Full, TrustLevel::Owner),
+            TrustLevel::Full
+        );
+    }
+
+    #[test]
+    fn owner_in_group_gets_familiar() {
+        assert_eq!(
+            resolve_trust(TrustLevel::Owner, TrustLevel::Familiar),
+            TrustLevel::Familiar
+        );
+    }
+
+    #[test]
+    fn accessible_stores_owner_same_as_full() {
+        assert_eq!(
+            accessible_stores(TrustLevel::Owner),
+            accessible_stores(TrustLevel::Full)
+        );
+    }
 
     #[test]
     fn full_user_in_dm_gets_full() {

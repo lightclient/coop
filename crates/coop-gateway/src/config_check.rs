@@ -289,7 +289,10 @@ pub(crate) fn validate_config(config_path: &Path, config_dir: &Path) -> CheckRep
         }
     }
 
-    // 9. users
+    // 9. sandbox
+    check_sandbox(&mut report, &config);
+
+    // 10. users
     check_users(&mut report, &config);
 
     // 10. signal_channel
@@ -615,6 +618,158 @@ fn check_workspace_files(report: &mut CheckReport, ws: &Path, config: &Config) {
                 message: format!("workspace scan failed: {e}"),
             });
         }
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn check_sandbox(report: &mut CheckReport, config: &Config) {
+    if !config.sandbox.enabled {
+        return;
+    }
+
+    // Check sandbox platform availability
+    match coop_sandbox::probe() {
+        Ok(info) => {
+            report.push(CheckResult {
+                name: "sandbox_available",
+                severity: Severity::Info,
+                passed: true,
+                message: format!("sandbox: {}", info.name),
+            });
+
+            if !info.capabilities.landlock {
+                report.push(CheckResult {
+                    name: "sandbox_available",
+                    severity: Severity::Warning,
+                    passed: false,
+                    message: "landlock not available — filesystem isolation is degraded".to_owned(),
+                });
+            }
+            if !info.capabilities.seccomp {
+                report.push(CheckResult {
+                    name: "sandbox_available",
+                    severity: Severity::Warning,
+                    passed: false,
+                    message: "seccomp not available — syscall filtering disabled".to_owned(),
+                });
+            }
+            if !info.capabilities.cgroups_v2 {
+                report.push(CheckResult {
+                    name: "sandbox_available",
+                    severity: Severity::Warning,
+                    passed: false,
+                    message:
+                        "cgroups v2 not writable — using setrlimit fallback for resource limits"
+                            .to_owned(),
+                });
+            }
+        }
+        Err(e) => {
+            report.push(CheckResult {
+                name: "sandbox_available",
+                severity: Severity::Error,
+                passed: false,
+                message: format!("sandbox not available: {e}"),
+            });
+        }
+    }
+
+    // Validate memory format
+    if coop_sandbox::parse_memory_size(&config.sandbox.memory).is_err() {
+        report.push(CheckResult {
+            name: "sandbox_memory",
+            severity: Severity::Error,
+            passed: false,
+            message: format!(
+                "sandbox.memory '{}' is not a valid size (use number with K/M/G suffix)",
+                config.sandbox.memory
+            ),
+        });
+    }
+
+    // Validate pids_limit
+    if config.sandbox.pids_limit == 0 {
+        report.push(CheckResult {
+            name: "sandbox_pids",
+            severity: Severity::Error,
+            passed: false,
+            message: "sandbox.pids_limit must be > 0".to_owned(),
+        });
+    }
+
+    // Check for multiple owners
+    let owner_count = config
+        .users
+        .iter()
+        .filter(|u| u.trust == TrustLevel::Owner)
+        .count();
+    if owner_count > 1 {
+        report.push(CheckResult {
+            name: "sandbox_multiple_owners",
+            severity: Severity::Warning,
+            passed: false,
+            message: format!("{owner_count} users with trust=owner — there should be at most one"),
+        });
+    }
+
+    // Check if sandbox is enabled but no owner exists
+    let has_owner = owner_count > 0;
+    if !has_owner {
+        let terminal_user_exists = config
+            .users
+            .iter()
+            .any(|u| u.r#match.iter().any(|m| m.starts_with("terminal")));
+        if !terminal_user_exists {
+            report.push(CheckResult {
+                name: "sandbox_no_owner",
+                severity: Severity::Info,
+                passed: true,
+                message: "no owner configured — terminal will default to owner trust when sandbox is enabled".to_owned(),
+            });
+        }
+    }
+
+    // Validate per-user sandbox overrides
+    for user in &config.users {
+        if let Some(ref overrides) = user.sandbox {
+            if let Some(ref memory) = overrides.memory
+                && coop_sandbox::parse_memory_size(memory).is_err()
+            {
+                report.push(CheckResult {
+                    name: "sandbox_user_overrides",
+                    severity: Severity::Error,
+                    passed: false,
+                    message: format!(
+                        "user '{}' sandbox.memory '{}' is not a valid size",
+                        user.name, memory
+                    ),
+                });
+            }
+            if let Some(pids) = overrides.pids_limit
+                && pids == 0
+            {
+                report.push(CheckResult {
+                    name: "sandbox_user_overrides",
+                    severity: Severity::Error,
+                    passed: false,
+                    message: format!("user '{}' sandbox.pids_limit must be > 0", user.name),
+                });
+            }
+        }
+    }
+
+    // Check unprivileged user namespaces on Linux
+    #[cfg(target_os = "linux")]
+    if let Ok(content) = std::fs::read_to_string("/proc/sys/kernel/unprivileged_userns_clone")
+        && content.trim() == "0"
+    {
+        report.push(CheckResult {
+            name: "sandbox_user_namespaces",
+            severity: Severity::Error,
+            passed: false,
+            message: "unprivileged user namespaces disabled (kernel.unprivileged_userns_clone=0)"
+                .to_owned(),
+        });
     }
 }
 

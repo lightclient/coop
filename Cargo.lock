@@ -565,6 +565,7 @@ dependencies = [
  "coop-core",
  "coop-ipc",
  "coop-memory",
+ "coop-sandbox",
  "coop-tui",
  "cron",
  "crossterm",
@@ -609,6 +610,16 @@ dependencies = [
  "serde_json",
  "sha2",
  "sqlite-vec",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "coop-sandbox"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
  "tempfile",
  "tokio",
  "tracing",

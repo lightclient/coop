@@ -1649,6 +1649,7 @@ mod tests {
             memory: crate::config::MemoryConfig::default(),
             tools: crate::config::ToolsConfig::default(),
             cron: Vec::new(),
+            sandbox: crate::config::SandboxConfig::default(),
         }
     }
 

@@ -778,6 +778,7 @@ mod tests {
             message: "check tasks".to_owned(),
             user: Some("alice".to_owned()),
             deliver: None,
+            sandbox: None,
         };
         let sender = match &cfg.user {
             Some(user) => format!("cron:{}:{}", cfg.name, user),
@@ -794,6 +795,7 @@ mod tests {
             message: "run cleanup".to_owned(),
             user: None,
             deliver: None,
+            sandbox: None,
         };
         let sender = match &cfg.user {
             Some(user) => format!("cron:{}:{}", cfg.name, user),
@@ -831,6 +833,7 @@ mod tests {
             message: "test".to_owned(),
             user: None,
             deliver: None,
+            sandbox: None,
         }];
         let (shared, router, _gateway) =
             make_shared_config_and_router(None, &cron, "cron response ok");
@@ -859,6 +862,7 @@ mod tests {
             name: "alice".to_owned(),
             trust: TrustLevel::Full,
             r#match: vec!["terminal:default".to_owned()],
+            sandbox: None,
         };
         let cron = vec![CronConfig {
             name: "test".to_owned(),
@@ -866,6 +870,7 @@ mod tests {
             message: "heartbeat check".to_owned(),
             user: Some("alice".to_owned()),
             deliver: None,
+            sandbox: None,
         }];
         let (shared, router, gateway) =
             make_shared_config_and_router(Some(&[alice_user]), &cron, "cron response ok");
@@ -906,6 +911,7 @@ mod tests {
             message: "run cleanup".to_owned(),
             user: None,
             deliver: None,
+            sandbox: None,
         }];
         let (shared, router, gateway) =
             make_shared_config_and_router(None, &cron, "cron response ok");
@@ -937,6 +943,7 @@ mod tests {
             name: "alice".to_owned(),
             trust: TrustLevel::Full,
             r#match: vec![],
+            sandbox: None,
         }];
         let (shared, router, gateway) =
             make_shared_config_and_router(Some(&alice), &[], "cron response ok");
@@ -947,6 +954,7 @@ mod tests {
             message: "check tasks".to_owned(),
             user: Some("alice".to_owned()),
             deliver: None,
+            sandbox: None,
         };
 
         fire_cron(&cfg, &router, None, &shared).await;
@@ -972,6 +980,7 @@ mod tests {
             message: "run cleanup".to_owned(),
             user: None,
             deliver: None,
+            sandbox: None,
         };
 
         fire_cron(&cfg, &router, None, &shared).await;
@@ -997,6 +1006,7 @@ mod tests {
             message: "check tasks".to_owned(),
             user: None,
             deliver: None,
+            sandbox: None,
         };
 
         let cron_key = SessionKey {
@@ -1105,6 +1115,7 @@ mod tests {
                 channel: "signal".to_owned(),
                 target: "alice-uuid".to_owned(),
             }),
+            sandbox: None,
         };
 
         fire_cron(&cfg, &router, Some(&deliver_tx), &shared).await;
@@ -1131,6 +1142,7 @@ mod tests {
                 channel: "signal".to_owned(),
                 target: "alice-uuid".to_owned(),
             }),
+            sandbox: None,
         };
 
         fire_cron(&cfg, &router, Some(&deliver_tx), &shared).await;
@@ -1167,6 +1179,7 @@ mod tests {
                 channel: "signal".to_owned(),
                 target: "alice-uuid".to_owned(),
             }),
+            sandbox: None,
         };
 
         fire_cron(&cfg, &router, Some(&deliver_tx), &shared).await;
@@ -1217,6 +1230,7 @@ mod tests {
                 channel: "signal".to_owned(),
                 target: "alice-uuid".to_owned(),
             }),
+            sandbox: None,
         };
 
         fire_cron(&cfg, &router, Some(&deliver_tx), &shared).await;
@@ -1240,6 +1254,7 @@ mod tests {
             message: "check tasks".to_owned(),
             user: None,
             deliver: None,
+            sandbox: None,
         };
 
         fire_cron(&cfg, &router, Some(&deliver_tx), &shared).await;
@@ -1262,6 +1277,7 @@ mod tests {
                 channel: "signal".to_owned(),
                 target: "alice-uuid".to_owned(),
             }),
+            sandbox: None,
         };
 
         fire_cron(&cfg, &router, Some(&deliver_tx), &shared).await;
@@ -1283,6 +1299,7 @@ mod tests {
                 channel: "signal".to_owned(),
                 target: "alice-uuid".to_owned(),
             }),
+            sandbox: None,
         };
 
         fire_cron(&cfg, &router, None, &shared).await;
@@ -1309,6 +1326,7 @@ mod tests {
                 channel: "signal".to_owned(),
                 target: "alice-uuid".to_owned(),
             }),
+            sandbox: None,
         };
 
         fire_cron(&cfg, &router, Some(&deliver_tx), &shared).await;
@@ -1347,6 +1365,7 @@ mod tests {
                 channel: "signal".to_owned(),
                 target: "alice-uuid".to_owned(),
             }),
+            sandbox: None,
         };
 
         fire_cron(&cfg, &router, Some(&deliver_tx), &shared).await;
@@ -1376,6 +1395,7 @@ mod tests {
                 channel: "signal".to_owned(),
                 target: "alice-uuid".to_owned(),
             }),
+            sandbox: None,
         };
 
         fire_cron(&cfg, &router, Some(&deliver_tx), &shared).await;
@@ -1410,6 +1430,7 @@ mod tests {
                 channel: "signal".to_owned(),
                 target: "alice-uuid".to_owned(),
             }),
+            sandbox: None,
         };
 
         fire_cron(&cfg, &router, Some(&deliver_tx), &shared).await;
@@ -1445,6 +1466,7 @@ mod tests {
                 channel: "signal".to_owned(),
                 target: "alice-uuid".to_owned(),
             }),
+            sandbox: None,
         };
 
         fire_cron(&cfg, &router, Some(&deliver_tx), &shared).await;
@@ -1467,6 +1489,7 @@ mod tests {
             message: "check tasks".to_owned(),
             user: None,
             deliver: None,
+            sandbox: None,
         };
 
         fire_cron(&cfg, &router, None, &shared).await;
@@ -1483,6 +1506,7 @@ mod tests {
                 channel: "signal".to_owned(),
                 target: "alice-uuid".to_owned(),
             }),
+            sandbox: None,
         }];
         let (shared, router, gateway) =
             make_shared_config_and_router(None, &cron, "cron response ok");
@@ -1552,6 +1576,7 @@ mod tests {
             message: "hot reload test".to_owned(),
             user: None,
             deliver: None,
+            sandbox: None,
         }];
         shared.store(Arc::new(new_config));
         notify.notify_one();
@@ -1583,6 +1608,7 @@ mod tests {
             message: "yearly".to_owned(),
             user: None,
             deliver: None,
+            sandbox: None,
         }];
         let (shared, router, gateway) = make_shared_config_and_router(None, &cron, "response");
         let router = Arc::new(router);
@@ -1615,6 +1641,7 @@ mod tests {
             message: "tick".to_owned(),
             user: None,
             deliver: None,
+            sandbox: None,
         }];
         shared.store(Arc::new(new_config));
         notify.notify_one();
@@ -1667,6 +1694,7 @@ mod tests {
             name: "alice".to_owned(),
             trust: TrustLevel::Full,
             r#match: vec!["signal:alice-uuid".to_owned()],
+            sandbox: None,
         }];
         let (shared, router, _gateway) = make_shared_config_and_router_with_users_and_match(
             &users,
@@ -1682,6 +1710,7 @@ mod tests {
             message: "check HEARTBEAT.md".to_owned(),
             user: Some("alice".to_owned()),
             deliver: None,
+            sandbox: None,
         };
 
         fire_cron(&cfg, &router, Some(&deliver_tx), &shared).await;
@@ -1701,6 +1730,7 @@ mod tests {
                 "signal:alice-uuid".to_owned(),
                 "signal:group:team-chat".to_owned(),
             ],
+            sandbox: None,
         }];
         let (shared, router, _gateway) =
             make_shared_config_and_router_with_users_and_match(&users, &[], "Alert: disk full");
@@ -1713,6 +1743,7 @@ mod tests {
             message: "check HEARTBEAT.md".to_owned(),
             user: Some("alice".to_owned()),
             deliver: None,
+            sandbox: None,
         };
 
         fire_cron(&cfg, &router, Some(&deliver_tx), &shared).await;
@@ -1736,6 +1767,7 @@ mod tests {
                 "terminal:default".to_owned(),
                 "signal:alice-uuid".to_owned(),
             ],
+            sandbox: None,
         }];
         let (shared, router, _gateway) =
             make_shared_config_and_router_with_users_and_match(&users, &[], "Important alert");
@@ -1748,6 +1780,7 @@ mod tests {
             message: "check HEARTBEAT.md".to_owned(),
             user: Some("alice".to_owned()),
             deliver: None,
+            sandbox: None,
         };
 
         fire_cron(&cfg, &router, Some(&deliver_tx), &shared).await;
@@ -1765,6 +1798,7 @@ mod tests {
             name: "alice".to_owned(),
             trust: TrustLevel::Full,
             r#match: vec!["signal:alice-uuid".to_owned()],
+            sandbox: None,
         }];
         let (shared, router, gateway) =
             make_shared_config_and_router_with_users_and_match(&users, &[], "HEARTBEAT_OK");
@@ -1777,6 +1811,7 @@ mod tests {
             message: "check HEARTBEAT.md".to_owned(),
             user: Some("alice".to_owned()),
             deliver: None,
+            sandbox: None,
         };
 
         fire_cron(&cfg, &router, Some(&deliver_tx), &shared).await;
@@ -1801,6 +1836,7 @@ mod tests {
             name: "alice".to_owned(),
             trust: TrustLevel::Full,
             r#match: vec!["signal:alice-uuid".to_owned()],
+            sandbox: None,
         }];
         let (shared, router, _gateway) =
             make_shared_config_and_router_with_users_and_match(&users, &[], "Your server is down");
@@ -1813,6 +1849,7 @@ mod tests {
             message: "check HEARTBEAT.md".to_owned(),
             user: Some("alice".to_owned()),
             deliver: None,
+            sandbox: None,
         };
 
         fire_cron(&cfg, &router, Some(&deliver_tx), &shared).await;
@@ -1831,6 +1868,7 @@ mod tests {
                 "signal:alice-uuid".to_owned(),
                 "signal:group:team-chat".to_owned(),
             ],
+            sandbox: None,
         }];
         let (shared, router, _gateway) =
             make_shared_config_and_router_with_users_and_match(&users, &[], "Alert content");
@@ -1847,6 +1885,7 @@ mod tests {
                 channel: "signal".to_owned(),
                 target: "override-target".to_owned(),
             }),
+            sandbox: None,
         };
 
         fire_cron(&cfg, &router, Some(&deliver_tx), &shared).await;
@@ -1872,6 +1911,7 @@ mod tests {
             message: "run cleanup".to_owned(),
             user: None,
             deliver: None,
+            sandbox: None,
         };
 
         fire_cron(&cfg, &router, Some(&deliver_tx), &shared).await;
@@ -1901,6 +1941,7 @@ match = ["signal:alice-uuid", "terminal:default", "signal:group:team-chat"]
             message: "check HEARTBEAT.md".to_owned(),
             user: Some("alice".to_owned()),
             deliver: None,
+            sandbox: None,
         };
 
         let targets = resolve_cron_delivery_targets(&config, &cfg);
@@ -1934,6 +1975,7 @@ match = ["signal:alice-uuid"]
                 channel: "signal".to_owned(),
                 target: "override-uuid".to_owned(),
             }),
+            sandbox: None,
         };
 
         let targets = resolve_cron_delivery_targets(&config, &cfg);
@@ -1960,6 +2002,7 @@ model = "test"
             message: "cleanup".to_owned(),
             user: None,
             deliver: None,
+            sandbox: None,
         };
 
         let targets = resolve_cron_delivery_targets(&config, &cfg);
@@ -1988,6 +2031,7 @@ match = ["signal:alice-uuid"]
             message: "check".to_owned(),
             user: Some("mallory".to_owned()),
             deliver: None,
+            sandbox: None,
         };
 
         let targets = resolve_cron_delivery_targets(&config, &cfg);
@@ -2068,6 +2112,7 @@ match = ["signal:alice-uuid"]
             message: "tick".to_owned(),
             user: None,
             deliver: None,
+            sandbox: None,
         }];
         let (shared, router, _gateway) =
             make_shared_config_and_router_with_provider(None, &cron, provider);
@@ -2111,6 +2156,7 @@ match = ["signal:alice-uuid"]
                 channel: "signal".to_owned(),
                 target: "alice-uuid".to_owned(),
             }),
+            sandbox: None,
         };
 
         fire_cron(&cfg, &router, Some(&deliver_tx), &shared).await;
@@ -2138,6 +2184,7 @@ match = ["signal:alice-uuid"]
                 channel: "signal".to_owned(),
                 target: "alice-uuid".to_owned(),
             }),
+            sandbox: None,
         };
 
         fire_cron(&cfg, &router, Some(&deliver_tx), &shared).await;
@@ -2163,6 +2210,7 @@ match = ["signal:alice-uuid"]
                 channel: "signal".to_owned(),
                 target: "alice-uuid".to_owned(),
             }),
+            sandbox: None,
         };
 
         fire_cron(&cfg, &router, Some(&deliver_tx), &shared).await;
@@ -2192,6 +2240,7 @@ match = ["signal:alice-uuid"]
                 channel: "signal".to_owned(),
                 target: "alice-uuid".to_owned(),
             }),
+            sandbox: None,
         };
 
         fire_cron(&cfg, &router, Some(&deliver_tx), &shared).await;
@@ -2227,6 +2276,7 @@ match = ["signal:alice-uuid"]
 
     fn trust_as_str(trust: TrustLevel) -> &'static str {
         match trust {
+            TrustLevel::Owner => "owner",
             TrustLevel::Full => "full",
             TrustLevel::Inner => "inner",
             TrustLevel::Familiar => "familiar",
@@ -2379,6 +2429,7 @@ match = ["signal:alice-uuid"]
             message: "tick".to_owned(),
             user: None,
             deliver: None,
+            sandbox: None,
         }];
         let (shared, router, gateway) =
             make_shared_config_and_router_with_provider(None, &cron, provider);

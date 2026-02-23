@@ -44,6 +44,10 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         command: MemoryCommands,
     },
+    Sandbox {
+        #[command(subcommand)]
+        command: SandboxCommands,
+    },
     Version,
 }
 
@@ -117,6 +121,12 @@ pub(crate) enum GatewayCommands {
 pub(crate) enum MemoryCommands {
     /// Rebuild the vector search index from stored embeddings.
     RebuildIndex,
+}
+
+#[derive(Subcommand)]
+pub(crate) enum SandboxCommands {
+    /// Show sandbox status (platform, capabilities, degraded features).
+    Status,
 }
 
 #[derive(Subcommand)]

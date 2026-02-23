@@ -395,7 +395,7 @@ pub(crate) fn route_message(msg: &InboundMessage, config: &Config) -> RouteDecis
             (TrustLevel::Full, None)
         };
 
-        let trust = resolve_trust(user_trust, TrustLevel::Full);
+        let trust = resolve_trust(user_trust, TrustLevel::Owner);
 
         return RouteDecision {
             session_key: SessionKey {
@@ -423,7 +423,16 @@ pub(crate) fn route_message(msg: &InboundMessage, config: &Config) -> RouteDecis
         })
     });
 
-    let user_trust = matched_user.map_or(TrustLevel::Public, |user| user.trust);
+    let user_trust = matched_user.map_or_else(
+        || {
+            if msg.channel == "terminal:default" && config.sandbox.enabled {
+                TrustLevel::Owner
+            } else {
+                TrustLevel::Public
+            }
+        },
+        |user| user.trust,
+    );
     let user_name = matched_user.map(|user| user.name.clone());
 
     let group_context = msg.is_group
@@ -434,7 +443,7 @@ pub(crate) fn route_message(msg: &InboundMessage, config: &Config) -> RouteDecis
     let ceiling = if group_context {
         TrustLevel::Familiar
     } else {
-        TrustLevel::Full
+        TrustLevel::Owner
     };
     let trust = resolve_trust(user_trust, ceiling);
 
@@ -462,13 +471,13 @@ pub(crate) fn route_message(msg: &InboundMessage, config: &Config) -> RouteDecis
     }
 }
 
-/// Simple trust gate: only full-trust users may trigger agent turns.
+/// Simple trust gate: only owner/full-trust users may trigger agent turns.
 /// Terminal sessions are always allowed (local physical access).
 fn is_trust_authorized(decision: &RouteDecision, msg: &InboundMessage) -> bool {
     if msg.channel.starts_with("terminal") {
         return true;
     }
-    decision.trust == TrustLevel::Full
+    decision.trust <= TrustLevel::Full
 }
 
 fn parse_explicit_session_kind(session: &str, agent_id: &str) -> Option<SessionKind> {

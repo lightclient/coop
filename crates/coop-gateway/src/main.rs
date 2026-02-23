@@ -20,6 +20,7 @@ mod memory_reconcile;
 mod memory_tools;
 mod reminder;
 mod router;
+mod sandbox_executor;
 mod scheduler;
 mod service;
 mod session_store;
@@ -58,7 +59,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, info, info_span, warn};
 
-use crate::cli::{Cli, Commands, GatewayCommands, MemoryCommands, SignalCommands};
+use crate::cli::{Cli, Commands, GatewayCommands, MemoryCommands, SandboxCommands, SignalCommands};
 use crate::config::{Config, SharedConfig, shared_config};
 use crate::gateway::Gateway;
 use crate::memory_embedding::build_embedder;
@@ -92,6 +93,7 @@ async fn main() -> Result<()> {
             | Commands::Gateway { .. }
             | Commands::Signal { .. }
             | Commands::Memory { .. }
+            | Commands::Sandbox { .. }
             | Commands::Version
             | Commands::Init { .. }
     );
@@ -112,6 +114,7 @@ async fn main() -> Result<()> {
         Commands::Attach { session } => cmd_attach(cli.config.as_deref(), &session).await,
         Commands::Signal { command } => cmd_signal(cli.config.as_deref(), command).await,
         Commands::Memory { command } => cmd_memory(cli.config.as_deref(), command).await,
+        Commands::Sandbox { ref command } => cmd_sandbox(command),
         Commands::Version => {
             println!("🐔 coop {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -191,6 +194,53 @@ fn cmd_check(config_path: Option<&str>, format: &str) -> Result<()> {
         std::process::exit(1);
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// cmd_sandbox — sandbox status
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::unnecessary_wraps)]
+fn cmd_sandbox(command: &SandboxCommands) -> Result<()> {
+    match command {
+        SandboxCommands::Status => {
+            match coop_sandbox::probe() {
+                Ok(info) => {
+                    println!("Sandbox: {}", info.name);
+                    let caps = &info.capabilities;
+                    let check = |available| if available { "✓" } else { "✗" };
+                    println!("  {} user namespaces", check(caps.user_namespaces));
+                    println!("  {} network namespaces", check(caps.network_namespaces));
+                    if caps.landlock {
+                        println!("  {} landlock", check(caps.landlock));
+                    } else {
+                        println!(
+                            "  {} landlock (not available — mount namespace only)",
+                            check(caps.landlock)
+                        );
+                    }
+                    if caps.seccomp {
+                        println!("  {} seccomp", check(caps.seccomp));
+                    } else {
+                        println!("  {} seccomp (not available)", check(caps.seccomp));
+                    }
+                    if caps.cgroups_v2 {
+                        println!("  {} cgroups v2", check(caps.cgroups_v2));
+                    } else {
+                        println!(
+                            "  {} cgroups v2 (no write access — using setrlimit fallback)",
+                            check(caps.cgroups_v2)
+                        );
+                    }
+                }
+                Err(e) => {
+                    println!("Sandbox: not available");
+                    println!("  {e}");
+                }
+            }
+            Ok(())
+        }
+    }
 }
 
 async fn cmd_gateway(config_path: Option<&str>, command: GatewayCommands) -> Result<()> {
@@ -456,6 +506,33 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
 
     let executor: Arc<dyn coop_core::ToolExecutor> = Arc::new(CompositeExecutor::new(executors));
 
+    // Wrap executor with SandboxExecutor when sandbox is enabled
+    let executor: Arc<dyn coop_core::ToolExecutor> = if shared.load().sandbox.enabled {
+        match coop_sandbox::probe() {
+            Ok(sandbox_info) => {
+                info!(sandbox = %sandbox_info.name, "sandbox enabled");
+                let base_policy = coop_sandbox::SandboxPolicy {
+                    workspace: workspace.clone(),
+                    allow_network: shared.load().sandbox.allow_network,
+                    memory_limit: coop_sandbox::parse_memory_size(&shared.load().sandbox.memory)
+                        .unwrap_or(2 * 1024 * 1024 * 1024),
+                    pids_limit: shared.load().sandbox.pids_limit,
+                };
+                Arc::new(sandbox_executor::SandboxExecutor::new(
+                    executor,
+                    base_policy,
+                    Arc::clone(&shared),
+                ))
+            }
+            Err(e) => {
+                warn!(error = %e, "sandbox enabled but not available — running unsandboxed");
+                executor
+            }
+        }
+    } else {
+        executor
+    };
+
     #[cfg(feature = "signal")]
     let typing_notifier: Option<Arc<dyn coop_core::TypingNotifier>> =
         signal_action_tx.as_ref().map(|action_tx| {
@@ -487,6 +564,13 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
         "{}\n",
         format_tui_welcome(env!("CARGO_PKG_VERSION"), &agent_model, &working_dir)
     );
+
+    if shared.load().sandbox.enabled {
+        match coop_sandbox::probe() {
+            Ok(info) => println!("🔒 Sandbox: {} — owner bypasses\n", info.name),
+            Err(_) => println!("⚠ Sandbox: enabled but not available on this platform\n"),
+        }
+    }
 
     let socket = socket_path(&agent_id);
     let pid_file = service::write_pid_file(&agent_id)?;

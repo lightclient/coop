@@ -40,7 +40,7 @@ impl Tool for ConfigReadTool {
         _arguments: serde_json::Value,
         ctx: &ToolContext,
     ) -> Result<ToolOutput> {
-        if ctx.trust != TrustLevel::Full {
+        if ctx.trust > TrustLevel::Full {
             return Ok(ToolOutput::error("config_read requires Full trust level"));
         }
 
@@ -95,7 +95,7 @@ impl Tool for ConfigWriteTool {
     }
 
     async fn execute(&self, arguments: serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
-        if ctx.trust != TrustLevel::Full {
+        if ctx.trust > TrustLevel::Full {
             return Ok(ToolOutput::error("config_write requires Full trust level"));
         }
 

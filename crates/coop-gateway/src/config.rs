@@ -33,6 +33,8 @@ pub(crate) struct Config {
     pub tools: ToolsConfig,
     #[serde(default)]
     pub cron: Vec<CronConfig>,
+    #[serde(default)]
+    pub sandbox: SandboxConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -53,6 +55,8 @@ pub(crate) struct UserConfig {
     pub trust: TrustLevel,
     #[serde(default)]
     pub r#match: Vec<String>,
+    #[serde(default)]
+    pub sandbox: Option<SandboxOverrides>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -386,6 +390,8 @@ pub(crate) struct CronConfig {
     pub user: Option<String>,
     #[serde(default)]
     pub deliver: Option<CronDelivery>,
+    #[serde(default)]
+    pub sandbox: Option<SandboxOverrides>,
 }
 
 // ---------------------------------------------------------------------------
@@ -462,6 +468,52 @@ pub(crate) struct WebFetchConfig {
     pub max_redirects: Option<usize>,
     #[serde(default)]
     pub user_agent: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Sandbox config
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct SandboxConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub allow_network: bool,
+    #[serde(default = "default_sandbox_memory")]
+    pub memory: String,
+    #[serde(default = "default_sandbox_pids")]
+    pub pids_limit: u32,
+}
+
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            allow_network: false,
+            memory: default_sandbox_memory(),
+            pids_limit: default_sandbox_pids(),
+        }
+    }
+}
+
+/// Per-user or per-cron sandbox overrides. Non-None fields override the global sandbox config.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub(crate) struct SandboxOverrides {
+    #[serde(default)]
+    pub allow_network: Option<bool>,
+    #[serde(default)]
+    pub memory: Option<String>,
+    #[serde(default)]
+    pub pids_limit: Option<u32>,
+}
+
+fn default_sandbox_memory() -> String {
+    "2g".to_owned()
+}
+
+const fn default_sandbox_pids() -> u32 {
+    512
 }
 
 fn default_provider() -> String {
@@ -1030,5 +1082,133 @@ name = "anthropic"
 "#;
         let config: Config = toml::from_str(toml_str).unwrap();
         assert!(config.provider.api_keys.is_empty());
+    }
+
+    #[test]
+    fn parse_sandbox_config_defaults() {
+        let toml_str = r#"
+[agent]
+id = "test"
+model = "test-model"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(!config.sandbox.enabled);
+        assert!(!config.sandbox.allow_network);
+        assert_eq!(config.sandbox.memory, "2g");
+        assert_eq!(config.sandbox.pids_limit, 512);
+    }
+
+    #[test]
+    fn parse_sandbox_config_enabled() {
+        let toml_str = r#"
+[agent]
+id = "test"
+model = "test-model"
+
+[sandbox]
+enabled = true
+allow_network = true
+memory = "4g"
+pids_limit = 1024
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.sandbox.enabled);
+        assert!(config.sandbox.allow_network);
+        assert_eq!(config.sandbox.memory, "4g");
+        assert_eq!(config.sandbox.pids_limit, 1024);
+    }
+
+    #[test]
+    fn parse_user_with_sandbox_overrides() {
+        let toml_str = r#"
+[agent]
+id = "test"
+model = "test-model"
+
+[[users]]
+name = "bob"
+trust = "full"
+match = ["signal:bob-uuid"]
+sandbox = { allow_network = true, memory = "8g", pids_limit = 2048 }
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let bob = &config.users[0];
+        let overrides = bob.sandbox.as_ref().unwrap();
+        assert_eq!(overrides.allow_network, Some(true));
+        assert_eq!(overrides.memory.as_deref(), Some("8g"));
+        assert_eq!(overrides.pids_limit, Some(2048));
+    }
+
+    #[test]
+    fn parse_user_without_sandbox_overrides() {
+        let toml_str = r#"
+[agent]
+id = "test"
+model = "test-model"
+
+[[users]]
+name = "alice"
+trust = "owner"
+match = ["terminal:default"]
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.users[0].sandbox.is_none());
+    }
+
+    #[test]
+    fn parse_user_with_partial_sandbox_overrides() {
+        let toml_str = r#"
+[agent]
+id = "test"
+model = "test-model"
+
+[[users]]
+name = "bob"
+trust = "full"
+match = ["signal:bob-uuid"]
+sandbox = { allow_network = true }
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let bob = &config.users[0];
+        let overrides = bob.sandbox.as_ref().unwrap();
+        assert_eq!(overrides.allow_network, Some(true));
+        assert!(overrides.memory.is_none());
+        assert!(overrides.pids_limit.is_none());
+    }
+
+    #[test]
+    fn parse_owner_trust() {
+        let toml_str = r#"
+[agent]
+id = "test"
+model = "test-model"
+
+[[users]]
+name = "alice"
+trust = "owner"
+match = ["terminal:default"]
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.users[0].trust, TrustLevel::Owner);
+    }
+
+    #[test]
+    fn parse_cron_with_sandbox_overrides() {
+        let toml_str = r#"
+[agent]
+id = "test"
+model = "test-model"
+
+[[cron]]
+name = "heavy-job"
+cron = "0 * * * *"
+message = "run heavy task"
+sandbox = { memory = "8g", pids_limit = 2048 }
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let cron = &config.cron[0];
+        let overrides = cron.sandbox.as_ref().unwrap();
+        assert_eq!(overrides.memory.as_deref(), Some("8g"));
+        assert_eq!(overrides.pids_limit, Some(2048));
     }
 }

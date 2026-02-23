@@ -133,7 +133,7 @@ pub(crate) async fn build_prompt_index(
         return Ok(None);
     }
 
-    let session_summaries = if trust == TrustLevel::Full {
+    let session_summaries = if trust <= TrustLevel::Full {
         match memory.recent_session_summaries(5).await {
             Ok(summaries) => summaries,
             Err(error) => {

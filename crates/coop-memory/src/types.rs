@@ -260,7 +260,7 @@ pub fn normalize_file_path(path: &str) -> String {
 
 pub fn trust_to_store(trust: TrustLevel) -> &'static str {
     match trust {
-        TrustLevel::Full => "private",
+        TrustLevel::Owner | TrustLevel::Full => "private",
         TrustLevel::Inner => "shared",
         TrustLevel::Familiar | TrustLevel::Public => "social",
     }
@@ -277,7 +277,7 @@ pub fn min_trust_for_store(store: &str) -> TrustLevel {
 
 pub fn accessible_stores(trust: TrustLevel) -> Vec<String> {
     match trust {
-        TrustLevel::Full => vec!["private", "shared", "social"],
+        TrustLevel::Owner | TrustLevel::Full => vec!["private", "shared", "social"],
         TrustLevel::Inner => vec!["shared", "social"],
         TrustLevel::Familiar => vec!["social"],
         TrustLevel::Public => vec![],
@@ -289,6 +289,7 @@ pub fn accessible_stores(trust: TrustLevel) -> Vec<String> {
 
 pub fn trust_to_str(trust: TrustLevel) -> &'static str {
     match trust {
+        TrustLevel::Owner => "owner",
         TrustLevel::Full => "full",
         TrustLevel::Inner => "inner",
         TrustLevel::Familiar => "familiar",
@@ -298,6 +299,7 @@ pub fn trust_to_str(trust: TrustLevel) -> &'static str {
 
 pub fn trust_from_str(value: &str) -> TrustLevel {
     match value {
+        "owner" => TrustLevel::Owner,
         "full" => TrustLevel::Full,
         "inner" => TrustLevel::Inner,
         "familiar" => TrustLevel::Familiar,
