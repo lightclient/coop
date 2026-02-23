@@ -127,44 +127,10 @@ impl PromptFileEntry {
             min_trust: self.trust,
             cache: self.cache.to_core(),
             description,
-            default_content: default_content_for(&self.path),
+            default_content: None, // Defaults are set in coop-core default_file_configs()
         }
     }
 }
-
-/// Look up built-in default content for a workspace file path.
-///
-/// Files with defaults always include the built-in content in the prompt.
-/// The user's workspace file appends to (extends) the default. Users can
-/// place `<!-- override -->` at the top of their file to suppress the
-/// default entirely.
-fn default_content_for(path: &str) -> Option<&'static str> {
-    match path {
-        "TOOLS.md" => Some(DEFAULT_TOOLS_MD),
-        "AGENTS.md" => Some(DEFAULT_AGENTS_MD),
-        _ => None,
-    }
-}
-
-/// Built-in default content for TOOLS.md.
-const DEFAULT_TOOLS_MD: &str = include_str!("../../../workspaces/default/TOOLS.md");
-
-/// Built-in default content for AGENTS.md.
-const DEFAULT_AGENTS_MD: &str = "\
-# Instructions
-
-You are an AI agent running inside Coop, a personal agent gateway.
-Help the user with their tasks. Be concise, direct, and useful.
-
-When using tools, explain what you're doing briefly.
-
-## Heartbeat Protocol
-
-Cron heartbeat messages ask you to check HEARTBEAT.md for pending tasks.
-If nothing needs attention, reply with exactly **HEARTBEAT_OK**.
-If there is something to report, reply with the actual content.
-Keep heartbeat responses concise — these are push notifications, not conversations.
-";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

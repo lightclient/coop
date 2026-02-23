@@ -191,6 +191,26 @@ impl BuiltPrompt {
 /// built-in default content and use only their own content.
 pub const OVERRIDE_MARKER: &str = "<!-- override -->";
 
+/// Built-in default content for TOOLS.md.
+const TOOLS_MD_DEFAULT_CONTENT: &str = include_str!("../../../workspaces/default/TOOLS.md");
+
+/// Built-in default content for AGENTS.md.
+const AGENTS_MD_DEFAULT_CONTENT: &str = "\
+# Instructions
+
+You are an AI agent running inside Coop, a personal agent gateway.
+Help the user with their tasks. Be concise, direct, and useful.
+
+When using tools, explain what you're doing briefly.
+
+## Heartbeat Protocol
+
+Cron heartbeat messages ask you to check HEARTBEAT.md for pending tasks.
+If nothing needs attention, reply with exactly **HEARTBEAT_OK**.
+If there is something to report, reply with the actual content.
+Keep heartbeat responses concise — these are push notifications, not conversations.
+";
+
 /// Configuration for a single workspace file that may be included in the prompt.
 #[derive(Debug, Clone)]
 pub struct PromptFileConfig {
@@ -224,14 +244,14 @@ pub fn default_file_configs() -> Vec<PromptFileConfig> {
             min_trust: TrustLevel::Familiar,
             cache: CacheHint::Stable,
             description: "Behavioral instructions".into(),
-            default_content: None,
+            default_content: Some(AGENTS_MD_DEFAULT_CONTENT),
         },
         PromptFileConfig {
             path: "TOOLS.md".into(),
             min_trust: TrustLevel::Familiar,
             cache: CacheHint::Session,
             description: "Tool setup notes".into(),
-            default_content: None,
+            default_content: Some(TOOLS_MD_DEFAULT_CONTENT),
         },
         PromptFileConfig {
             path: "IDENTITY.md".into(),
@@ -1547,7 +1567,7 @@ mod tests {
     }
 
     #[test]
-    fn cache_blocks_only_volatile_when_no_files() {
+    fn cache_blocks_include_defaults_when_no_user_files() {
         let dir = setup_workspace(&[]);
 
         let index = WorkspaceIndex::scan(dir.path(), &default_file_configs()).unwrap();
@@ -1559,12 +1579,20 @@ mod tests {
         let blocks = prompt.to_cache_blocks();
         assert_eq!(
             blocks.len(),
-            1,
-            "should have only volatile block when no files"
+            2,
+            "should have stable block (built-in defaults) + volatile block (runtime)"
         );
         assert!(
-            blocks[0].contains("## Runtime"),
-            "single block should contain runtime context"
+            blocks[0].contains("## TOOLS.md"),
+            "first block should contain built-in TOOLS.md default"
+        );
+        assert!(
+            blocks[0].contains("## AGENTS.md"),
+            "first block should contain built-in AGENTS.md default"
+        );
+        assert!(
+            blocks[1].contains("## Runtime"),
+            "second block should contain runtime context"
         );
     }
 
