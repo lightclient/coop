@@ -30,6 +30,9 @@ static CONTAINER_REGISTRY: std::sync::LazyLock<Mutex<HashMap<String, ContainerIn
 #[derive(Debug, Clone)]
 struct ContainerInfo {
     id: String,
+    /// Workspace path that was mounted in this container.
+    /// Used to validate workspace matches when reusing containers.
+    workspace: String,
     last_used: std::time::Instant,
     user_name: Option<String>,
     user_trust: Option<coop_core::TrustLevel>,
@@ -104,28 +107,55 @@ async fn ensure_container(policy: &SandboxPolicy, user_name: Option<&str>, user_
     
     // Check if container already exists
     if container_exists(&name).await? {
-        // If it exists but isn't running, start it
-        if !container_running(&name).await? {
-            debug!(container = %name, "starting existing container");
-            let status = tokio::process::Command::new("container")
-                .args(["start", &name])
-                .status()
-                .await?;
-            
-            if !status.success() {
-                warn!(container = %name, "failed to start existing container, recreating");
-                // Remove the stopped container and recreate
-                let _ = tokio::process::Command::new("container")
-                    .args(["rm", &name])
-                    .status()
-                    .await;
+        // Validate workspace matches before reusing container
+        let workspace_matches = {
+            let registry = CONTAINER_REGISTRY.lock().unwrap();
+            if let Some(info) = registry.get(&name) {
+                info.workspace == policy.workspace.display().to_string()
             } else {
-                info!(container = %name, workspace = %policy.workspace.display(), "reused existing container");
+                false // Container not in registry, assume mismatch
+            }
+        };
+
+        if !workspace_matches {
+            warn!(
+                container = %name, 
+                expected_workspace = %policy.workspace.display(),
+                "workspace mismatch for existing container, recreating"
+            );
+            // Remove container with wrong workspace
+            let _ = tokio::process::Command::new("container")
+                .args(["stop", &name])
+                .status()
+                .await;
+            let _ = tokio::process::Command::new("container")
+                .args(["rm", &name])
+                .status()
+                .await;
+        } else {
+            // Workspace matches, proceed with reuse
+            if !container_running(&name).await? {
+                debug!(container = %name, "starting existing container");
+                let status = tokio::process::Command::new("container")
+                    .args(["start", &name])
+                    .status()
+                    .await?;
+                
+                if !status.success() {
+                    warn!(container = %name, "failed to start existing container, recreating");
+                    // Remove the stopped container and recreate
+                    let _ = tokio::process::Command::new("container")
+                        .args(["rm", &name])
+                        .status()
+                        .await;
+                } else {
+                    info!(container = %name, workspace = %policy.workspace.display(), "reused existing container");
+                    return Ok(name);
+                }
+            } else {
+                info!(container = %name, workspace = %policy.workspace.display(), "reusing running container");
                 return Ok(name);
             }
-        } else {
-            info!(container = %name, workspace = %policy.workspace.display(), "reusing running container");
-            return Ok(name);
         }
     }
 
@@ -191,6 +221,7 @@ async fn ensure_container(policy: &SandboxPolicy, user_name: Option<&str>, user_
         let mut registry = CONTAINER_REGISTRY.lock().unwrap();
         registry.insert(name.clone(), ContainerInfo {
             id: name.clone(),
+            workspace: policy.workspace.display().to_string(),
             last_used: std::time::Instant::now(),
             user_name: user_name.map(|s| s.to_string()),
             user_trust: user_trust,
