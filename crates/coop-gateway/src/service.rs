@@ -163,7 +163,7 @@ pub(crate) async fn cmd_gateway(config_path: Option<&str>, command: GatewayComma
                 no_start = options.no_start,
                 print = options.print,
             );
-            async { gateway_install(&ctx, &config, &options) }
+            async { gateway_install(&ctx, &config, &options).await }
                 .instrument(span)
                 .await
         }
@@ -319,7 +319,11 @@ pub(crate) fn is_pid_alive(pid: u32) -> bool {
 }
 
 #[allow(clippy::too_many_lines)]
-fn gateway_install(ctx: &GatewayContext, config: &Config, options: &InstallOptions) -> Result<()> {
+async fn gateway_install(
+    ctx: &GatewayContext,
+    config: &Config,
+    options: &InstallOptions,
+) -> Result<()> {
     let config_dir = ctx
         .paths
         .config
@@ -396,16 +400,11 @@ fn gateway_install(ctx: &GatewayContext, config: &Config, options: &InstallOptio
             let domain = format!("gui/{uid}/{}", ctx.service_name);
 
             run_cmd_ignore_failure("launchctl", &["bootout", &domain])?;
+            launchd_wait_for_unload(&domain).await;
 
             if !options.no_start {
-                run_cmd(
-                    "launchctl",
-                    &[
-                        "bootstrap",
-                        &format!("gui/{uid}"),
-                        &display(&ctx.paths.unit_file),
-                    ],
-                )?;
+                launchd_bootstrap_with_retry(&format!("gui/{uid}"), &display(&ctx.paths.unit_file))
+                    .await?;
                 run_cmd("launchctl", &["kickstart", "-k", &domain])?;
             }
 
@@ -543,14 +542,9 @@ async fn gateway_restart(ctx: &GatewayContext, config: &Config) -> Result<()> {
             let uid = run_cmd("id", &["-u"])?;
             let domain = format!("gui/{uid}/{}", ctx.service_name);
             run_cmd_ignore_failure("launchctl", &["bootout", &domain])?;
-            run_cmd(
-                "launchctl",
-                &[
-                    "bootstrap",
-                    &format!("gui/{uid}"),
-                    &display(&ctx.paths.unit_file),
-                ],
-            )?;
+            launchd_wait_for_unload(&domain).await;
+            launchd_bootstrap_with_retry(&format!("gui/{uid}"), &display(&ctx.paths.unit_file))
+                .await?;
             run_cmd("launchctl", &["kickstart", "-k", &domain])?;
         }
         _ => {
@@ -1179,6 +1173,65 @@ fn remove_file_if_exists(path: &Path) -> Result<()> {
         fs::remove_file(path).with_context(|| format!("removing {}", path.display()))?;
     }
     Ok(())
+}
+
+/// Wait for launchd to fully unload a service after `bootout`.
+///
+/// `bootout` returns before launchd finishes tearing down the service.
+/// If `bootstrap` runs while teardown is still in progress, launchd
+/// returns error 5 (I/O error). We poll `launchctl print` until the
+/// service is no longer loaded.
+async fn launchd_wait_for_unload(domain: &str) {
+    for attempt in 0..20 {
+        let result = run_cmd_allow_failure("launchctl", &["print", domain]);
+        match result {
+            Ok(ref cmd) if !cmd.success => {
+                debug!(domain, attempt, "launchd service fully unloaded");
+                return;
+            }
+            _ => {
+                debug!(domain, attempt, "launchd service still loaded, waiting");
+                sleep(Duration::from_millis(250)).await;
+            }
+        }
+    }
+    warn!(
+        domain,
+        "launchd service did not unload within 5s, proceeding anyway"
+    );
+}
+
+/// Bootstrap a launchd service with retries.
+///
+/// Even after `launchctl print` reports the service as unloaded, launchd
+/// may still briefly reject `bootstrap` with error 5. Retry a few times
+/// with backoff to handle this window.
+async fn launchd_bootstrap_with_retry(domain_target: &str, plist_path: &str) -> Result<()> {
+    for attempt in 0..5 {
+        let result = run_cmd_allow_failure("launchctl", &["bootstrap", domain_target, plist_path])?;
+        if result.success {
+            return Ok(());
+        }
+
+        let is_retryable = result.status_code == Some(5)
+            || result.stderr.contains("Input/output error")
+            || result.stderr.contains("Operation now in progress");
+
+        if !is_retryable {
+            let stderr = if result.stderr.trim().is_empty() {
+                "(no stderr)"
+            } else {
+                result.stderr.trim()
+            };
+            bail!("launchctl bootstrap failed: {stderr}");
+        }
+
+        warn!(attempt, stderr = %result.stderr.trim(), "launchctl bootstrap returned retryable error, retrying");
+        sleep(Duration::from_millis(500)).await;
+    }
+    bail!(
+        "launchctl bootstrap failed after 5 retries — launchd may still be tearing down the previous service"
+    )
 }
 
 fn run_cmd(program: &str, args: &[&str]) -> Result<String> {
