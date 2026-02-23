@@ -11,6 +11,17 @@ Coop is configured via `coop.toml`. The config file is automatically watched —
 2. **Modify** — produce the complete new TOML (config_write requires the full file, not a patch)
 3. **Write** with `config_write` — it validates before writing, backs up the old file, and rejects invalid configs
 
+### Security restrictions on config_write
+
+Only the **Owner** can modify security-sensitive configuration. Non-owner callers (Full, Inner, etc.) are blocked from changing:
+
+- **Users** — cannot add, remove, or modify any user (trust level, match rules, sandbox overrides)
+- **Sandbox config** — cannot change `[sandbox]` settings (enabled, allow_network, memory, pids_limit)
+- **Per-cron sandbox overrides** — cannot modify sandbox overrides on cron entries
+- **Prompt files** — cannot change `[prompt]` configuration (which files are loaded into the system prompt)
+
+Non-owner callers can still change non-security config: model, cron messages/schedules, memory settings, etc.
+
 ### Hot-reloadable vs restart-required
 
 Changes to these fields take effect immediately (hot-reload):
@@ -43,21 +54,38 @@ model = "anthropic/claude-sonnet-4-20250514"   # model identifier (hot-reload)
 workspace = "./workspaces/default"             # path to workspace dir (restart-required)
 
 # Users and trust levels
-# Trust levels: full > inner > familiar > public
-# - full: complete access, can use all tools, sees all memory
-# - inner: can use bash/file tools, sees shared+social memory
+# Trust levels: owner > full > inner > familiar > public
+# - owner: bypasses sandbox, full host access (the person running coop)
+# - full: complete tool access, sandboxed bash, sees all memory
+# - inner: can use bash/file tools (sandboxed), sees shared+social memory
 # - familiar: read-only tools, sees social memory only
 # - public: no tools, no memory
 
 [[users]]
 name = "alice"
-trust = "full"
+trust = "owner"
 match = ["terminal:default", "signal:alice-uuid"]
 
 [[users]]
 name = "bob"
-trust = "inner"
+trust = "full"
 match = ["signal:bob-uuid"]
+
+# Per-user sandbox overrides (optional, only when sandbox is enabled)
+# [[users]]
+# name = "carol"
+# trust = "inner"
+# match = ["signal:carol-uuid"]
+# sandbox = { allow_network = true, memory = "4g", pids_limit = 1024 }
+
+# Sandbox configuration
+# When enabled, non-owner bash commands run in isolated namespaces.
+# Owner trust bypasses the sandbox entirely.
+[sandbox]
+enabled = false                    # default: false
+allow_network = false              # allow sandboxed network access (default: false)
+memory = "2g"                      # memory limit per command (default: 2g)
+pids_limit = 512                   # max PIDs per command (default: 512)
 
 # Channel configuration
 [channels.signal]
@@ -70,6 +98,19 @@ name = "anthropic"                 # restart-required
 # Each entry is an env: reference. Keys rotate proactively at 90%
 # utilization and reactively on 429 errors. Omit for single-key mode.
 # api_keys = ["env:ANTHROPIC_API_KEY", "env:ANTHROPIC_API_KEY_2", "env:ANTHROPIC_API_KEY_3"]
+
+# Prompt file configuration
+# Controls which workspace files are loaded into the system prompt.
+# Paths are relative to workspace. Must not contain '..' or be absolute.
+# [prompt]
+# shared_files = [
+#   { path = "SOUL.md", trust = "familiar", cache = "stable" },
+#   { path = "TOOLS.md", trust = "full", cache = "session" },
+# ]
+# user_files = [
+#   { path = "AGENTS.md", trust = "full", cache = "stable" },
+#   { path = "USER.md", trust = "inner", cache = "session" },
+# ]
 
 # Memory system
 [memory]
@@ -134,6 +175,13 @@ target = "alice-uuid"              # or "group:<hex>" for group chats
 name = "cleanup"
 cron = "0 3 * * *"
 message = "run cleanup"
+
+# Per-cron sandbox overrides (optional)
+# [[cron]]
+# name = "fetch-data"
+# cron = "0 * * * *"
+# message = "fetch data"
+# sandbox = { allow_network = true }
 ```
 
 ### Validation constraints
@@ -149,6 +197,42 @@ message = "run cleanup"
 - Cron delivery channel must be `signal`
 - Cron with user but no `deliver`: warns if user has no non-terminal match patterns (heartbeat will have no delivery targets)
 - API keys: if `provider.api_keys` is set, each entry must use `env:` prefix and the referenced env var must be set. Otherwise, `ANTHROPIC_API_KEY` must be set. Plus embedding provider key if configured
+- Sandbox: memory must be a valid size (e.g. `2g`, `512m`), pids_limit > 0
+- Sandbox: at most one user with `trust = "owner"`; warns if sandbox enabled but no owner configured
+- Prompt files: paths must be relative, no `..` or absolute paths, no duplicates
+
+## Sandbox
+
+When `[sandbox]` is enabled, non-owner bash commands run inside Linux namespaces (user, mount, PID, network) with resource limits. The owner bypasses the sandbox entirely.
+
+### Trust levels and sandbox behavior
+
+| Trust Level | Sandbox | Tools | Memory Stores |
+|-------------|---------|-------|---------------|
+| **owner** | No — executes directly on host | All tools, unrestricted | All (private, shared, social) |
+| **full** | Yes — sandboxed to workspace | All tools, bash in sandbox | All (private, shared, social) |
+| **inner** | Yes — sandboxed to workspace | Bash + file tools, in sandbox | shared, social |
+| **familiar** | Yes — sandboxed to workspace | Read-only file tools | social |
+| **public** | N/A | No tools | None |
+
+The only behavioral difference between `owner` and `full` is sandbox bypass. When sandbox is disabled, they behave identically.
+
+### Terminal default
+
+When sandbox is enabled and no user matches the terminal, the terminal defaults to `owner` trust (the person at the keyboard is the machine owner). For all other channels, unmatched senders remain `public`.
+
+### Check sandbox status
+
+Use `coop sandbox status` to see platform capabilities:
+
+```
+Sandbox: linux (namespaces + seccomp)
+  ✓ user namespaces
+  ✓ network namespaces
+  ✗ landlock
+  ✓ seccomp
+  ✓ cgroups v2
+```
 
 ## Skills
 
