@@ -2,7 +2,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::init_templates::{
-    AGENTS_MD, BOOTSTRAP_MD, HEARTBEAT_MD, IDENTITY_MD, SIGNAL_MD, SOUL_MD, TOOLS_MD, USER_MD,
+    AGENTS_MD_INIT, BOOTSTRAP_MD, HEARTBEAT_MD, IDENTITY_MD, SIGNAL_MD, SOUL_MD, TOOLS_MD_INIT,
+    USER_MD,
 };
 
 // ---------------------------------------------------------------------------
@@ -139,8 +140,8 @@ fn scaffold_workspace(dir: &Path, user_name: &str) -> anyhow::Result<Vec<String>
     let files: &[(&Path, &str)] = &[
         (&workspace.join("SOUL.md"), SOUL_MD),
         (&workspace.join("IDENTITY.md"), IDENTITY_MD),
-        (&workspace.join("AGENTS.md"), AGENTS_MD),
-        (&workspace.join("TOOLS.md"), TOOLS_MD),
+        (&workspace.join("AGENTS.md"), AGENTS_MD_INIT),
+        (&workspace.join("TOOLS.md"), TOOLS_MD_INIT),
         (&workspace.join("HEARTBEAT.md"), HEARTBEAT_MD),
         (&workspace.join("BOOTSTRAP.md"), BOOTSTRAP_MD),
         (&users_dir.join("USER.md"), USER_MD),

@@ -102,6 +102,13 @@ name = "anthropic"                 # restart-required
 # Prompt file configuration
 # Controls which workspace files are loaded into the system prompt.
 # Paths are relative to workspace. Must not contain '..' or be absolute.
+#
+# Some files (TOOLS.md, AGENTS.md) have built-in defaults compiled into the
+# binary. These defaults are always included in the prompt. The user's
+# workspace file appends to (extends) the defaults. To fully replace the
+# defaults, put <!-- override --> on the first line of the workspace file.
+# If the workspace file is deleted, only the built-in defaults are used.
+#
 # [prompt]
 # shared_files = [
 #   { path = "SOUL.md", trust = "familiar", cache = "stable" },

@@ -187,6 +187,10 @@ impl BuiltPrompt {
 // File config
 // ---------------------------------------------------------------------------
 
+/// Marker that users place at the top of a workspace file to suppress the
+/// built-in default content and use only their own content.
+pub const OVERRIDE_MARKER: &str = "<!-- override -->";
+
 /// Configuration for a single workspace file that may be included in the prompt.
 #[derive(Debug, Clone)]
 pub struct PromptFileConfig {
@@ -198,6 +202,11 @@ pub struct PromptFileConfig {
     pub cache: CacheHint,
     /// One-line description for the memory index menu.
     pub description: String,
+    /// Built-in default content that ships with the binary. When set, this
+    /// content is always included in the prompt and the user's workspace file
+    /// *appends* to it. Users can place `<!-- override -->` at the top of
+    /// their file to suppress the default and fully replace it.
+    pub default_content: Option<&'static str>,
 }
 
 /// Default file conventions matching OpenClaw's proven semantic filenames.
@@ -208,42 +217,49 @@ pub fn default_file_configs() -> Vec<PromptFileConfig> {
             min_trust: TrustLevel::Familiar,
             cache: CacheHint::Stable,
             description: "Agent personality and voice".into(),
+            default_content: None,
         },
         PromptFileConfig {
             path: "AGENTS.md".into(),
             min_trust: TrustLevel::Familiar,
             cache: CacheHint::Stable,
             description: "Behavioral instructions".into(),
+            default_content: None,
         },
         PromptFileConfig {
             path: "TOOLS.md".into(),
             min_trust: TrustLevel::Familiar,
             cache: CacheHint::Session,
             description: "Tool setup notes".into(),
+            default_content: None,
         },
         PromptFileConfig {
             path: "IDENTITY.md".into(),
             min_trust: TrustLevel::Familiar,
             cache: CacheHint::Session,
             description: "Agent identity".into(),
+            default_content: None,
         },
         PromptFileConfig {
             path: "USER.md".into(),
             min_trust: TrustLevel::Inner,
             cache: CacheHint::Session,
             description: "Per-user info".into(),
+            default_content: None,
         },
         PromptFileConfig {
             path: "MEMORY.md".into(),
             min_trust: TrustLevel::Full,
             cache: CacheHint::Session,
             description: "Long-term curated memory".into(),
+            default_content: None,
         },
         PromptFileConfig {
             path: "HEARTBEAT.md".into(),
             min_trust: TrustLevel::Full,
             cache: CacheHint::Volatile,
             description: "Periodic check tasks".into(),
+            default_content: None,
         },
     ]
 }
@@ -428,6 +444,29 @@ impl WorkspaceIndex {
         let mut files = HashMap::new();
         for cfg in file_configs {
             let Some(full_path) = safe_resolve(workspace, &cfg.path) else {
+                // No safe path, but we may still have default content.
+                if let Some(default) = cfg.default_content {
+                    let tokens = count_tokens(default);
+                    debug!(
+                        file = %cfg.path,
+                        tokens,
+                        min_trust = ?cfg.min_trust,
+                        "indexed default-only workspace file"
+                    );
+                    files.insert(
+                        cfg.path.clone(),
+                        IndexedFile {
+                            entry: MemoryIndexEntry {
+                                path: cfg.path.clone(),
+                                tokens,
+                                description: cfg.description.clone(),
+                                min_trust: cfg.min_trust,
+                            },
+                            mtime: SystemTime::UNIX_EPOCH,
+                            cache: cfg.cache,
+                        },
+                    );
+                }
                 continue;
             };
             if let Some(indexed) = Self::index_file(&full_path, cfg)? {
@@ -438,6 +477,27 @@ impl WorkspaceIndex {
                     "indexed workspace file"
                 );
                 files.insert(cfg.path.clone(), indexed);
+            } else if let Some(default) = cfg.default_content {
+                let tokens = count_tokens(default);
+                debug!(
+                    file = %cfg.path,
+                    tokens,
+                    min_trust = ?cfg.min_trust,
+                    "indexed default-only workspace file"
+                );
+                files.insert(
+                    cfg.path.clone(),
+                    IndexedFile {
+                        entry: MemoryIndexEntry {
+                            path: cfg.path.clone(),
+                            tokens,
+                            description: cfg.description.clone(),
+                            min_trust: cfg.min_trust,
+                        },
+                        mtime: SystemTime::UNIX_EPOCH,
+                        cache: cfg.cache,
+                    },
+                );
             } else {
                 trace!(file = %cfg.path, "workspace file not found");
             }
@@ -528,8 +588,16 @@ impl WorkspaceIndex {
 
         let content = std::fs::read_to_string(full_path)
             .with_context(|| format!("failed to read {}", full_path.display()))?;
-        let tokens = count_tokens(&content);
         let mtime = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+
+        // Token count reflects the effective content: default + user (or just
+        // user if they opt out with <!-- override -->).
+        let tokens = if let Some(default) = cfg.default_content {
+            let effective = resolve_default_content(default, &content);
+            count_tokens(&effective)
+        } else {
+            count_tokens(&content)
+        };
 
         Ok(Some(IndexedFile {
             entry: MemoryIndexEntry {
@@ -546,6 +614,27 @@ impl WorkspaceIndex {
     /// Get the indexed file metadata (for internal use by the builder).
     fn get(&self, path: &str) -> Option<&IndexedFile> {
         self.files.get(path)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Default content merging
+// ---------------------------------------------------------------------------
+
+/// Merge built-in default content with user file content.
+///
+/// - If `user_content` starts with [`OVERRIDE_MARKER`], returns only the user
+///   content (with the marker line stripped).
+/// - Otherwise, returns `default\n\n<user_content>`, or just `default` when
+///   the user content is empty/whitespace-only.
+fn resolve_default_content(default: &str, user_content: &str) -> String {
+    let trimmed = user_content.trim();
+    if let Some(rest) = trimmed.strip_prefix(OVERRIDE_MARKER) {
+        rest.trim_start_matches('\n').to_owned()
+    } else if trimmed.is_empty() {
+        default.to_owned()
+    } else {
+        format!("{default}\n\n{user_content}")
     }
 }
 
@@ -801,6 +890,12 @@ impl PromptBuilder {
     }
 
     /// Process workspace files: trust-gate, budget-check, include or overflow each.
+    ///
+    /// When a config has `default_content`, the built-in default is prepended to
+    /// the user's file content. If the file doesn't exist on disk, only the
+    /// default is used. Users can place `<!-- override -->` at the top of their
+    /// file to suppress the default and fully replace it.
+    #[allow(clippy::unnecessary_wraps)]
     fn build_file_layers(
         &self,
         index: &WorkspaceIndex,
@@ -839,13 +934,9 @@ impl PromptBuilder {
 
             let header = Self::layer_header(&cfg.path);
 
-            let Some(safe_path) = safe_resolve(&self.workspace, &cfg.path) else {
-                continue;
-            };
+            let content = self.read_file_with_defaults(cfg);
 
             if indexed.entry.tokens <= remaining {
-                let content = std::fs::read_to_string(&safe_path)
-                    .with_context(|| format!("failed to read {}", cfg.path))?;
                 let counted = Counted::new(content);
                 used_tokens += counted.tokens;
                 debug!(
@@ -861,8 +952,6 @@ impl PromptBuilder {
                     cache: cfg.cache,
                 });
             } else if remaining >= 200 {
-                let content = std::fs::read_to_string(&safe_path)
-                    .with_context(|| format!("failed to read {}", cfg.path))?;
                 let truncated = truncate_to_budget(&content, &cfg.path, remaining);
                 used_tokens += truncated.tokens;
                 debug!(
@@ -889,6 +978,19 @@ impl PromptBuilder {
         }
 
         Ok((layers, used_tokens, overflow))
+    }
+
+    /// Read a workspace file and merge with built-in default content if present.
+    fn read_file_with_defaults(&self, cfg: &PromptFileConfig) -> String {
+        let file_content =
+            safe_resolve(&self.workspace, &cfg.path).and_then(|p| std::fs::read_to_string(p).ok());
+
+        match (cfg.default_content, file_content) {
+            (Some(default), Some(user)) => resolve_default_content(default, &user),
+            (Some(default), None) => default.to_owned(),
+            (None, Some(user)) => user,
+            (None, None) => String::new(),
+        }
     }
 
     /// Process files from an arbitrary root directory (used for per-user files).
@@ -1638,6 +1740,7 @@ mod tests {
             min_trust: TrustLevel::Full,
             cache: CacheHint::Session,
             description: "Per-user info".into(),
+            default_content: None,
         }];
 
         let index = WorkspaceIndex::scan(dir.path(), &default_file_configs()).unwrap();
@@ -1676,6 +1779,7 @@ mod tests {
             min_trust: TrustLevel::Full,
             cache: CacheHint::Session,
             description: "Per-user info".into(),
+            default_content: None,
         }];
 
         let index = WorkspaceIndex::scan(dir.path(), &default_file_configs()).unwrap();
@@ -1703,6 +1807,7 @@ mod tests {
             min_trust: TrustLevel::Full,
             cache: CacheHint::Session,
             description: "Per-user tool notes".into(),
+            default_content: None,
         }];
 
         let index = WorkspaceIndex::scan(dir.path(), &default_file_configs()).unwrap();
@@ -1737,6 +1842,7 @@ mod tests {
             min_trust: TrustLevel::Full,
             cache: CacheHint::Session,
             description: "Per-user info".into(),
+            default_content: None,
         }];
 
         let index = WorkspaceIndex::scan(dir.path(), &default_file_configs()).unwrap();
@@ -2194,6 +2300,151 @@ mod tests {
             channel_layer.cache,
             CacheHint::Session,
             "channel context should use Session cache hint"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Default content merging
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn resolve_default_prepends_to_user_content() {
+        let result = resolve_default_content("default stuff", "user stuff");
+        assert_eq!(result, "default stuff\n\nuser stuff");
+    }
+
+    #[test]
+    fn resolve_default_returns_default_when_user_empty() {
+        assert_eq!(resolve_default_content("default", ""), "default");
+        assert_eq!(resolve_default_content("default", "   \n  "), "default");
+    }
+
+    #[test]
+    fn resolve_default_override_marker_suppresses_default() {
+        let user = "<!-- override -->\nmy custom content";
+        let result = resolve_default_content("default stuff", user);
+        assert_eq!(result, "my custom content");
+    }
+
+    #[test]
+    fn resolve_default_override_marker_with_leading_whitespace() {
+        // Marker must be at the start of trimmed content.
+        let user = "  <!-- override -->\nmy content";
+        let result = resolve_default_content("default stuff", user);
+        assert_eq!(result, "my content");
+    }
+
+    #[test]
+    fn default_content_used_when_file_missing() {
+        let dir = setup_workspace(&[]); // no files at all
+
+        let configs = vec![PromptFileConfig {
+            path: "TOOLS.md".into(),
+            min_trust: TrustLevel::Full,
+            cache: CacheHint::Session,
+            description: "Tool setup notes".into(),
+            default_content: Some("built-in tools reference"),
+        }];
+
+        let index = WorkspaceIndex::scan(dir.path(), &configs).unwrap();
+        let prompt = PromptBuilder::new(dir.path().to_path_buf(), "test".into())
+            .trust(TrustLevel::Full)
+            .file_configs(configs)
+            .build(&index)
+            .unwrap();
+
+        let flat = prompt.to_flat_string();
+        assert!(
+            flat.contains("built-in tools reference"),
+            "should include default content when file is missing"
+        );
+    }
+
+    #[test]
+    fn default_content_prepended_to_user_file() {
+        let dir = setup_workspace(&[("TOOLS.md", "my custom notes")]);
+
+        let configs = vec![PromptFileConfig {
+            path: "TOOLS.md".into(),
+            min_trust: TrustLevel::Full,
+            cache: CacheHint::Session,
+            description: "Tool setup notes".into(),
+            default_content: Some("built-in tools reference"),
+        }];
+
+        let index = WorkspaceIndex::scan(dir.path(), &configs).unwrap();
+        let prompt = PromptBuilder::new(dir.path().to_path_buf(), "test".into())
+            .trust(TrustLevel::Full)
+            .file_configs(configs)
+            .build(&index)
+            .unwrap();
+
+        let flat = prompt.to_flat_string();
+        assert!(
+            flat.contains("built-in tools reference"),
+            "should include default content"
+        );
+        assert!(
+            flat.contains("my custom notes"),
+            "should also include user content"
+        );
+        let default_pos = flat.find("built-in tools reference").unwrap();
+        let user_pos = flat.find("my custom notes").unwrap();
+        assert!(
+            default_pos < user_pos,
+            "default content should come before user content"
+        );
+    }
+
+    #[test]
+    fn override_marker_suppresses_default_in_prompt() {
+        let dir = setup_workspace(&[("TOOLS.md", "<!-- override -->\nfully custom tools content")]);
+
+        let configs = vec![PromptFileConfig {
+            path: "TOOLS.md".into(),
+            min_trust: TrustLevel::Full,
+            cache: CacheHint::Session,
+            description: "Tool setup notes".into(),
+            default_content: Some("built-in tools reference"),
+        }];
+
+        let index = WorkspaceIndex::scan(dir.path(), &configs).unwrap();
+        let prompt = PromptBuilder::new(dir.path().to_path_buf(), "test".into())
+            .trust(TrustLevel::Full)
+            .file_configs(configs)
+            .build(&index)
+            .unwrap();
+
+        let flat = prompt.to_flat_string();
+        assert!(
+            !flat.contains("built-in tools reference"),
+            "should NOT contain built-in default when override marker present"
+        );
+        assert!(
+            flat.contains("fully custom tools content"),
+            "should contain user's custom content"
+        );
+        assert!(
+            !flat.contains("<!-- override -->"),
+            "should NOT contain the override marker itself"
+        );
+    }
+
+    #[test]
+    fn no_default_content_behaves_as_before() {
+        // When default_content is None, behavior is unchanged.
+        let dir = setup_workspace(&[("SOUL.md", "I am an agent.")]);
+
+        let index = WorkspaceIndex::scan(dir.path(), &default_file_configs()).unwrap();
+        let prompt = PromptBuilder::new(dir.path().to_path_buf(), "test".into())
+            .trust(TrustLevel::Full)
+            .build(&index)
+            .unwrap();
+
+        let flat = prompt.to_flat_string();
+        assert!(
+            flat.contains("I am an agent."),
+            "should include file content normally"
         );
     }
 }

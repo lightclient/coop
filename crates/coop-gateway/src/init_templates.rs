@@ -19,23 +19,21 @@ pub(crate) const USER_MD: &str = "\
 <!-- The bootstrap conversation will help fill this in. -->
 ";
 
-pub(crate) const AGENTS_MD: &str = "\
-# Instructions
-
-You are an AI agent running inside Coop, a personal agent gateway.
-Help the user with their tasks. Be concise, direct, and useful.
-
-When using tools, explain what you're doing briefly.
-
-## Heartbeat Protocol
-
-Cron heartbeat messages ask you to check HEARTBEAT.md for pending tasks.
-If nothing needs attention, reply with exactly **HEARTBEAT_OK**.
-If there is something to report, reply with the actual content.
-Keep heartbeat responses concise — these are push notifications, not conversations.
+/// Stub written by `coop init`. The built-in AGENTS.md default is always
+/// prepended automatically; this file extends it with user customizations.
+pub(crate) const AGENTS_MD_INIT: &str = "\
+<!-- Built-in defaults are prepended automatically by coop. -->
+<!-- Add your custom instructions below. They extend the defaults. -->
+<!-- To fully replace the defaults, put <!-- override --> on the first line. -->
 ";
 
-pub(crate) const TOOLS_MD: &str = include_str!("../../../workspaces/default/TOOLS.md");
+/// Stub written by `coop init`. The built-in TOOLS.md default is always
+/// prepended automatically; this file extends it with user customizations.
+pub(crate) const TOOLS_MD_INIT: &str = "\
+<!-- Built-in defaults are prepended automatically by coop. -->
+<!-- Add your custom tool notes below. They extend the defaults. -->
+<!-- To fully replace the defaults, put <!-- override --> on the first line. -->
+";
 
 pub(crate) const HEARTBEAT_MD: &str = "\
 # Heartbeat Tasks

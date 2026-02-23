@@ -51,7 +51,7 @@ Five workspace crates under `crates/`:
 - All external integrations are behind traits in `coop-core/traits.rs` — providers, channels, tools, session stores
 - Matching fake implementations in `coop-core/fakes.rs` (`FakeProvider`, `FakeChannel`, `FakeTool`, `MemorySessionStore`) for testing without real dependencies
 - System prompts assembled via layered `PromptBuilder` with token budgeting and Anthropic cache hints
-- Trust model uses Bell-LaPadula ordering: `Full < Inner < Familiar < Public`
+- Trust model uses Bell-LaPadula ordering: `Owner < Full < Inner < Familiar < Public`
 - Config loaded from TOML (`coop.toml`) with hierarchical path resolution
 
 ## Code Conventions
