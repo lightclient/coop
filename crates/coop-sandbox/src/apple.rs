@@ -30,7 +30,6 @@ static CONTAINER_REGISTRY: std::sync::LazyLock<Mutex<HashMap<String, ContainerIn
 #[derive(Debug, Clone)]
 struct ContainerInfo {
     id: String,
-    workspace: String,
     last_used: std::time::Instant,
     user_name: Option<String>,
     user_trust: Option<coop_core::TrustLevel>,
@@ -192,7 +191,6 @@ async fn ensure_container(policy: &SandboxPolicy, user_name: Option<&str>, user_
         let mut registry = CONTAINER_REGISTRY.lock().unwrap();
         registry.insert(name.clone(), ContainerInfo {
             id: name.clone(),
-            workspace: policy.workspace.display().to_string(),
             last_used: std::time::Instant::now(),
             user_name: user_name.map(|s| s.to_string()),
             user_trust: user_trust,
