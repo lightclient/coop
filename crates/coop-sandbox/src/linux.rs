@@ -178,6 +178,116 @@ fn build_sandbox_script(policy: &SandboxPolicy, command: &str) -> String {
     script.push_str("export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'\n");
     script.push_str("export TERM='xterm-256color'\n");
 
+    // Apply Landlock filesystem restrictions if available
+    if check_landlock() {
+        let _ = writeln!(
+            script, 
+            r#"
+# Apply Landlock filesystem restrictions
+cat > /tmp/landlock_restrict.c << 'LANDLOCK_EOF'
+#include <linux/landlock.h>
+#include <sys/syscall.h>
+#include <sys/prctl.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+int main() {{
+    struct landlock_ruleset_attr ruleset_attr = {{
+        .handled_access_fs = LANDLOCK_ACCESS_FS_EXECUTE |
+                           LANDLOCK_ACCESS_FS_WRITE_FILE |
+                           LANDLOCK_ACCESS_FS_READ_FILE |
+                           LANDLOCK_ACCESS_FS_READ_DIR |
+                           LANDLOCK_ACCESS_FS_REMOVE_DIR |
+                           LANDLOCK_ACCESS_FS_REMOVE_FILE |
+                           LANDLOCK_ACCESS_FS_MAKE_CHAR |
+                           LANDLOCK_ACCESS_FS_MAKE_DIR |
+                           LANDLOCK_ACCESS_FS_MAKE_REG |
+                           LANDLOCK_ACCESS_FS_MAKE_SOCK |
+                           LANDLOCK_ACCESS_FS_MAKE_FIFO |
+                           LANDLOCK_ACCESS_FS_MAKE_BLOCK |
+                           LANDLOCK_ACCESS_FS_MAKE_SYM,
+    }};
+    
+    int ruleset_fd = syscall(SYS_landlock_create_ruleset, &ruleset_attr, sizeof(ruleset_attr), 0);
+    if (ruleset_fd < 0) {{
+        perror("landlock_create_ruleset");
+        exit(1);
+    }}
+    
+    // Allow access to workspace directory
+    struct landlock_path_beneath_attr path_beneath = {{
+        .allowed_access = LANDLOCK_ACCESS_FS_EXECUTE |
+                        LANDLOCK_ACCESS_FS_WRITE_FILE |
+                        LANDLOCK_ACCESS_FS_READ_FILE |
+                        LANDLOCK_ACCESS_FS_READ_DIR |
+                        LANDLOCK_ACCESS_FS_REMOVE_DIR |
+                        LANDLOCK_ACCESS_FS_REMOVE_FILE |
+                        LANDLOCK_ACCESS_FS_MAKE_CHAR |
+                        LANDLOCK_ACCESS_FS_MAKE_DIR |
+                        LANDLOCK_ACCESS_FS_MAKE_REG |
+                        LANDLOCK_ACCESS_FS_MAKE_SOCK |
+                        LANDLOCK_ACCESS_FS_MAKE_FIFO |
+                        LANDLOCK_ACCESS_FS_MAKE_BLOCK |
+                        LANDLOCK_ACCESS_FS_MAKE_SYM,
+        .parent_fd = open("{workspace}", O_PATH | O_CLOEXEC),
+    }};
+    
+    if (path_beneath.parent_fd < 0) {{
+        perror("open workspace");
+        exit(1);
+    }}
+    
+    if (syscall(SYS_landlock_add_rule, ruleset_fd, LANDLOCK_RULE_PATH_BENEATH, &path_beneath, 0) < 0) {{
+        perror("landlock_add_rule workspace");
+        exit(1);
+    }}
+    close(path_beneath.parent_fd);
+    
+    // Allow read-only access to essential system paths
+    const char* readonly_paths[] = {{
+        "/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc/ld.so.cache", "/etc/passwd", 
+        "/etc/group", "/etc/nsswitch.conf", "/etc/resolv.conf", "/dev/null", "/dev/zero", 
+        "/dev/urandom", "/proc", "/sys/fs/cgroup", "/tmp"
+    }};
+    
+    for (int i = 0; i < sizeof(readonly_paths) / sizeof(readonly_paths[0]); i++) {{
+        struct landlock_path_beneath_attr ro_path = {{
+            .allowed_access = LANDLOCK_ACCESS_FS_EXECUTE |
+                            LANDLOCK_ACCESS_FS_READ_FILE |
+                            LANDLOCK_ACCESS_FS_READ_DIR,
+            .parent_fd = open(readonly_paths[i], O_PATH | O_CLOEXEC),
+        }};
+        
+        if (ro_path.parent_fd >= 0) {{
+            syscall(SYS_landlock_add_rule, ruleset_fd, LANDLOCK_RULE_PATH_BENEATH, &ro_path, 0);
+            close(ro_path.parent_fd);
+        }}
+    }}
+    
+    // Restrict the current thread
+    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)) {{
+        perror("prctl(PR_SET_NO_NEW_PRIVS)");
+        exit(1);
+    }}
+    
+    if (syscall(SYS_landlock_restrict_self, ruleset_fd, 0) < 0) {{
+        perror("landlock_restrict_self");
+        exit(1);
+    }}
+    close(ruleset_fd);
+    
+    return 0;
+}}
+LANDLOCK_EOF
+
+gcc -o /tmp/landlock_restrict /tmp/landlock_restrict.c 2>/dev/null && /tmp/landlock_restrict
+rm -f /tmp/landlock_restrict.c /tmp/landlock_restrict 2>/dev/null
+"#
+        );
+    }
+
     let escaped = command.replace('\'', "'\\''");
     let _ = writeln!(script, "exec sh -c '{escaped}'");
 

@@ -13,7 +13,11 @@ pub fn probe() -> Result<SandboxInfo> {
 
     if !status.success() {
         anyhow::bail!(
-            "apple/container CLI not found — install from https://github.com/apple/container"
+            "apple/container CLI not found. Install with:\n\
+             brew install apple/apple/container\n\n\
+             Or manually from: https://github.com/apple/container\n\n\
+             Once installed, restart coop or disable sandbox in config with:\n\
+             coop config set sandbox.enabled false"
         );
     }
 

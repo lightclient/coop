@@ -506,29 +506,29 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
 
     let executor: Arc<dyn coop_core::ToolExecutor> = Arc::new(CompositeExecutor::new(executors));
 
+    // Check sandbox availability early if enabled
+    if shared.load().sandbox.enabled {
+        if let Err(e) = coop_sandbox::probe() {
+            anyhow::bail!("sandbox enabled but not available: {e}. Install sandbox requirements or disable sandbox in config.");
+        }
+    }
+
     // Wrap executor with SandboxExecutor when sandbox is enabled
     let executor: Arc<dyn coop_core::ToolExecutor> = if shared.load().sandbox.enabled {
-        match coop_sandbox::probe() {
-            Ok(sandbox_info) => {
-                info!(sandbox = %sandbox_info.name, "sandbox enabled");
-                let base_policy = coop_sandbox::SandboxPolicy {
-                    workspace: workspace.clone(),
-                    allow_network: shared.load().sandbox.allow_network,
-                    memory_limit: coop_sandbox::parse_memory_size(&shared.load().sandbox.memory)
-                        .unwrap_or(2 * 1024 * 1024 * 1024),
-                    pids_limit: shared.load().sandbox.pids_limit,
-                };
-                Arc::new(sandbox_executor::SandboxExecutor::new(
-                    executor,
-                    base_policy,
-                    Arc::clone(&shared),
-                ))
-            }
-            Err(e) => {
-                warn!(error = %e, "sandbox enabled but not available — running unsandboxed");
-                executor
-            }
-        }
+        let sandbox_info = coop_sandbox::probe().expect("sandbox already checked above");
+        info!(sandbox = %sandbox_info.name, "sandbox enabled");
+        let base_policy = coop_sandbox::SandboxPolicy {
+            workspace: workspace.clone(),
+            allow_network: shared.load().sandbox.allow_network,
+            memory_limit: coop_sandbox::parse_memory_size(&shared.load().sandbox.memory)
+                .unwrap_or(2 * 1024 * 1024 * 1024),
+            pids_limit: shared.load().sandbox.pids_limit,
+        };
+        Arc::new(sandbox_executor::SandboxExecutor::new(
+            executor,
+            base_policy,
+            Arc::clone(&shared),
+        ))
     } else {
         executor
     };

@@ -373,6 +373,9 @@ pub(crate) fn cmd_init(dir_arg: Option<&str>) -> anyhow::Result<()> {
         println!("· {}", check.message);
     }
 
+    // Check sandbox availability and warn if needed (sandbox is enabled by default)
+    check_sandbox_availability();
+
     println!("\n🐔 Ready! Run:\n");
 
     let is_auto_discovered = is_auto_discover_path(&dir);
@@ -392,6 +395,28 @@ fn print_manual_key_instructions() {
     println!("\nAdd this to your shell profile:\n");
     println!("  export ANTHROPIC_API_KEY=sk-ant-api...\n");
     println!("Never store API keys in config files. Coop reads them from environment variables.");
+}
+
+fn check_sandbox_availability() {
+    match coop_sandbox::probe() {
+        Ok(sandbox_info) => {
+            println!("✓ Sandbox available: {}", sandbox_info.name);
+        }
+        Err(e) => {
+            println!("\n⚠️  Sandbox Warning:");
+            println!("   {}\n", e);
+            #[cfg(target_os = "macos")]
+            {
+                println!("   Install with: brew install apple/apple/container");
+                println!("   Or disable sandbox: coop config set sandbox.enabled false\n");
+            }
+            #[cfg(target_os = "linux")]
+            {
+                println!("   Check that unprivileged user namespaces are enabled.");
+                println!("   Or disable sandbox: coop config set sandbox.enabled false\n");
+            }
+        }
+    }
 }
 
 fn is_auto_discover_path(dir: &Path) -> bool {
