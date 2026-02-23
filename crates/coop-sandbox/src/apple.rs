@@ -24,7 +24,8 @@ impl Default for ContainerCleanupPolicy {
 }
 
 /// Container registry to manage long-lived containers
-static CONTAINER_REGISTRY: Mutex<HashMap<String, ContainerInfo>> = Mutex::new(HashMap::new());
+static CONTAINER_REGISTRY: std::sync::LazyLock<Mutex<HashMap<String, ContainerInfo>>> = 
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Debug, Clone)]
 struct ContainerInfo {
