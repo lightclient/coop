@@ -525,7 +525,7 @@ impl MemoryToolExecutor {
 
     #[instrument(skip(self, arguments, ctx))]
     async fn exec_sessions(&self, arguments: Value, ctx: &ToolContext) -> Result<ToolOutput> {
-        if ctx.trust != TrustLevel::Full {
+        if ctx.trust > TrustLevel::Full {
             return Ok(ToolOutput::success("{\"count\":0,\"sessions\":[]}"));
         }
 

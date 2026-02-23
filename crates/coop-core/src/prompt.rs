@@ -8,7 +8,47 @@ use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
-use tracing::{debug, info_span, trace};
+use tracing::{debug, info_span, trace, warn};
+
+// ---------------------------------------------------------------------------
+// Path containment
+// ---------------------------------------------------------------------------
+
+/// Check that a file path stays within the given root directory.
+///
+/// Rejects paths containing `..` components or that resolve (via
+/// canonicalization) outside the root. Returns the validated absolute path
+/// on success, or `None` if the path escapes.
+fn safe_resolve(root: &Path, relative: &str) -> Option<PathBuf> {
+    let joined = root.join(relative);
+
+    // Fast reject: any ".." component is suspicious
+    for component in Path::new(relative).components() {
+        if matches!(component, std::path::Component::ParentDir) {
+            warn!(
+                path = %relative,
+                root = %root.display(),
+                "prompt file path contains '..', rejecting"
+            );
+            return None;
+        }
+    }
+
+    // Canonical check (handles symlinks). Both must exist for this check.
+    if let (Ok(canon_root), Ok(canon_path)) = (root.canonicalize(), joined.canonicalize())
+        && !canon_path.starts_with(&canon_root)
+    {
+        warn!(
+            path = %relative,
+            resolved = %canon_path.display(),
+            root = %canon_root.display(),
+            "prompt file resolves outside workspace, rejecting"
+        );
+        return None;
+    }
+
+    Some(joined)
+}
 
 // ---------------------------------------------------------------------------
 // Token counting
@@ -387,7 +427,9 @@ impl WorkspaceIndex {
         let _span = info_span!("workspace_scan", workspace = %workspace.display()).entered();
         let mut files = HashMap::new();
         for cfg in file_configs {
-            let full_path = workspace.join(&cfg.path);
+            let Some(full_path) = safe_resolve(workspace, &cfg.path) else {
+                continue;
+            };
             if let Some(indexed) = Self::index_file(&full_path, cfg)? {
                 debug!(
                     file = %cfg.path,
@@ -408,7 +450,12 @@ impl WorkspaceIndex {
     pub fn refresh(&mut self, workspace: &Path, file_configs: &[PromptFileConfig]) -> Result<bool> {
         let mut changed = false;
         for cfg in file_configs {
-            let full_path = workspace.join(&cfg.path);
+            let Some(full_path) = safe_resolve(workspace, &cfg.path) else {
+                if self.files.remove(&cfg.path).is_some() {
+                    changed = true;
+                }
+                continue;
+            };
             let Ok(meta) = std::fs::metadata(&full_path) else {
                 // File removed — drop from index.
                 if self.files.remove(&cfg.path).is_some() {
@@ -792,8 +839,12 @@ impl PromptBuilder {
 
             let header = Self::layer_header(&cfg.path);
 
+            let Some(safe_path) = safe_resolve(&self.workspace, &cfg.path) else {
+                continue;
+            };
+
             if indexed.entry.tokens <= remaining {
-                let content = std::fs::read_to_string(self.workspace.join(&cfg.path))
+                let content = std::fs::read_to_string(&safe_path)
                     .with_context(|| format!("failed to read {}", cfg.path))?;
                 let counted = Counted::new(content);
                 used_tokens += counted.tokens;
@@ -810,7 +861,7 @@ impl PromptBuilder {
                     cache: cfg.cache,
                 });
             } else if remaining >= 200 {
-                let content = std::fs::read_to_string(self.workspace.join(&cfg.path))
+                let content = std::fs::read_to_string(&safe_path)
                     .with_context(|| format!("failed to read {}", cfg.path))?;
                 let truncated = truncate_to_budget(&content, &cfg.path, remaining);
                 used_tokens += truncated.tokens;
@@ -863,7 +914,9 @@ impl PromptBuilder {
                 continue;
             }
 
-            let full_path = root.join(&cfg.path);
+            let Some(full_path) = safe_resolve(root, &cfg.path) else {
+                continue;
+            };
             let content = match std::fs::read_to_string(&full_path) {
                 Ok(c) => c,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -1122,6 +1175,63 @@ impl PromptBuilder {
 mod tests {
     use super::*;
     use std::fs;
+
+    // --- safe_resolve tests ---
+
+    #[test]
+    fn safe_resolve_allows_simple_relative() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("SOUL.md"), "test").unwrap();
+        let result = safe_resolve(dir.path(), "SOUL.md");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), dir.path().join("SOUL.md"));
+    }
+
+    #[test]
+    fn safe_resolve_allows_nested_relative() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("sub/dir")).unwrap();
+        fs::write(dir.path().join("sub/dir/file.md"), "test").unwrap();
+        let result = safe_resolve(dir.path(), "sub/dir/file.md");
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn safe_resolve_rejects_parent_traversal() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = safe_resolve(dir.path(), "../etc/passwd");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn safe_resolve_rejects_mid_path_traversal() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = safe_resolve(dir.path(), "sub/../../etc/passwd");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn safe_resolve_rejects_symlink_escape() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        fs::write(target.path().join("secret.txt"), "secret").unwrap();
+
+        // Create symlink inside workspace pointing outside
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(target.path(), dir.path().join("escape")).unwrap();
+            let result = safe_resolve(dir.path(), "escape/secret.txt");
+            assert!(result.is_none(), "symlink escape should be rejected");
+        }
+    }
+
+    #[test]
+    fn safe_resolve_allows_nonexistent_file() {
+        let dir = tempfile::tempdir().unwrap();
+        // File doesn't exist — that's fine, caller handles NotFound
+        let result = safe_resolve(dir.path(), "nonexistent.md");
+        assert!(result.is_some());
+    }
 
     /// Create a temp workspace with given files.
     fn setup_workspace(files: &[(&str, &str)]) -> tempfile::TempDir {
