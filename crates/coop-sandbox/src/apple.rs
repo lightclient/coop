@@ -113,17 +113,22 @@ async fn ensure_container(
 
     // Check if container already exists
     if container_exists(&name).await? {
-        // Validate workspace matches before reusing container
-        let workspace_matches = {
+        // The container name is derived from a hash of the workspace path,
+        // so if a container with the correct name exists, its workspace matches.
+        // Check the in-memory registry for an explicit mismatch (shouldn't happen
+        // given the hash-based naming, but guard against it).
+        let registry_mismatch = {
             let registry = CONTAINER_REGISTRY.lock().unwrap();
             if let Some(info) = registry.get(&name) {
-                info.workspace == policy.workspace.display().to_string()
+                info.workspace != policy.workspace.display().to_string()
             } else {
-                false // Container not in registry, assume mismatch
+                // Not in registry (e.g. after process restart) — the container
+                // name encodes the workspace hash, so it's safe to reuse.
+                false
             }
         };
 
-        if !workspace_matches {
+        if registry_mismatch {
             warn!(
                 container = %name,
                 expected_workspace = %policy.workspace.display(),
@@ -139,7 +144,7 @@ async fn ensure_container(
                 .status()
                 .await;
         } else {
-            // Workspace matches, proceed with reuse
+            // Workspace matches (or not in registry after restart), proceed with reuse
             if !container_running(&name).await? {
                 debug!(container = %name, "starting existing container");
                 let status = tokio::process::Command::new("container")
@@ -155,10 +160,36 @@ async fn ensure_container(
                         .status()
                         .await;
                 } else {
+                    // Re-register in the in-memory registry after restart
+                    {
+                        let mut registry = CONTAINER_REGISTRY.lock().unwrap();
+                        registry
+                            .entry(name.clone())
+                            .or_insert_with(|| ContainerInfo {
+                                id: name.clone(),
+                                workspace: policy.workspace.display().to_string(),
+                                last_used: std::time::Instant::now(),
+                                user_name: user_name.map(|s| s.to_string()),
+                                user_trust,
+                            });
+                    }
                     info!(container = %name, workspace = %policy.workspace.display(), "reused existing container");
                     return Ok(name);
                 }
             } else {
+                // Re-register in the in-memory registry after restart
+                {
+                    let mut registry = CONTAINER_REGISTRY.lock().unwrap();
+                    registry
+                        .entry(name.clone())
+                        .or_insert_with(|| ContainerInfo {
+                            id: name.clone(),
+                            workspace: policy.workspace.display().to_string(),
+                            last_used: std::time::Instant::now(),
+                            user_name: user_name.map(|s| s.to_string()),
+                            user_trust,
+                        });
+                }
                 info!(container = %name, workspace = %policy.workspace.display(), "reusing running container");
                 return Ok(name);
             }
