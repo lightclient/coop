@@ -59,6 +59,15 @@ impl MessageRouter {
         self.gateway.append_message(session_key, message);
     }
 
+    /// Returns the per-session turn lock. Acquire before appending messages to
+    /// a session that may have an in-progress turn (e.g. cron injections).
+    pub(crate) fn session_turn_lock(
+        &self,
+        session_key: &SessionKey,
+    ) -> Arc<tokio::sync::Mutex<()>> {
+        self.gateway.session_turn_lock(session_key)
+    }
+
     pub(crate) async fn dispatch(
         &self,
         msg: &InboundMessage,

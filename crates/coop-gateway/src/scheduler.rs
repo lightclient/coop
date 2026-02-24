@@ -632,6 +632,12 @@ pub(crate) async fn announce_to_session(
     );
 
     async {
+        // Acquire the session turn lock so we don't inject messages between
+        // a tool_use and its tool_result in an in-progress turn. If a turn
+        // is running, this waits until it finishes.
+        let lock = router.session_turn_lock(&dm_session_key);
+        let _guard = lock.lock().await;
+
         debug!(
             dm_session = %dm_session_key,
             "injecting cron output into DM session"

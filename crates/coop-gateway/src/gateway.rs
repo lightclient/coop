@@ -348,17 +348,7 @@ impl Gateway {
         // Acquire per-session turn lock to prevent concurrent turns from
         // interleaving messages in the same session history (which corrupts
         // the tool_use/tool_result pairing the API requires).
-        let session_lock = {
-            let mut locks = self
-                .session_turn_locks
-                .lock()
-                .expect("session_turn_locks mutex poisoned");
-            Arc::clone(
-                locks
-                    .entry(session_key.clone())
-                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
-            )
-        };
+        let session_lock = self.session_turn_lock(session_key);
         let Ok(_turn_guard) = session_lock.try_lock() else {
             warn!(
                 session = %session_key,
@@ -844,6 +834,24 @@ impl Gateway {
             .lock()
             .expect("active_turns mutex poisoned")
             .contains_key(session_key)
+    }
+
+    /// Returns the per-session turn lock. Callers that need to append messages
+    /// to a session without corrupting an in-progress turn (e.g. cron
+    /// injections) should `.lock().await` this before writing.
+    pub(crate) fn session_turn_lock(
+        &self,
+        session_key: &SessionKey,
+    ) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self
+            .session_turn_locks
+            .lock()
+            .expect("session_turn_locks mutex poisoned");
+        Arc::clone(
+            locks
+                .entry(session_key.clone())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+        )
     }
 
     fn get_compaction(&self, session_key: &SessionKey) -> Option<(CompactionState, usize)> {
