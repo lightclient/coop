@@ -97,6 +97,15 @@ pub(crate) fn should_compact(input_tokens: u32) -> bool {
 ///
 /// Everything before the cut point gets summarized; everything after is
 /// kept verbatim.
+///
+/// The returned index always points to an assistant message (or past the
+/// end). Because the compaction summary is injected as a user message,
+/// the first kept message must be an assistant for proper role
+/// alternation. Landing on a user message with `tool_result` blocks
+/// would also orphan those results (the matching `tool_use` is before
+/// the cut and gets summarized away), causing the API to reject the
+/// request. By including such boundary user messages in the summarized
+/// portion, the summary captures the complete tool interaction.
 fn find_cut_point(messages: &[Message]) -> usize {
     if messages.is_empty() {
         return 0;
@@ -109,7 +118,15 @@ fn find_cut_point(messages: &[Message]) -> usize {
         let msg_chars = estimate_message_chars(msg);
         char_count += msg_chars;
         if char_count >= target_chars {
-            return i;
+            // Advance past any user messages so the kept portion starts
+            // with an assistant message. This keeps tool_use/tool_result
+            // pairs intact in the summarized portion rather than splitting
+            // them across the boundary.
+            let mut cut = i;
+            while cut < messages.len() && messages[cut].role == Role::User {
+                cut += 1;
+            }
+            return cut;
         }
     }
 
@@ -450,6 +467,11 @@ pub(crate) async fn compact(
 ///
 /// With compaction: returns `[summary_user_message] + messages after cut point`.
 /// Without compaction: returns all messages unchanged.
+///
+/// The cut point is adjusted forward when it lands on a user message with
+/// `tool_result` blocks whose matching `tool_use` assistant message was
+/// compacted away. Without this adjustment the API rejects the request
+/// because `tool_result` blocks reference non-existent `tool_use` ids.
 pub(crate) fn build_provider_context(
     all_messages: &[Message],
     compaction: Option<&CompactionState>,
@@ -464,10 +486,24 @@ pub(crate) fn build_provider_context(
     if messages_before_compaction >= all_messages.len() {
         vec![summary_msg]
     } else {
+        let start = safe_cut_start(all_messages, messages_before_compaction);
         let mut context = vec![summary_msg];
-        context.extend_from_slice(&all_messages[messages_before_compaction..]);
+        context.extend_from_slice(&all_messages[start..]);
         context
     }
+}
+
+/// Safety net: advance past user messages at the compaction boundary.
+///
+/// `find_cut_point` already returns an assistant-aligned index, but
+/// persisted compaction states from before that fix (or edge cases in
+/// iterative compaction) may still store a user-message index. This
+/// prevents orphaned `tool_result` blocks from reaching the API.
+fn safe_cut_start(messages: &[Message], mut idx: usize) -> usize {
+    while idx < messages.len() && messages[idx].role == Role::User {
+        idx += 1;
+    }
+    idx
 }
 
 #[allow(clippy::unwrap_used)]
@@ -526,11 +562,13 @@ mod tests {
 
     #[test]
     fn build_context_with_compaction_and_new_messages() {
+        // Cut lands on an assistant message — kept as-is.
         let messages = vec![
             Message::user().with_text("old message 1"),
             Message::assistant().with_text("old response"),
-            Message::user().with_text("new message after compaction"),
-            Message::assistant().with_text("new response"),
+            Message::assistant().with_text("new response after compaction"),
+            Message::user().with_text("follow up"),
+            Message::assistant().with_text("follow up response"),
         ];
 
         let state = CompactionState {
@@ -543,10 +581,11 @@ mod tests {
         };
 
         let context = build_provider_context(&messages, Some(&state), 2);
-        assert_eq!(context.len(), 3);
+        assert_eq!(context.len(), 4);
         assert_eq!(context[0].text(), "<summary>task summary</summary>");
-        assert_eq!(context[1].text(), "new message after compaction");
-        assert_eq!(context[2].text(), "new response");
+        assert_eq!(context[1].text(), "new response after compaction");
+        assert_eq!(context[2].text(), "follow up");
+        assert_eq!(context[3].text(), "follow up response");
     }
 
     #[test]
@@ -672,6 +711,12 @@ mod tests {
         // Cut point should leave some messages after it
         assert!(cut > 0, "should have a non-zero cut point");
         assert!(cut < 200, "should preserve some recent messages");
+        // Must land on an assistant message (odd index in this test)
+        assert_eq!(
+            messages[cut].role,
+            Role::Assistant,
+            "cut point must land on an assistant message"
+        );
         // The preserved part (cut..200) should be roughly 20K tokens
         let preserved_chars: usize = messages[cut..].iter().map(estimate_message_chars).sum();
         #[allow(clippy::cast_possible_truncation)]
@@ -679,6 +724,40 @@ mod tests {
         assert!(
             preserved_tokens >= RECENT_CONTEXT_TARGET / 2,
             "should preserve at least half the target: {preserved_tokens}"
+        );
+    }
+
+    #[test]
+    fn cut_point_lands_on_assistant_after_tool_result() {
+        // When the raw character-based cut lands on a user tool_result,
+        // it must advance to the next assistant message so the pair stays
+        // together in the summarized portion.
+        let mut messages = Vec::new();
+        let padding = "x".repeat(800);
+        for i in 0..200 {
+            messages.push(Message::user().with_text(format!("input {i} {padding}")));
+            messages.push(Message::assistant().with_tool_request(
+                format!("t{i}"),
+                "bash",
+                json!({"command": "ls"}),
+            ));
+            messages.push(Message::user().with_tool_result(
+                format!("t{i}"),
+                format!("ok {padding}"),
+                false,
+            ));
+            messages.push(Message::assistant().with_text(format!("done {i} {padding}")));
+        }
+
+        let cut = find_cut_point(&messages);
+        assert!(
+            cut > 0,
+            "conversation should be large enough to trigger a cut"
+        );
+        assert_eq!(
+            messages[cut].role,
+            Role::Assistant,
+            "cut at index {cut} is a user message"
         );
     }
 
@@ -789,6 +868,117 @@ mod tests {
         assert!(prompt.contains("<files_touched>"));
         assert!(prompt.contains("MODIFIED: src/main.rs"));
         assert!(prompt.contains("READ: README.md"));
+    }
+
+    // --- safe_cut_start tests ---
+
+    #[test]
+    fn safe_cut_start_skips_user_tool_result_at_boundary() {
+        // Reproduces the bug: cut lands on a user message with tool_results
+        // whose matching tool_use was compacted away.
+        let messages = vec![
+            Message::user().with_text("old input"),
+            Message::assistant().with_tool_request("t1", "bash", json!({"command": "ls"})),
+            Message::user().with_tool_result("t1", "file.txt", false), // index 2 = cut
+            Message::assistant().with_text("Found a file."),           // index 3
+            Message::user().with_text("new question"),                 // index 4
+            Message::assistant().with_text("answer"),                  // index 5
+        ];
+
+        let state = CompactionState {
+            summary: "<summary>summary</summary>".into(),
+            files_touched: vec![],
+            compaction_count: 1,
+            tokens_at_compaction: 100_000,
+            created_at: chrono::Utc::now(),
+            messages_at_compaction: Some(2),
+        };
+
+        let context = build_provider_context(&messages, Some(&state), 2);
+        // Must start with summary(user) followed by assistant — never
+        // an orphaned tool_result user message.
+        assert_eq!(context[0].role, Role::User);
+        assert_eq!(context[0].text(), "<summary>summary</summary>");
+        assert_eq!(context[1].role, Role::Assistant);
+        assert_eq!(context[1].text(), "Found a file.");
+        assert_eq!(context.len(), 4); // summary + messages[3..6]
+    }
+
+    #[test]
+    fn safe_cut_start_skips_consecutive_user_messages() {
+        // Cut lands on a user text message — still must advance past it
+        // because the summary is already a user message.
+        let messages = vec![
+            Message::user().with_text("old"),
+            Message::assistant().with_text("old reply"),
+            Message::user().with_text("boundary user msg"), // index 2 = cut
+            Message::assistant().with_text("reply"),        // index 3
+        ];
+
+        let state = CompactionState {
+            summary: "<summary>s</summary>".into(),
+            files_touched: vec![],
+            compaction_count: 1,
+            tokens_at_compaction: 100_000,
+            created_at: chrono::Utc::now(),
+            messages_at_compaction: Some(2),
+        };
+
+        let context = build_provider_context(&messages, Some(&state), 2);
+        assert_eq!(context[0].role, Role::User); // summary
+        assert_eq!(context[1].role, Role::Assistant); // skipped past user
+        assert_eq!(context.len(), 2);
+    }
+
+    #[test]
+    fn safe_cut_start_keeps_assistant_at_boundary() {
+        // Cut lands on an assistant message — no adjustment needed.
+        let messages = vec![
+            Message::user().with_text("old"),
+            Message::assistant().with_text("compacted away"),
+            Message::assistant().with_text("kept"), // index 2 = cut
+            Message::user().with_text("new"),       // index 3
+        ];
+
+        let state = CompactionState {
+            summary: "<summary>s</summary>".into(),
+            files_touched: vec![],
+            compaction_count: 1,
+            tokens_at_compaction: 100_000,
+            created_at: chrono::Utc::now(),
+            messages_at_compaction: Some(2),
+        };
+
+        let context = build_provider_context(&messages, Some(&state), 2);
+        assert_eq!(context[0].role, Role::User); // summary
+        assert_eq!(context[1].role, Role::Assistant); // messages[2]
+        assert_eq!(context[1].text(), "kept");
+        assert_eq!(context.len(), 3);
+    }
+
+    #[test]
+    fn safe_cut_start_all_remaining_are_user() {
+        // Edge case: all remaining messages are user messages.
+        let messages = vec![
+            Message::user().with_text("old"),
+            Message::assistant().with_text("old reply"),
+            Message::user().with_tool_result("t1", "result", false), // index 2
+            Message::user().with_text("another user msg"),           // index 3
+        ];
+
+        let state = CompactionState {
+            summary: "<summary>s</summary>".into(),
+            files_touched: vec![],
+            compaction_count: 1,
+            tokens_at_compaction: 100_000,
+            created_at: chrono::Utc::now(),
+            messages_at_compaction: Some(2),
+        };
+
+        // All remaining messages are user — returns summary only.
+        let context = build_provider_context(&messages, Some(&state), 2);
+        assert_eq!(context.len(), 1);
+        assert_eq!(context[0].text(), "<summary>s</summary>");
     }
 
     // --- Backwards compatibility ---
