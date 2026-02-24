@@ -81,29 +81,45 @@ fn container_name(workspace: &std::path::Path) -> String {
     format!("coop-sandbox-{:x}", hasher.finish())
 }
 
-/// Check if a container exists and is running
-async fn container_exists(name: &str) -> Result<bool> {
-    let output = tokio::process::Command::new("container")
-        .args(["ps", "-a", "--format", "table {{.Names}}"])
-        .output()
-        .await?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(stdout.lines().any(|line| line.trim() == name))
+/// Insert or update the in-memory container registry entry.
+fn register_container(
+    name: &str,
+    policy: &SandboxPolicy,
+    user_name: Option<&str>,
+    user_trust: Option<coop_core::TrustLevel>,
+) {
+    let mut registry = CONTAINER_REGISTRY.lock().unwrap();
+    registry
+        .entry(name.to_owned())
+        .and_modify(|info| {
+            info.last_used = std::time::Instant::now();
+            if user_name.is_some() {
+                info.user_name = user_name.map(|s| s.to_string());
+            }
+            if user_trust.is_some() {
+                info.user_trust = user_trust;
+            }
+        })
+        .or_insert_with(|| ContainerInfo {
+            id: name.to_owned(),
+            workspace: policy.workspace.display().to_string(),
+            last_used: std::time::Instant::now(),
+            user_name: user_name.map(|s| s.to_string()),
+            user_trust,
+        });
 }
 
-/// Check if a container is running
-async fn container_running(name: &str) -> Result<bool> {
-    let output = tokio::process::Command::new("container")
-        .args(["ps", "--format", "table {{.Names}}"])
-        .output()
-        .await?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(stdout.lines().any(|line| line.trim() == name))
-}
-
-/// Create or ensure a long-lived container exists for the workspace
+/// Create or ensure a long-lived container exists for the workspace.
+///
+/// Uses a probe-based approach instead of parsing `container ps` output,
+/// which isn't reliable across container CLI implementations (the Apple
+/// `container` CLI uses different subcommands/formats than Docker).
+///
+/// Strategy:
+/// 1. Try `container exec <name> true` — if it works, container is running.
+/// 2. Try `container start <name>` — if it works, container was stopped.
+/// 3. Create a new container with `container run`.
+/// 4. If create fails with "already exists", try start again (race condition).
 async fn ensure_container(
     policy: &SandboxPolicy,
     user_name: Option<&str>,
@@ -111,92 +127,41 @@ async fn ensure_container(
 ) -> Result<String> {
     let name = container_name(&policy.workspace);
 
-    // Check if container already exists
-    if container_exists(&name).await? {
-        // The container name is derived from a hash of the workspace path,
-        // so if a container with the correct name exists, its workspace matches.
-        // Check the in-memory registry for an explicit mismatch (shouldn't happen
-        // given the hash-based naming, but guard against it).
-        let registry_mismatch = {
-            let registry = CONTAINER_REGISTRY.lock().unwrap();
-            if let Some(info) = registry.get(&name) {
-                info.workspace != policy.workspace.display().to_string()
-            } else {
-                // Not in registry (e.g. after process restart) — the container
-                // name encodes the workspace hash, so it's safe to reuse.
-                false
-            }
-        };
+    // Step 1: Probe whether the container is already running.
+    // `container exec <name> true` is the most reliable check — it works
+    // regardless of CLI output format and confirms the container is usable.
+    let probe = tokio::process::Command::new("container")
+        .args(["exec", &name, "true"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await;
 
-        if registry_mismatch {
-            warn!(
-                container = %name,
-                expected_workspace = %policy.workspace.display(),
-                "workspace mismatch for existing container, recreating"
-            );
-            // Remove container with wrong workspace
-            let _ = tokio::process::Command::new("container")
-                .args(["stop", &name])
-                .status()
-                .await;
-            let _ = tokio::process::Command::new("container")
-                .args(["rm", &name])
-                .status()
-                .await;
-        } else {
-            // Workspace matches (or not in registry after restart), proceed with reuse
-            if !container_running(&name).await? {
-                debug!(container = %name, "starting existing container");
-                let status = tokio::process::Command::new("container")
-                    .args(["start", &name])
-                    .status()
-                    .await?;
-
-                if !status.success() {
-                    warn!(container = %name, "failed to start existing container, recreating");
-                    // Remove the stopped container and recreate
-                    let _ = tokio::process::Command::new("container")
-                        .args(["rm", &name])
-                        .status()
-                        .await;
-                } else {
-                    // Re-register in the in-memory registry after restart
-                    {
-                        let mut registry = CONTAINER_REGISTRY.lock().unwrap();
-                        registry
-                            .entry(name.clone())
-                            .or_insert_with(|| ContainerInfo {
-                                id: name.clone(),
-                                workspace: policy.workspace.display().to_string(),
-                                last_used: std::time::Instant::now(),
-                                user_name: user_name.map(|s| s.to_string()),
-                                user_trust,
-                            });
-                    }
-                    info!(container = %name, workspace = %policy.workspace.display(), "reused existing container");
-                    return Ok(name);
-                }
-            } else {
-                // Re-register in the in-memory registry after restart
-                {
-                    let mut registry = CONTAINER_REGISTRY.lock().unwrap();
-                    registry
-                        .entry(name.clone())
-                        .or_insert_with(|| ContainerInfo {
-                            id: name.clone(),
-                            workspace: policy.workspace.display().to_string(),
-                            last_used: std::time::Instant::now(),
-                            user_name: user_name.map(|s| s.to_string()),
-                            user_trust,
-                        });
-                }
-                info!(container = %name, workspace = %policy.workspace.display(), "reusing running container");
-                return Ok(name);
-            }
-        }
+    if let Ok(status) = probe
+        && status.success()
+    {
+        register_container(&name, policy, user_name, user_trust);
+        info!(container = %name, workspace = %policy.workspace.display(), "reusing running container");
+        return Ok(name);
     }
 
-    // Create a new container
+    // Step 2: Container might exist but be stopped. Try to start it.
+    let start = tokio::process::Command::new("container")
+        .args(["start", &name])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await;
+
+    if let Ok(status) = start
+        && status.success()
+    {
+        register_container(&name, policy, user_name, user_trust);
+        info!(container = %name, workspace = %policy.workspace.display(), "started and reusing stopped container");
+        return Ok(name);
+    }
+
+    // Step 3: Container doesn't exist — create it.
     debug!(container = %name, workspace = %policy.workspace.display(), "creating new long-lived container");
 
     let mut cmd = tokio::process::Command::new("container");
@@ -228,29 +193,16 @@ async fn ensure_container(
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
 
-        // Container already exists but wasn't detected by container_exists()
-        // (the apple/container CLI `ps` output format may not match our parsing).
-        // Try to start and reuse the existing container instead of failing.
+        // Step 4: Race condition — container appeared between our probe and
+        // create. Try to start and reuse it.
         if stderr.contains("already exists") {
-            info!(container = %name, "container already exists, attempting to reuse");
+            info!(container = %name, "container already exists, attempting to start and reuse");
             let _ = tokio::process::Command::new("container")
                 .args(["start", &name])
                 .status()
                 .await;
 
-            {
-                let mut registry = CONTAINER_REGISTRY.lock().unwrap();
-                registry
-                    .entry(name.clone())
-                    .or_insert_with(|| ContainerInfo {
-                        id: name.clone(),
-                        workspace: policy.workspace.display().to_string(),
-                        last_used: std::time::Instant::now(),
-                        user_name: user_name.map(|s| s.to_string()),
-                        user_trust,
-                    });
-            }
-
+            register_container(&name, policy, user_name, user_trust);
             info!(container = %name, workspace = %policy.workspace.display(), "reused existing container after create conflict");
             return Ok(name);
         }
@@ -287,21 +239,7 @@ async fn ensure_container(
         info!(container = %name, "development tools installed successfully");
     }
 
-    // Update container registry
-    {
-        let mut registry = CONTAINER_REGISTRY.lock().unwrap();
-        registry.insert(
-            name.clone(),
-            ContainerInfo {
-                id: name.clone(),
-                workspace: policy.workspace.display().to_string(),
-                last_used: std::time::Instant::now(),
-                user_name: user_name.map(|s| s.to_string()),
-                user_trust,
-            },
-        );
-    }
-
+    register_container(&name, policy, user_name, user_trust);
     info!(container = %name, workspace = %policy.workspace.display(), "created new long-lived container");
     Ok(name)
 }
@@ -397,21 +335,6 @@ async fn exec_long_lived(
     user_trust: Option<coop_core::TrustLevel>,
 ) -> Result<ExecOutput> {
     let container_name = ensure_container(policy, user_name, user_trust).await?;
-
-    // Update last used time and user info
-    {
-        let mut registry = CONTAINER_REGISTRY.lock().unwrap();
-        if let Some(info) = registry.get_mut(&container_name) {
-            info.last_used = std::time::Instant::now();
-            // Update user information if provided
-            if user_name.is_some() {
-                info.user_name = user_name.map(|s| s.to_string());
-            }
-            if user_trust.is_some() {
-                info.user_trust = user_trust;
-            }
-        }
-    }
 
     // Execute the command in the existing container
     let mut cmd = tokio::process::Command::new("container");
