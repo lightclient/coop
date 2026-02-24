@@ -1,4 +1,4 @@
-use crate::policy::{ExecOutput, SandboxCapabilities, SandboxInfo, SandboxPolicy};
+use crate::policy::{ExecOutput, NetworkMode, SandboxCapabilities, SandboxInfo, SandboxPolicy};
 use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -17,14 +17,14 @@ pub struct ContainerCleanupPolicy {
 impl Default for ContainerCleanupPolicy {
     fn default() -> Self {
         Self {
-            cleanup_after_days: 30, // 1 month default
+            cleanup_after_days: 30,   // 1 month default
             protect_full_trust: true, // Protect full trust users by default
         }
     }
 }
 
 /// Container registry to manage long-lived containers
-static CONTAINER_REGISTRY: std::sync::LazyLock<Mutex<HashMap<String, ContainerInfo>>> = 
+static CONTAINER_REGISTRY: std::sync::LazyLock<Mutex<HashMap<String, ContainerInfo>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Debug, Clone)]
@@ -65,6 +65,8 @@ pub fn probe() -> Result<SandboxInfo> {
             landlock: false,
             seccomp: false,
             cgroups_v2: false,
+            // VM runs full Linux; iptables available for InternetOnly filtering.
+            internet_only: true,
         },
     })
 }
@@ -73,7 +75,7 @@ pub fn probe() -> Result<SandboxInfo> {
 fn container_name(workspace: &std::path::Path) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
-    
+
     let mut hasher = DefaultHasher::new();
     workspace.display().to_string().hash(&mut hasher);
     format!("coop-sandbox-{:x}", hasher.finish())
@@ -102,9 +104,13 @@ async fn container_running(name: &str) -> Result<bool> {
 }
 
 /// Create or ensure a long-lived container exists for the workspace
-async fn ensure_container(policy: &SandboxPolicy, user_name: Option<&str>, user_trust: Option<coop_core::TrustLevel>) -> Result<String> {
+async fn ensure_container(
+    policy: &SandboxPolicy,
+    user_name: Option<&str>,
+    user_trust: Option<coop_core::TrustLevel>,
+) -> Result<String> {
     let name = container_name(&policy.workspace);
-    
+
     // Check if container already exists
     if container_exists(&name).await? {
         // Validate workspace matches before reusing container
@@ -119,7 +125,7 @@ async fn ensure_container(policy: &SandboxPolicy, user_name: Option<&str>, user_
 
         if !workspace_matches {
             warn!(
-                container = %name, 
+                container = %name,
                 expected_workspace = %policy.workspace.display(),
                 "workspace mismatch for existing container, recreating"
             );
@@ -140,7 +146,7 @@ async fn ensure_container(policy: &SandboxPolicy, user_name: Option<&str>, user_
                     .args(["start", &name])
                     .status()
                     .await?;
-                
+
                 if !status.success() {
                     warn!(container = %name, "failed to start existing container, recreating");
                     // Remove the stopped container and recreate
@@ -161,7 +167,7 @@ async fn ensure_container(policy: &SandboxPolicy, user_name: Option<&str>, user_
 
     // Create a new container
     debug!(container = %name, workspace = %policy.workspace.display(), "creating new long-lived container");
-    
+
     let mut cmd = tokio::process::Command::new("container");
     cmd.arg("run");
     cmd.args(["-d", "--name", &name]); // -d for detached mode, remove --rm
@@ -174,8 +180,11 @@ async fn ensure_container(policy: &SandboxPolicy, user_name: Option<&str>, user_
     cmd.args(["-v", &format!("{}:/work", policy.workspace.display())]);
     cmd.args(["-w", "/work"]);
 
-    if !policy.allow_network {
-        cmd.args(["--network", "none"]);
+    match policy.network {
+        NetworkMode::None => {
+            cmd.args(["--network", "none"]);
+        }
+        NetworkMode::Host | NetworkMode::InternetOnly => {}
     }
 
     // Use an image with common development tools pre-installed
@@ -184,7 +193,7 @@ async fn ensure_container(policy: &SandboxPolicy, user_name: Option<&str>, user_
     cmd.args(["tail", "-f", "/dev/null"]);
 
     let output = cmd.output().await?;
-    
+
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         anyhow::bail!("failed to create container {}: {}", name, stderr);
@@ -194,14 +203,17 @@ async fn ensure_container(policy: &SandboxPolicy, user_name: Option<&str>, user_
     info!(container = %name, "installing development tools in new container");
     let install_result = tokio::process::Command::new("container")
         .args([
-            "exec", &name, "sh", "-c",
+            "exec",
+            &name,
+            "sh",
+            "-c",
             "apt-get update && apt-get install -y \
              curl wget git vim nano build-essential \
              python3 python3-pip python3-venv \
              nodejs npm \
              rust-bin-stable \
              && apt-get clean \
-             && rm -rf /var/lib/apt/lists/*"
+             && rm -rf /var/lib/apt/lists/*",
         ])
         .output()
         .await?;
@@ -219,13 +231,16 @@ async fn ensure_container(policy: &SandboxPolicy, user_name: Option<&str>, user_
     // Update container registry
     {
         let mut registry = CONTAINER_REGISTRY.lock().unwrap();
-        registry.insert(name.clone(), ContainerInfo {
-            id: name.clone(),
-            workspace: policy.workspace.display().to_string(),
-            last_used: std::time::Instant::now(),
-            user_name: user_name.map(|s| s.to_string()),
-            user_trust: user_trust,
-        });
+        registry.insert(
+            name.clone(),
+            ContainerInfo {
+                id: name.clone(),
+                workspace: policy.workspace.display().to_string(),
+                last_used: std::time::Instant::now(),
+                user_name: user_name.map(|s| s.to_string()),
+                user_trust,
+            },
+        );
     }
 
     info!(container = %name, workspace = %policy.workspace.display(), "created new long-lived container");
@@ -238,14 +253,17 @@ pub async fn cleanup_old_containers() -> Result<()> {
 }
 
 /// Clean up old unused containers with specific policy
-pub async fn cleanup_old_containers_with_policy(policy: Option<&ContainerCleanupPolicy>) -> Result<()> {
+pub async fn cleanup_old_containers_with_policy(
+    policy: Option<&ContainerCleanupPolicy>,
+) -> Result<()> {
     let default_policy = ContainerCleanupPolicy::default();
     let policy = policy.unwrap_or(&default_policy);
-    
+
     let old_containers = {
         let mut registry = CONTAINER_REGISTRY.lock().unwrap();
-        let cutoff = std::time::Instant::now() - Duration::from_secs(policy.cleanup_after_days * 24 * 60 * 60);
-        
+        let cutoff = std::time::Instant::now()
+            - Duration::from_secs(policy.cleanup_after_days * 24 * 60 * 60);
+
         let to_remove: Vec<_> = registry
             .iter()
             .filter(|(_, info)| {
@@ -262,11 +280,11 @@ pub async fn cleanup_old_containers_with_policy(policy: Option<&ContainerCleanup
             })
             .map(|(name, _)| name.clone())
             .collect();
-        
+
         for name in &to_remove {
             registry.remove(name);
         }
-        
+
         to_remove
     };
 
@@ -287,11 +305,18 @@ pub async fn cleanup_old_containers_with_policy(policy: Option<&ContainerCleanup
 
 /// Execute a command inside an apple/container sandbox on macOS.
 #[cfg(target_os = "macos")]
-pub async fn exec(policy: &SandboxPolicy, command: &str, timeout: Duration, user_name: Option<&str>, user_trust: Option<coop_core::TrustLevel>) -> Result<ExecOutput> {
+pub async fn exec(
+    policy: &SandboxPolicy,
+    command: &str,
+    timeout: Duration,
+    user_name: Option<&str>,
+    user_trust: Option<coop_core::TrustLevel>,
+) -> Result<ExecOutput> {
     debug!(
         command_len = command.len(),
         workspace = %policy.workspace.display(),
         long_lived = policy.long_lived,
+        network = ?policy.network,
         "apple/container exec starting"
     );
 
@@ -305,7 +330,13 @@ pub async fn exec(policy: &SandboxPolicy, command: &str, timeout: Duration, user
 }
 
 /// Execute command in a long-lived container
-async fn exec_long_lived(policy: &SandboxPolicy, command: &str, timeout: Duration, user_name: Option<&str>, user_trust: Option<coop_core::TrustLevel>) -> Result<ExecOutput> {
+async fn exec_long_lived(
+    policy: &SandboxPolicy,
+    command: &str,
+    timeout: Duration,
+    user_name: Option<&str>,
+    user_trust: Option<coop_core::TrustLevel>,
+) -> Result<ExecOutput> {
     let container_name = ensure_container(policy, user_name, user_trust).await?;
 
     // Update last used time and user info
@@ -350,7 +381,11 @@ async fn exec_long_lived(policy: &SandboxPolicy, command: &str, timeout: Duratio
 }
 
 /// Execute command in an ephemeral container (original behavior)
-async fn exec_ephemeral(policy: &SandboxPolicy, command: &str, timeout: Duration) -> Result<ExecOutput> {
+async fn exec_ephemeral(
+    policy: &SandboxPolicy,
+    command: &str,
+    timeout: Duration,
+) -> Result<ExecOutput> {
     let mut cmd = tokio::process::Command::new("container");
     cmd.arg("run");
     cmd.arg("--rm"); // Remove container after execution
@@ -363,12 +398,33 @@ async fn exec_ephemeral(policy: &SandboxPolicy, command: &str, timeout: Duration
     cmd.args(["-v", &format!("{}:/work", policy.workspace.display())]);
     cmd.args(["-w", "/work"]);
 
-    if !policy.allow_network {
-        cmd.args(["--network", "none"]);
+    let effective_command;
+    match policy.network {
+        NetworkMode::None => {
+            cmd.args(["--network", "none"]);
+            effective_command = command.to_owned();
+        }
+        NetworkMode::Host => {
+            effective_command = command.to_owned();
+        }
+        NetworkMode::InternetOnly => {
+            // VM has full networking; block private ranges via iptables.
+            effective_command = format!(
+                concat!(
+                    "for NET in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 ",
+                    "169.254.0.0/16 100.64.0.0/10; do ",
+                    "iptables -A OUTPUT -d \"$NET\" -j REJECT 2>/dev/null; done; ",
+                    "for NET6 in fc00::/7 fe80::/10; do ",
+                    "ip6tables -A OUTPUT -d \"$NET6\" -j REJECT 2>/dev/null; done; ",
+                    "{}"
+                ),
+                command
+            );
+        }
     }
 
     cmd.arg("ubuntu:24.04");
-    cmd.args(["sh", "-c", command]);
+    cmd.args(["sh", "-c", &effective_command]);
 
     let result = tokio::time::timeout(timeout, cmd.output()).await;
 

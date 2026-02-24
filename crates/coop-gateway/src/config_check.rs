@@ -663,6 +663,19 @@ fn check_sandbox(report: &mut CheckReport, config: &Config) {
                             .to_owned(),
                 });
             }
+            if !info.capabilities.internet_only
+                && config.sandbox.allow_network
+                && config.users.iter().any(|u| u.trust > TrustLevel::Full)
+            {
+                report.push(CheckResult {
+                    name: "sandbox_internet_only",
+                    severity: Severity::Warning,
+                    passed: false,
+                    message: "pasta (passt) not available — users below Full trust will have no \
+                         network instead of internet-only. Install: apt install passt"
+                        .to_owned(),
+                });
+            }
         }
         Err(e) => {
             report.push(CheckResult {

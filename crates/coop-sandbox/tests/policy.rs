@@ -1,11 +1,11 @@
 #![allow(clippy::unwrap_used)]
 
-use coop_sandbox::policy::{SandboxPolicy, parse_memory_size};
+use coop_sandbox::policy::{NetworkMode, SandboxPolicy, parse_memory_size};
 
 #[test]
 fn default_policy_has_sane_defaults() {
     let policy = SandboxPolicy::default();
-    assert!(!policy.allow_network);
+    assert_eq!(policy.network, NetworkMode::None);
     assert!(policy.memory_limit > 0);
     assert!(policy.pids_limit > 0);
 }

@@ -1,12 +1,26 @@
 use std::path::PathBuf;
 
+/// Network isolation mode for sandboxed processes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NetworkMode {
+    /// No network access (empty network namespace).
+    #[default]
+    None,
+    /// Full host network access (including local/private networks).
+    Host,
+    /// Internet access only — local/private networks (RFC 1918, link-local,
+    /// CGNAT) are blocked. Requires `pasta` (from the `passt` package) for
+    /// user-mode networking. Falls back to [`None`] if unavailable.
+    InternetOnly,
+}
+
 /// Policy for a sandboxed command execution.
 #[derive(Debug, Clone)]
 pub struct SandboxPolicy {
     /// Directory mounted read-write as the working directory.
     pub workspace: PathBuf,
-    /// Whether to allow network access. Default: false (empty network namespace).
-    pub allow_network: bool,
+    /// Network isolation mode.
+    pub network: NetworkMode,
     /// Memory limit in bytes. 0 = no limit.
     pub memory_limit: u64,
     /// Max number of PIDs (fork bomb protection). 0 = no limit.
@@ -21,7 +35,7 @@ impl Default for SandboxPolicy {
     fn default() -> Self {
         Self {
             workspace: PathBuf::from("."),
-            allow_network: false,
+            network: NetworkMode::None,
             memory_limit: 2 * 1024 * 1024 * 1024, // 2 GiB
             pids_limit: 512,
             long_lived: true, // Default to long-lived containers for user customization
@@ -53,6 +67,8 @@ pub struct SandboxCapabilities {
     pub landlock: bool,
     pub seccomp: bool,
     pub cgroups_v2: bool,
+    /// Whether `pasta` (from `passt`) is available for internet-only networking.
+    pub internet_only: bool,
 }
 
 /// Parse a memory size string like "2g", "512m", "1024k" into bytes.
@@ -128,7 +144,7 @@ mod tests {
     #[test]
     fn default_policy() {
         let policy = SandboxPolicy::default();
-        assert!(!policy.allow_network);
+        assert_eq!(policy.network, NetworkMode::None);
         assert_eq!(policy.memory_limit, 2 * 1024 * 1024 * 1024);
         assert_eq!(policy.pids_limit, 512);
     }

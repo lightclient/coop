@@ -4,7 +4,7 @@
 #![allow(clippy::unwrap_used)]
 #![cfg(target_os = "linux")]
 
-use coop_sandbox::{SandboxPolicy, exec, probe};
+use coop_sandbox::{NetworkMode, SandboxPolicy, exec, probe};
 use std::time::Duration;
 
 fn should_run() -> bool {
@@ -14,7 +14,7 @@ fn should_run() -> bool {
 fn test_policy(workspace: &std::path::Path) -> SandboxPolicy {
     SandboxPolicy {
         workspace: workspace.to_path_buf(),
-        allow_network: false,
+        network: NetworkMode::None,
         memory_limit: 512 * 1024 * 1024, // 512 MB
         pids_limit: 64,
         long_lived: false, // Use ephemeral containers for tests

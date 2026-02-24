@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use coop_core::tools::truncate;
 use coop_core::traits::{ToolContext, ToolExecutor};
 use coop_core::types::{ToolDef, ToolOutput, TrustLevel};
-use coop_sandbox::SandboxPolicy;
+use coop_sandbox::{NetworkMode, SandboxPolicy};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, info};
@@ -70,39 +70,58 @@ impl ToolExecutor for SandboxExecutor {
 
 impl SandboxExecutor {
     /// Resolve sandbox policy from live config with per-user overrides.
+    ///
+    /// Network mode is derived from the config `allow_network` flag and the
+    /// caller's trust level:
+    ///
+    /// | `allow_network` | Trust ≥ Full | Trust < Full |
+    /// |-----------------|-------------|--------------|
+    /// | `false`         | None        | None         |
+    /// | `true`          | Host        | InternetOnly |
     fn resolve_policy(&self, ctx: &ToolContext) -> SandboxPolicy {
         let cfg = self.config.load();
 
-        let mut policy = SandboxPolicy {
-            workspace: ctx.workspace.clone(),
-            allow_network: cfg.sandbox.allow_network,
-            memory_limit: coop_sandbox::parse_memory_size(&cfg.sandbox.memory)
-                .unwrap_or(self.base_policy.memory_limit),
-            pids_limit: cfg.sandbox.pids_limit,
-            long_lived: cfg.sandbox.long_lived,
-        };
+        let mut allow_network = cfg.sandbox.allow_network;
+        let mut memory_limit = coop_sandbox::parse_memory_size(&cfg.sandbox.memory)
+            .unwrap_or(self.base_policy.memory_limit);
+        let mut pids_limit = cfg.sandbox.pids_limit;
+        let mut long_lived = cfg.sandbox.long_lived;
 
         if let Some(user_name) = &ctx.user_name
             && let Some(user) = cfg.users.iter().find(|u| &u.name == user_name)
             && let Some(overrides) = &user.sandbox
         {
-            if let Some(allow_network) = overrides.allow_network {
-                policy.allow_network = allow_network;
+            if let Some(user_allow_network) = overrides.allow_network {
+                allow_network = user_allow_network;
             }
             if let Some(ref memory) = overrides.memory
                 && let Ok(bytes) = coop_sandbox::parse_memory_size(memory)
             {
-                policy.memory_limit = bytes;
+                memory_limit = bytes;
             }
-            if let Some(pids_limit) = overrides.pids_limit {
-                policy.pids_limit = pids_limit;
+            if let Some(user_pids) = overrides.pids_limit {
+                pids_limit = user_pids;
             }
-            if let Some(long_lived) = overrides.long_lived {
-                policy.long_lived = long_lived;
+            if let Some(user_long_lived) = overrides.long_lived {
+                long_lived = user_long_lived;
             }
         }
 
-        policy
+        let network = if !allow_network {
+            NetworkMode::None
+        } else if ctx.trust <= TrustLevel::Full {
+            NetworkMode::Host
+        } else {
+            NetworkMode::InternetOnly
+        };
+
+        SandboxPolicy {
+            workspace: ctx.workspace.clone(),
+            network,
+            memory_limit,
+            pids_limit,
+            long_lived,
+        }
     }
 
     async fn exec_bash_sandboxed(
@@ -131,12 +150,13 @@ impl SandboxExecutor {
         );
 
         let result = coop_sandbox::exec_with_user_context(
-            &policy, 
-            command, 
+            &policy,
+            command,
             SANDBOX_TIMEOUT,
             ctx.user_name.as_deref(),
             Some(ctx.trust),
-        ).await;
+        )
+        .await;
 
         match result {
             Err(e) => Ok(ToolOutput::error(format!("sandbox exec failed: {e}"))),
@@ -342,7 +362,7 @@ sandbox = { allow_network = true, memory = "4g", pids_limit = 1024, long_lived =
         // base_policy differs from config — config values should win
         let base_policy = SandboxPolicy {
             workspace: PathBuf::from("/tmp"),
-            allow_network: true,
+            network: NetworkMode::Host,
             memory_limit: 999,
             pids_limit: 999,
             long_lived: false,
@@ -352,9 +372,8 @@ sandbox = { allow_network = true, memory = "4g", pids_limit = 1024, long_lived =
         let ctx = tool_context_with_user(TrustLevel::Full, "carol");
         let policy = executor.resolve_policy(&ctx);
 
-        // Should reflect config values (allow_network=false, memory="1g", pids_limit=256, long_lived=true),
-        // not the stale base_policy
-        assert!(!policy.allow_network);
+        // Config has allow_network=false → None regardless of trust
+        assert_eq!(policy.network, NetworkMode::None);
         assert_eq!(policy.memory_limit, 1024 * 1024 * 1024);
         assert_eq!(policy.pids_limit, 256);
         assert!(policy.long_lived);
@@ -367,10 +386,11 @@ sandbox = { allow_network = true, memory = "4g", pids_limit = 1024, long_lived =
         let base_policy = SandboxPolicy::default();
         let executor = SandboxExecutor::new(Arc::new(SimpleExecutor::new()), base_policy, shared);
 
+        // Bob has Full trust + allow_network override → Host
         let ctx = tool_context_with_user(TrustLevel::Full, "bob");
         let policy = executor.resolve_policy(&ctx);
 
-        assert!(policy.allow_network);
+        assert_eq!(policy.network, NetworkMode::Host);
         assert_eq!(policy.memory_limit, 4 * 1024 * 1024 * 1024);
         assert_eq!(policy.pids_limit, 1024);
         assert!(!policy.long_lived); // Bob overrides to false
@@ -386,8 +406,8 @@ sandbox = { allow_network = true, memory = "4g", pids_limit = 1024, long_lived =
         let ctx = tool_context_with_user(TrustLevel::Full, "mallory");
         let policy = executor.resolve_policy(&ctx);
 
-        // Should use config globals (allow_network=false, memory="1g", pids_limit=256, long_lived=true)
-        assert!(!policy.allow_network);
+        // Config has allow_network=false → None
+        assert_eq!(policy.network, NetworkMode::None);
         assert_eq!(policy.memory_limit, 1024 * 1024 * 1024);
         assert_eq!(policy.pids_limit, 256);
         assert!(policy.long_lived);
@@ -404,15 +424,15 @@ sandbox = { allow_network = true, memory = "4g", pids_limit = 1024, long_lived =
             Arc::clone(&shared),
         );
 
-        // Verify initial config values
+        // Initial: allow_network=false → None
         let ctx = tool_context_with_user(TrustLevel::Full, "carol");
         let policy = executor.resolve_policy(&ctx);
-        assert!(!policy.allow_network);
-        assert_eq!(policy.memory_limit, 1024 * 1024 * 1024); // "1g"
+        assert_eq!(policy.network, NetworkMode::None);
+        assert_eq!(policy.memory_limit, 1024 * 1024 * 1024);
         assert_eq!(policy.pids_limit, 256);
         assert!(policy.long_lived);
 
-        // Simulate hot-reload: change global sandbox settings
+        // Hot-reload: allow_network=true, Full trust → Host
         let mut new_config = test_config();
         new_config.sandbox.allow_network = true;
         new_config.sandbox.memory = "4g".to_owned();
@@ -420,11 +440,52 @@ sandbox = { allow_network = true, memory = "4g", pids_limit = 1024, long_lived =
         new_config.sandbox.long_lived = false;
         shared.store(Arc::new(new_config));
 
-        // Same executor, same ctx — should pick up new globals
         let policy = executor.resolve_policy(&ctx);
-        assert!(policy.allow_network);
+        assert_eq!(policy.network, NetworkMode::Host);
         assert_eq!(policy.memory_limit, 4 * 1024 * 1024 * 1024);
         assert_eq!(policy.pids_limit, 1024);
         assert!(!policy.long_lived);
+    }
+
+    #[test]
+    fn resolve_policy_inner_trust_gets_internet_only() {
+        let mut config = test_config();
+        config.sandbox.allow_network = true;
+        let shared = shared_config(config);
+        let base_policy = SandboxPolicy::default();
+        let executor = SandboxExecutor::new(Arc::new(SimpleExecutor::new()), base_policy, shared);
+
+        let ctx = tool_context_with_user(TrustLevel::Inner, "carol");
+        let policy = executor.resolve_policy(&ctx);
+
+        assert_eq!(policy.network, NetworkMode::InternetOnly);
+    }
+
+    #[test]
+    fn resolve_policy_inner_trust_no_network_when_disabled() {
+        // allow_network=false overrides trust-based mapping
+        let config = test_config();
+        let shared = shared_config(config);
+        let base_policy = SandboxPolicy::default();
+        let executor = SandboxExecutor::new(Arc::new(SimpleExecutor::new()), base_policy, shared);
+
+        let ctx = tool_context_with_user(TrustLevel::Inner, "carol");
+        let policy = executor.resolve_policy(&ctx);
+
+        assert_eq!(policy.network, NetworkMode::None);
+    }
+
+    #[test]
+    fn resolve_policy_full_trust_gets_host_network() {
+        let mut config = test_config();
+        config.sandbox.allow_network = true;
+        let shared = shared_config(config);
+        let base_policy = SandboxPolicy::default();
+        let executor = SandboxExecutor::new(Arc::new(SimpleExecutor::new()), base_policy, shared);
+
+        let ctx = tool_context_with_user(TrustLevel::Full, "carol");
+        let policy = executor.resolve_policy(&ctx);
+
+        assert_eq!(policy.network, NetworkMode::Host);
     }
 }

@@ -9,6 +9,8 @@ Aci = "Aci"
 aci = "aci"
 # Crate name (hax-lib)
 hax = "hax"
+# passt is the package name for the pasta networking tool
+passt = "passt"
 
 [default.extend-identifiers]
 # "unparseable" is common in Rust ecosystems

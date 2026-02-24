@@ -404,7 +404,7 @@ fn check_sandbox_availability() {
         }
         Err(e) => {
             println!("\n⚠️  Sandbox Warning:");
-            println!("   {}\n", e);
+            println!("   {e}\n");
             #[cfg(target_os = "macos")]
             {
                 println!("   Install with: brew install apple/apple/container");

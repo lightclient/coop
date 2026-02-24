@@ -12,7 +12,9 @@ pub mod linux;
 #[cfg(target_os = "macos")]
 pub mod apple;
 
-pub use policy::{ExecOutput, SandboxCapabilities, SandboxInfo, SandboxPolicy, parse_memory_size};
+pub use policy::{
+    ExecOutput, NetworkMode, SandboxCapabilities, SandboxInfo, SandboxPolicy, parse_memory_size,
+};
 
 #[cfg(target_os = "macos")]
 pub use apple::ContainerCleanupPolicy;
@@ -34,11 +36,11 @@ pub async fn exec(policy: &SandboxPolicy, command: &str, timeout: Duration) -> R
 ///
 /// The user information is used to determine cleanup behavior for long-lived containers.
 pub async fn exec_with_user_context(
-    policy: &SandboxPolicy, 
-    command: &str, 
-    timeout: Duration, 
-    user_name: Option<&str>, 
-    user_trust: Option<coop_core::TrustLevel>
+    policy: &SandboxPolicy,
+    command: &str,
+    timeout: Duration,
+    user_name: Option<&str>,
+    user_trust: Option<coop_core::TrustLevel>,
 ) -> Result<ExecOutput> {
     #[cfg(target_os = "linux")]
     {
@@ -78,6 +80,7 @@ pub fn probe() -> Result<SandboxInfo> {
 
 /// Clean up old unused containers (platform-specific).
 /// This should be called periodically to prevent accumulation of stale containers.
+#[allow(clippy::unused_async)]
 pub async fn cleanup_old_containers() -> Result<()> {
     #[cfg(target_os = "macos")]
     {
@@ -86,13 +89,14 @@ pub async fn cleanup_old_containers() -> Result<()> {
 
     #[cfg(not(target_os = "macos"))]
     {
-        // No cleanup needed for other platforms currently
         Ok(())
     }
 }
 
 /// Clean up old unused containers with specific cleanup policy (platform-specific).
 #[cfg(target_os = "macos")]
-pub async fn cleanup_old_containers_with_policy(policy: Option<&ContainerCleanupPolicy>) -> Result<()> {
+pub async fn cleanup_old_containers_with_policy(
+    policy: Option<&ContainerCleanupPolicy>,
+) -> Result<()> {
     apple::cleanup_old_containers_with_policy(policy).await
 }

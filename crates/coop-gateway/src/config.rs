@@ -476,6 +476,7 @@ pub(crate) struct WebFetchConfig {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct SandboxConfig {
     #[serde(default)]
     pub enabled: bool,

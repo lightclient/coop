@@ -507,10 +507,12 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
     let executor: Arc<dyn coop_core::ToolExecutor> = Arc::new(CompositeExecutor::new(executors));
 
     // Check sandbox availability early if enabled
-    if shared.load().sandbox.enabled {
-        if let Err(e) = coop_sandbox::probe() {
-            anyhow::bail!("sandbox enabled but not available: {e}. Install sandbox requirements or disable sandbox in config.");
-        }
+    if shared.load().sandbox.enabled
+        && let Err(e) = coop_sandbox::probe()
+    {
+        anyhow::bail!(
+            "sandbox enabled but not available: {e}. Install sandbox requirements or disable sandbox in config."
+        );
     }
 
     // Wrap executor with SandboxExecutor when sandbox is enabled
@@ -519,7 +521,7 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
         info!(sandbox = %sandbox_info.name, "sandbox enabled");
         let base_policy = coop_sandbox::SandboxPolicy {
             workspace: workspace.clone(),
-            allow_network: shared.load().sandbox.allow_network,
+            network: coop_sandbox::NetworkMode::None,
             memory_limit: coop_sandbox::parse_memory_size(&shared.load().sandbox.memory)
                 .unwrap_or(2 * 1024 * 1024 * 1024),
             pids_limit: shared.load().sandbox.pids_limit,
