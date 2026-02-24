@@ -227,6 +227,34 @@ async fn ensure_container(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+
+        // Container already exists but wasn't detected by container_exists()
+        // (the apple/container CLI `ps` output format may not match our parsing).
+        // Try to start and reuse the existing container instead of failing.
+        if stderr.contains("already exists") {
+            info!(container = %name, "container already exists, attempting to reuse");
+            let _ = tokio::process::Command::new("container")
+                .args(["start", &name])
+                .status()
+                .await;
+
+            {
+                let mut registry = CONTAINER_REGISTRY.lock().unwrap();
+                registry
+                    .entry(name.clone())
+                    .or_insert_with(|| ContainerInfo {
+                        id: name.clone(),
+                        workspace: policy.workspace.display().to_string(),
+                        last_used: std::time::Instant::now(),
+                        user_name: user_name.map(|s| s.to_string()),
+                        user_trust,
+                    });
+            }
+
+            info!(container = %name, workspace = %policy.workspace.display(), "reused existing container after create conflict");
+            return Ok(name);
+        }
+
         anyhow::bail!("failed to create container {}: {}", name, stderr);
     }
 
