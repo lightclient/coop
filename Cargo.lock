@@ -571,6 +571,7 @@ dependencies = [
  "crossterm",
  "futures",
  "qr2term",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",

@@ -68,6 +68,7 @@ impl Channel for TerminalChannel {
             reply_to: None,
             kind: InboundKind::Text,
             message_timestamp: None,
+            group_revision: None,
         })
     }
 

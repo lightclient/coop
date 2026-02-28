@@ -1690,6 +1690,7 @@ mod tests {
                 workspace: "./workspaces/default".to_owned(),
             },
             users: Vec::new(),
+            groups: Vec::new(),
             channels: crate::config::ChannelsConfig::default(),
             provider: crate::config::ProviderConfig {
                 name: "anthropic".to_owned(),

@@ -33,6 +33,7 @@ pub(crate) fn parse_content(content: &Content) -> Option<InboundMessage> {
                 reply_to,
                 kind: InboundKind::Typing,
                 message_timestamp: Some(timestamp),
+                group_revision: None,
             })
         }
         ContentBody::ReceiptMessage(receipt_message) => {
@@ -52,6 +53,7 @@ pub(crate) fn parse_content(content: &Content) -> Option<InboundMessage> {
                 reply_to: Some(sender),
                 kind: InboundKind::Receipt,
                 message_timestamp: Some(timestamp),
+                group_revision: None,
             })
         }
         ContentBody::SynchronizeMessage(sync_message) => {
@@ -181,6 +183,7 @@ fn inbound_from_data_message(
             reply_to,
             kind: InboundKind::Command,
             message_timestamp: Some(timestamp),
+            group_revision: None,
         });
     }
 
@@ -194,6 +197,7 @@ fn inbound_from_data_message(
         reply_to,
         kind,
         message_timestamp: Some(timestamp),
+        group_revision: None,
     })
 }
 
@@ -221,6 +225,7 @@ fn inbound_from_edit_message(
         reply_to,
         kind: InboundKind::Edit,
         message_timestamp: Some(timestamp),
+        group_revision: None,
     })
 }
 

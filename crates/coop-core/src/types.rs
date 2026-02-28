@@ -517,6 +517,8 @@ pub struct InboundMessage {
     pub kind: InboundKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_timestamp: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_revision: Option<u32>,
 }
 
 /// An outbound message to be sent via a channel.
@@ -699,12 +701,14 @@ mod tests {
             reply_to: Some("group:deadbeef".to_owned()),
             kind: InboundKind::Reaction,
             message_timestamp: Some(1234),
+            group_revision: Some(3),
         };
 
         let json = serde_json::to_string(&message).unwrap();
         let roundtrip: InboundMessage = serde_json::from_str(&json).unwrap();
 
         assert_eq!(roundtrip.kind, InboundKind::Reaction);
+        assert_eq!(roundtrip.group_revision, Some(3));
         assert_eq!(roundtrip.message_timestamp, Some(1234));
     }
 

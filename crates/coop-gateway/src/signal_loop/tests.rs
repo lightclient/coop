@@ -205,6 +205,7 @@ fn inbound_message(
         reply_to: reply_to.map(ToOwned::to_owned),
         kind,
         message_timestamp: Some(1234),
+        group_revision: None,
     }
 }
 

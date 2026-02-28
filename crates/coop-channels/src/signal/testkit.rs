@@ -115,6 +115,7 @@ mod tests {
             reply_to: Some("alice-uuid".to_owned()),
             kind: coop_core::InboundKind::Text,
             message_timestamp: Some(1234),
+            group_revision: None,
         }
     }
 

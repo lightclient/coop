@@ -311,10 +311,13 @@ pub(crate) fn validate_config(config_path: &Path, config_dir: &Path) -> CheckRep
         });
     }
 
-    // 11-13. cron checks
+    // 11. groups
+    check_groups(&mut report, &config);
+
+    // 12-14. cron checks
     check_cron(&mut report, &config);
 
-    // 14. web tools config
+    // 15. web tools config
     check_web_tools(&mut report, &config);
 
     // 15. binary_exists
@@ -817,6 +820,118 @@ fn check_users(report: &mut CheckReport, config: &Config) {
             severity: Severity::Warning,
             passed: false,
             message: format!("duplicate user names: {}", dupes.join(", ")),
+        });
+    }
+}
+
+fn check_groups(report: &mut CheckReport, config: &Config) {
+    use crate::config::GroupTrigger;
+    use std::collections::HashSet;
+
+    if config.groups.is_empty() {
+        return;
+    }
+
+    let mut seen_patterns: HashSet<String> = HashSet::new();
+
+    for (i, group) in config.groups.iter().enumerate() {
+        if group.r#match.is_empty() {
+            report.push(CheckResult {
+                name: "groups",
+                severity: Severity::Error,
+                passed: false,
+                message: format!("groups[{i}]: match list is empty"),
+            });
+        }
+
+        for pattern in &group.r#match {
+            if pattern != "*" && !pattern.starts_with("signal:group:") {
+                report.push(CheckResult {
+                    name: "groups",
+                    severity: Severity::Warning,
+                    passed: false,
+                    message: format!(
+                        "groups[{i}]: match pattern '{pattern}' does not look like a group id \
+                         (expected 'signal:group:<hex>' or '*')"
+                    ),
+                });
+            }
+            if !seen_patterns.insert(pattern.clone()) {
+                report.push(CheckResult {
+                    name: "groups",
+                    severity: Severity::Warning,
+                    passed: false,
+                    message: format!("groups[{i}]: duplicate match pattern '{pattern}'"),
+                });
+            }
+        }
+
+        if group.trigger == GroupTrigger::Mention && group.mention_names.is_empty() {
+            report.push(CheckResult {
+                name: "groups",
+                severity: Severity::Error,
+                passed: false,
+                message: format!("groups[{i}]: trigger='mention' requires non-empty mention_names"),
+            });
+        }
+
+        if group.trigger == GroupTrigger::Regex {
+            match &group.trigger_regex {
+                None => {
+                    report.push(CheckResult {
+                        name: "groups",
+                        severity: Severity::Error,
+                        passed: false,
+                        message: format!("groups[{i}]: trigger='regex' requires trigger_regex"),
+                    });
+                }
+                Some(pattern) => {
+                    if regex::Regex::new(pattern).is_err() {
+                        report.push(CheckResult {
+                            name: "groups",
+                            severity: Severity::Error,
+                            passed: false,
+                            message: format!(
+                                "groups[{i}]: trigger_regex '{pattern}' is not a valid regex"
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+
+        if group.default_trust == TrustLevel::Owner {
+            report.push(CheckResult {
+                name: "groups",
+                severity: Severity::Warning,
+                passed: false,
+                message: format!(
+                    "groups[{i}]: default_trust='owner' grants owner trust to unknown senders"
+                ),
+            });
+        }
+    }
+
+    if config.channels.signal.is_none() {
+        report.push(CheckResult {
+            name: "groups",
+            severity: Severity::Warning,
+            passed: false,
+            message: "groups configured but no signal channel is set up".to_owned(),
+        });
+    }
+
+    // Summary if no errors
+    let group_errors = report
+        .results
+        .iter()
+        .any(|r| r.name == "groups" && !r.passed);
+    if !group_errors {
+        report.push(CheckResult {
+            name: "groups",
+            severity: Severity::Info,
+            passed: true,
+            message: format!("{} group(s) configured", config.groups.len()),
         });
     }
 }
@@ -1707,5 +1822,151 @@ mod tests {
         assert!(check.is_some(), "should pass when env var is set");
         assert!(check.unwrap().message.contains("1 configured"));
         assert!(check.unwrap().message.contains("rotation enabled"));
+    }
+
+    fn write_config_with_groups(dir: &Path, groups_toml: &str) -> std::path::PathBuf {
+        let workspace = dir.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(workspace.join("SOUL.md"), "test soul").unwrap();
+
+        let config_path = dir.join("coop.toml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "[agent]\nid = \"test\"\nmodel = \"test-model\"\nworkspace = \"{}\"\n\n{groups_toml}\n",
+                workspace.display()
+            ),
+        )
+        .unwrap();
+        config_path
+    }
+
+    #[test]
+    fn test_valid_group_config_passes() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = write_config_with_groups(
+            dir.path(),
+            "[[groups]]\nmatch = [\"signal:group:deadbeef\"]\ntrigger = \"mention\"\nmention_names = [\"coop\"]\n",
+        );
+        let report = validate_config(&config_path, dir.path());
+        let checks: Vec<_> = report
+            .results
+            .iter()
+            .filter(|r| r.name == "groups")
+            .collect();
+        // Should have the "groups configured but no signal channel" warning
+        // and the summary, but no errors
+        let errors: Vec<_> = checks
+            .iter()
+            .filter(|r| r.severity == Severity::Error && !r.passed)
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "valid group should have no errors: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_group_empty_match_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path =
+            write_config_with_groups(dir.path(), "[[groups]]\nmatch = []\ntrigger = \"always\"\n");
+        let report = validate_config(&config_path, dir.path());
+        let check = report
+            .results
+            .iter()
+            .find(|r| r.name == "groups" && !r.passed && r.message.contains("match list is empty"));
+        assert!(check.is_some(), "empty match should fail");
+    }
+
+    #[test]
+    fn test_group_mention_without_names_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = write_config_with_groups(
+            dir.path(),
+            "[[groups]]\nmatch = [\"signal:group:aabb\"]\ntrigger = \"mention\"\n",
+        );
+        let report = validate_config(&config_path, dir.path());
+        let check = report
+            .results
+            .iter()
+            .find(|r| r.name == "groups" && !r.passed && r.message.contains("mention_names"));
+        assert!(check.is_some(), "mention without names should fail");
+    }
+
+    #[test]
+    fn test_group_regex_without_pattern_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = write_config_with_groups(
+            dir.path(),
+            "[[groups]]\nmatch = [\"signal:group:aabb\"]\ntrigger = \"regex\"\n",
+        );
+        let report = validate_config(&config_path, dir.path());
+        let check = report
+            .results
+            .iter()
+            .find(|r| r.name == "groups" && !r.passed && r.message.contains("trigger_regex"));
+        assert!(check.is_some(), "regex without pattern should fail");
+    }
+
+    #[test]
+    fn test_group_invalid_regex_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = write_config_with_groups(
+            dir.path(),
+            "[[groups]]\nmatch = [\"signal:group:aabb\"]\ntrigger = \"regex\"\ntrigger_regex = \"[invalid\"",
+        );
+        let report = validate_config(&config_path, dir.path());
+        let check = report
+            .results
+            .iter()
+            .find(|r| r.name == "groups" && !r.passed && r.message.contains("not a valid regex"));
+        assert!(check.is_some(), "invalid regex should fail");
+    }
+
+    #[test]
+    fn test_group_owner_default_trust_warns() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = write_config_with_groups(
+            dir.path(),
+            "[[groups]]\nmatch = [\"signal:group:aabb\"]\ntrigger = \"always\"\ndefault_trust = \"owner\"\n",
+        );
+        let report = validate_config(&config_path, dir.path());
+        let check = report.results.iter().find(|r| {
+            r.name == "groups"
+                && r.severity == Severity::Warning
+                && r.message.contains("owner trust")
+        });
+        assert!(check.is_some(), "owner default_trust should warn");
+    }
+
+    #[test]
+    fn test_group_no_signal_channel_warns() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = write_config_with_groups(
+            dir.path(),
+            "[[groups]]\nmatch = [\"signal:group:aabb\"]\ntrigger = \"always\"\n",
+        );
+        let report = validate_config(&config_path, dir.path());
+        let check = report
+            .results
+            .iter()
+            .find(|r| r.name == "groups" && r.message.contains("no signal channel"));
+        assert!(check.is_some(), "groups without signal should warn");
+    }
+
+    #[test]
+    fn test_group_duplicate_match_warns() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = write_config_with_groups(
+            dir.path(),
+            "[[groups]]\nmatch = [\"signal:group:aabb\"]\ntrigger = \"always\"\n\n[[groups]]\nmatch = [\"signal:group:aabb\"]\ntrigger = \"always\"\n",
+        );
+        let report = validate_config(&config_path, dir.path());
+        let check = report
+            .results
+            .iter()
+            .find(|r| r.name == "groups" && r.message.contains("duplicate"));
+        assert!(check.is_some(), "duplicate match should warn");
     }
 }

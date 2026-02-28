@@ -116,6 +116,20 @@ name = "anthropic"
 
 [memory]
 db_path = "./db/memory.db"
+
+# Uncomment to enable group chat responses:
+# [[groups]]
+# match = ["signal:group:YOUR_GROUP_ID_HERE"]
+# trigger = "mention"
+# mention_names = ["{agent_name}"]
+# default_trust = "familiar"
+# trust_ceiling = {{ fixed = "familiar" }}
+#
+# For LLM-based trigger (cheap model pre-screens messages):
+# [[groups]]
+# match = ["signal:group:YOUR_GROUP_ID_HERE"]
+# trigger = "llm"
+# trigger_model = "claude-haiku-3-5-20241022"
 "#
     )
 }

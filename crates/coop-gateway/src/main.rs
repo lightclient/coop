@@ -9,6 +9,10 @@ mod config_tool;
 mod config_watcher;
 mod config_write;
 mod gateway;
+#[allow(dead_code)]
+mod group_history;
+#[allow(dead_code)]
+mod group_trigger;
 mod heartbeat;
 mod init;
 mod init_templates;
@@ -18,6 +22,8 @@ mod memory_embedding;
 mod memory_prompt_index;
 mod memory_reconcile;
 mod memory_tools;
+#[allow(dead_code)]
+mod provider_registry;
 mod reminder;
 mod router;
 mod sandbox_executor;
@@ -783,6 +789,7 @@ async fn handle_send(
         reply_to: Some(session.clone()),
         kind: InboundKind::Text,
         message_timestamp: None,
+        group_revision: None,
     };
 
     let (event_tx, mut event_rx) = mpsc::channel(64);

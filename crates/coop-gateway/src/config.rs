@@ -4,6 +4,7 @@ use coop_core::TrustLevel;
 use coop_core::prompt::{CacheHint, PromptFileConfig};
 use coop_memory::MemoryMaintenanceConfig;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::debug;
@@ -21,6 +22,8 @@ pub(crate) struct Config {
     pub agent: AgentConfig,
     #[serde(default)]
     pub users: Vec<UserConfig>,
+    #[serde(default)]
+    pub groups: Vec<GroupConfig>,
     #[serde(default)]
     pub channels: ChannelsConfig,
     #[serde(default)]
@@ -57,6 +60,75 @@ pub(crate) struct UserConfig {
     pub r#match: Vec<String>,
     #[serde(default)]
     pub sandbox: Option<SandboxOverrides>,
+}
+
+// ---------------------------------------------------------------------------
+// Group config
+// ---------------------------------------------------------------------------
+
+#[allow(dead_code)]
+pub(crate) const DEFAULT_TRIGGER_MODEL: &str = "claude-haiku-3-5-20241022";
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct GroupConfig {
+    pub r#match: Vec<String>,
+    #[serde(default = "default_group_trigger")]
+    pub trigger: GroupTrigger,
+    #[serde(default)]
+    pub mention_names: Vec<String>,
+    #[serde(default)]
+    pub trigger_regex: Option<String>,
+    #[serde(default)]
+    pub trigger_model: Option<String>,
+    #[serde(default)]
+    pub trigger_prompt: Option<String>,
+    #[serde(default = "default_group_trust")]
+    pub default_trust: TrustLevel,
+    #[serde(default)]
+    pub trust_ceiling: TrustCeiling,
+    #[serde(default = "default_group_history_limit")]
+    pub history_limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum GroupTrigger {
+    Always,
+    Llm,
+    Mention,
+    Regex,
+}
+
+impl fmt::Display for GroupTrigger {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Always => write!(f, "always"),
+            Self::Llm => write!(f, "llm"),
+            Self::Mention => write!(f, "mention"),
+            Self::Regex => write!(f, "regex"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TrustCeiling {
+    #[default]
+    None,
+    Fixed(TrustLevel),
+    MinMember,
+}
+
+fn default_group_trigger() -> GroupTrigger {
+    GroupTrigger::Mention
+}
+
+fn default_group_trust() -> TrustLevel {
+    TrustLevel::Familiar
+}
+
+const fn default_group_history_limit() -> usize {
+    50
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -1245,5 +1317,220 @@ sandbox = { memory = "8g", pids_limit = 2048 }
         let overrides = cron.sandbox.as_ref().unwrap();
         assert_eq!(overrides.memory.as_deref(), Some("8g"));
         assert_eq!(overrides.pids_limit, Some(2048));
+    }
+
+    #[test]
+    fn parse_groups_mention_trigger() {
+        let toml_str = r#"
+[agent]
+id = "coop"
+model = "test"
+
+[[groups]]
+match = ["signal:group:deadbeef"]
+trigger = "mention"
+mention_names = ["coop", "hey coop"]
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.groups.len(), 1);
+        let g = &config.groups[0];
+        assert_eq!(g.r#match, vec!["signal:group:deadbeef"]);
+        assert_eq!(g.trigger, GroupTrigger::Mention);
+        assert_eq!(g.mention_names, vec!["coop", "hey coop"]);
+        assert_eq!(g.default_trust, TrustLevel::Familiar);
+        assert_eq!(g.trust_ceiling, TrustCeiling::None);
+        assert_eq!(g.history_limit, 50);
+    }
+
+    #[test]
+    fn parse_groups_all_trigger_variants() {
+        for (trigger_str, expected) in [
+            ("always", GroupTrigger::Always),
+            ("llm", GroupTrigger::Llm),
+            ("mention", GroupTrigger::Mention),
+            ("regex", GroupTrigger::Regex),
+        ] {
+            let toml_str = format!(
+                "[agent]\nid = \"t\"\nmodel = \"t\"\n\n[[groups]]\nmatch = [\"*\"]\ntrigger = \"{trigger_str}\"\n"
+            );
+            let config: Config = toml::from_str(&toml_str).unwrap();
+            assert_eq!(
+                config.groups[0].trigger, expected,
+                "trigger = {trigger_str}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_groups_defaults() {
+        let toml_str = r#"
+[agent]
+id = "coop"
+model = "test"
+
+[[groups]]
+match = ["*"]
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let g = &config.groups[0];
+        assert_eq!(g.trigger, GroupTrigger::Mention);
+        assert_eq!(g.default_trust, TrustLevel::Familiar);
+        assert_eq!(g.trust_ceiling, TrustCeiling::None);
+        assert_eq!(g.history_limit, 50);
+        assert!(g.mention_names.is_empty());
+        assert!(g.trigger_model.is_none());
+        assert!(g.trigger_regex.is_none());
+        assert!(g.trigger_prompt.is_none());
+    }
+
+    #[test]
+    fn parse_groups_empty_array() {
+        let toml_str = r#"
+[agent]
+id = "coop"
+model = "test"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.groups.is_empty());
+    }
+
+    #[test]
+    fn parse_groups_llm_trigger_with_model() {
+        let toml_str = r#"
+[agent]
+id = "coop"
+model = "test"
+
+[[groups]]
+match = ["signal:group:aabb"]
+trigger = "llm"
+trigger_model = "claude-haiku-3-5-20241022"
+trigger_prompt = "Custom prompt"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let g = &config.groups[0];
+        assert_eq!(g.trigger, GroupTrigger::Llm);
+        assert_eq!(
+            g.trigger_model.as_deref(),
+            Some("claude-haiku-3-5-20241022")
+        );
+        assert_eq!(g.trigger_prompt.as_deref(), Some("Custom prompt"));
+    }
+
+    #[test]
+    fn parse_groups_regex_trigger() {
+        let toml_str = r#"
+[agent]
+id = "coop"
+model = "test"
+
+[[groups]]
+match = ["signal:group:5566"]
+trigger = "regex"
+trigger_regex = "^!(ask|help)"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let g = &config.groups[0];
+        assert_eq!(g.trigger, GroupTrigger::Regex);
+        assert_eq!(g.trigger_regex.as_deref(), Some("^!(ask|help)"));
+    }
+
+    #[test]
+    fn parse_groups_trust_ceiling_fixed() {
+        let toml_str = r#"
+[agent]
+id = "coop"
+model = "test"
+
+[[groups]]
+match = ["signal:group:aabb"]
+trust_ceiling = { fixed = "familiar" }
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            config.groups[0].trust_ceiling,
+            TrustCeiling::Fixed(TrustLevel::Familiar)
+        );
+    }
+
+    #[test]
+    fn parse_groups_trust_ceiling_min_member() {
+        let toml_str = r#"
+[agent]
+id = "coop"
+model = "test"
+
+[[groups]]
+match = ["signal:group:aabb"]
+trust_ceiling = "min_member"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.groups[0].trust_ceiling, TrustCeiling::MinMember);
+    }
+
+    #[test]
+    fn parse_groups_trust_ceiling_none() {
+        let toml_str = r#"
+[agent]
+id = "coop"
+model = "test"
+
+[[groups]]
+match = ["signal:group:aabb"]
+trust_ceiling = "none"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.groups[0].trust_ceiling, TrustCeiling::None);
+    }
+
+    #[test]
+    fn parse_groups_default_trust_override() {
+        let toml_str = r#"
+[agent]
+id = "coop"
+model = "test"
+
+[[groups]]
+match = ["signal:group:aabb"]
+default_trust = "full"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.groups[0].default_trust, TrustLevel::Full);
+    }
+
+    #[test]
+    fn parse_groups_history_limit_override() {
+        let toml_str = r#"
+[agent]
+id = "coop"
+model = "test"
+
+[[groups]]
+match = ["signal:group:aabb"]
+history_limit = 100
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.groups[0].history_limit, 100);
+    }
+
+    #[test]
+    fn groups_roundtrip_serialization() {
+        let toml_str = r#"
+[agent]
+id = "coop"
+model = "test"
+
+[[groups]]
+match = ["signal:group:aabb"]
+trigger = "mention"
+mention_names = ["coop"]
+default_trust = "familiar"
+trust_ceiling = "none"
+history_limit = 50
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let serialized = toml::to_string(&config).unwrap();
+        let config2: Config = toml::from_str(&serialized).unwrap();
+        assert_eq!(config.groups, config2.groups);
     }
 }

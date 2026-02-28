@@ -7,7 +7,7 @@ use tracing::{Instrument, debug, info, info_span};
 
 use std::sync::Arc;
 
-use crate::config::{Config, SharedConfig};
+use crate::config::{Config, GroupConfig, SharedConfig, TrustCeiling};
 use crate::gateway::Gateway;
 use crate::injection::SessionInjection;
 use crate::trust::resolve_trust;
@@ -134,7 +134,8 @@ impl MessageRouter {
         // Intercept slash commands before other authorization.
         // Slash commands require the same trust authorization as regular messages.
         if msg.kind == InboundKind::Command {
-            if !is_trust_authorized(&decision, msg) {
+            let cfg = self.config.load();
+            if !is_trust_authorized(&decision, msg, &cfg) {
                 info!(
                     session = %decision.session_key,
                     trust = ?decision.trust,
@@ -174,9 +175,8 @@ impl MessageRouter {
             return Ok(decision);
         }
 
-        // TODO: Replace this simple full-trust gate with a proper authorization
-        // system that supports per-session, per-channel, and per-command policies.
-        if !is_trust_authorized(&decision, msg) {
+        let cfg = self.config.load();
+        if !is_trust_authorized(&decision, msg, &cfg) {
             info!(
                 session = %decision.session_key,
                 trust = ?decision.trust,
@@ -432,10 +432,14 @@ pub(crate) fn route_message(msg: &InboundMessage, config: &Config) -> RouteDecis
         })
     });
 
+    let group_config = find_group_config(msg, config);
+
     let user_trust = matched_user.map_or_else(
         || {
             if msg.channel == "terminal:default" && config.sandbox.enabled {
                 TrustLevel::Owner
+            } else if let Some(gc) = group_config {
+                gc.default_trust
             } else {
                 TrustLevel::Public
             }
@@ -450,7 +454,12 @@ pub(crate) fn route_message(msg: &InboundMessage, config: &Config) -> RouteDecis
             .is_some_and(|kind| matches!(kind, SessionKind::Group(_)));
 
     let ceiling = if group_context {
-        TrustLevel::Familiar
+        match group_config.map(|gc| &gc.trust_ceiling) {
+            Some(TrustCeiling::Fixed(level)) => *level,
+            // min_member requires async query; None/wildcard = no ceiling.
+            // Resolved later in dispatch for min_member.
+            _ => TrustLevel::Owner,
+        }
     } else {
         TrustLevel::Owner
     };
@@ -480,13 +489,52 @@ pub(crate) fn route_message(msg: &InboundMessage, config: &Config) -> RouteDecis
     }
 }
 
-/// Simple trust gate: only owner/full-trust users may trigger agent turns.
+/// Trust gate: only owner/full-trust users may trigger agent turns.
 /// Terminal sessions are always allowed (local physical access).
-fn is_trust_authorized(decision: &RouteDecision, msg: &InboundMessage) -> bool {
+/// Configured groups are explicitly opted-in via `[[groups]]`.
+fn is_trust_authorized(decision: &RouteDecision, msg: &InboundMessage, config: &Config) -> bool {
     if msg.channel.starts_with("terminal") {
         return true;
     }
-    decision.trust <= TrustLevel::Full
+    match &decision.session_key.kind {
+        SessionKind::Group(_) => find_group_config(msg, config).is_some(),
+        _ => decision.trust <= TrustLevel::Full,
+    }
+}
+
+pub(crate) fn find_group_config<'a>(
+    msg: &InboundMessage,
+    config: &'a Config,
+) -> Option<&'a GroupConfig> {
+    if !msg.is_group {
+        return None;
+    }
+    let chat_id = msg.chat_id.as_deref()?;
+    let namespaced = if chat_id.starts_with(&format!("{}:", msg.channel)) {
+        chat_id.to_owned()
+    } else {
+        format!("{}:{chat_id}", msg.channel)
+    };
+    config.groups.iter().find(|g| {
+        g.r#match
+            .iter()
+            .any(|pattern| pattern == &namespaced || pattern == "*")
+    })
+}
+
+#[allow(dead_code)]
+pub(crate) fn find_group_config_by_session<'a>(
+    session_key: &SessionKey,
+    config: &'a Config,
+) -> Option<&'a GroupConfig> {
+    let SessionKind::Group(group_id) = &session_key.kind else {
+        return None;
+    };
+    config.groups.iter().find(|g| {
+        g.r#match
+            .iter()
+            .any(|pattern| pattern == group_id || pattern == "*")
+    })
 }
 
 fn parse_explicit_session_kind(session: &str, agent_id: &str) -> Option<SessionKind> {
@@ -515,7 +563,7 @@ fn parse_explicit_session_kind(session: &str, agent_id: &str) -> Option<SessionK
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::shared_config;
+    use crate::config::{GroupConfig, GroupTrigger, TrustCeiling, shared_config};
     use crate::injection::{InjectionSource, SessionInjection};
     use chrono::Utc;
     use coop_core::Provider;
@@ -562,11 +610,13 @@ match = ["signal:bob-uuid"]
             reply_to: reply_to.map(ToOwned::to_owned),
             kind: InboundKind::Text,
             message_timestamp: None,
+            group_revision: None,
         }
     }
 
     #[test]
     fn trust_gate_allows_full_trust() {
+        let cfg = test_config();
         let decision = RouteDecision {
             session_key: SessionKey {
                 agent_id: "reid".into(),
@@ -576,11 +626,12 @@ match = ["signal:bob-uuid"]
             user_name: Some("alice".into()),
         };
         let msg = inbound("signal", "alice-uuid", None, false, None);
-        assert!(is_trust_authorized(&decision, &msg));
+        assert!(is_trust_authorized(&decision, &msg, &cfg));
     }
 
     #[test]
     fn trust_gate_rejects_inner_trust() {
+        let cfg = test_config();
         let decision = RouteDecision {
             session_key: SessionKey {
                 agent_id: "reid".into(),
@@ -590,11 +641,12 @@ match = ["signal:bob-uuid"]
             user_name: Some("bob".into()),
         };
         let msg = inbound("signal", "bob-uuid", None, false, None);
-        assert!(!is_trust_authorized(&decision, &msg));
+        assert!(!is_trust_authorized(&decision, &msg, &cfg));
     }
 
     #[test]
     fn trust_gate_rejects_public_trust() {
+        let cfg = test_config();
         let decision = RouteDecision {
             session_key: SessionKey {
                 agent_id: "reid".into(),
@@ -604,11 +656,12 @@ match = ["signal:bob-uuid"]
             user_name: None,
         };
         let msg = inbound("signal", "mallory-uuid", None, false, None);
-        assert!(!is_trust_authorized(&decision, &msg));
+        assert!(!is_trust_authorized(&decision, &msg, &cfg));
     }
 
     #[test]
     fn trust_gate_always_allows_terminal() {
+        let cfg = test_config();
         let decision = RouteDecision {
             session_key: SessionKey {
                 agent_id: "reid".into(),
@@ -618,7 +671,7 @@ match = ["signal:bob-uuid"]
             user_name: Some("alice".into()),
         };
         let msg = inbound("terminal:default", "alice", None, false, None);
-        assert!(is_trust_authorized(&decision, &msg));
+        assert!(is_trust_authorized(&decision, &msg, &cfg));
     }
 
     #[test]
@@ -659,7 +712,8 @@ match = ["signal:bob-uuid"]
     }
 
     #[test]
-    fn signal_group_routes_to_group_session_with_familiar_ceiling() {
+    fn signal_group_no_config_routes_with_public_trust() {
+        // No [[groups]] in test_config → unknown group → Public trust
         let msg = inbound("signal", "alice-uuid", Some("group:deadbeef"), true, None);
         let decision = route_message(&msg, &test_config());
 
@@ -667,7 +721,154 @@ match = ["signal:bob-uuid"]
             decision.session_key.kind,
             SessionKind::Group("signal:group:deadbeef".to_owned())
         );
+        // alice-uuid matches [[users]] so gets Full, but group has no config
+        // so unknown group members would get Public. Alice is matched though.
+        assert_eq!(decision.trust, TrustLevel::Full);
+    }
+
+    #[test]
+    fn signal_group_with_config_uses_default_trust_for_unknown() {
+        let mut config = test_config();
+        config.groups.push(GroupConfig {
+            r#match: vec!["signal:group:deadbeef".to_owned()],
+            trigger: GroupTrigger::Mention,
+            mention_names: vec!["coop".to_owned()],
+            trigger_regex: None,
+            trigger_model: None,
+            trigger_prompt: None,
+            default_trust: TrustLevel::Familiar,
+            trust_ceiling: TrustCeiling::None,
+            history_limit: 50,
+        });
+        // mallory-uuid is not in [[users]] → gets group's default_trust
+        let msg = inbound("signal", "mallory-uuid", Some("group:deadbeef"), true, None);
+        let decision = route_message(&msg, &config);
         assert_eq!(decision.trust, TrustLevel::Familiar);
+    }
+
+    #[test]
+    fn signal_group_with_fixed_ceiling_caps_known_user() {
+        let mut config = test_config();
+        config.groups.push(GroupConfig {
+            r#match: vec!["signal:group:deadbeef".to_owned()],
+            trigger: GroupTrigger::Always,
+            mention_names: vec![],
+            trigger_regex: None,
+            trigger_model: None,
+            trigger_prompt: None,
+            default_trust: TrustLevel::Familiar,
+            trust_ceiling: TrustCeiling::Fixed(TrustLevel::Familiar),
+            history_limit: 50,
+        });
+        // alice has Full trust but ceiling is Familiar
+        let msg = inbound("signal", "alice-uuid", Some("group:deadbeef"), true, None);
+        let decision = route_message(&msg, &config);
+        assert_eq!(decision.trust, TrustLevel::Familiar);
+    }
+
+    #[test]
+    fn group_auth_requires_config() {
+        let cfg = test_config(); // no [[groups]]
+        let decision = RouteDecision {
+            session_key: SessionKey {
+                agent_id: "reid".into(),
+                kind: SessionKind::Group("signal:group:deadbeef".into()),
+            },
+            trust: TrustLevel::Familiar,
+            user_name: None,
+        };
+        let msg = inbound("signal", "alice-uuid", Some("group:deadbeef"), true, None);
+        assert!(!is_trust_authorized(&decision, &msg, &cfg));
+    }
+
+    #[test]
+    fn group_auth_passes_with_config() {
+        let mut cfg = test_config();
+        cfg.groups.push(GroupConfig {
+            r#match: vec!["signal:group:deadbeef".to_owned()],
+            trigger: GroupTrigger::Always,
+            mention_names: vec![],
+            trigger_regex: None,
+            trigger_model: None,
+            trigger_prompt: None,
+            default_trust: TrustLevel::Familiar,
+            trust_ceiling: TrustCeiling::None,
+            history_limit: 50,
+        });
+        let decision = RouteDecision {
+            session_key: SessionKey {
+                agent_id: "reid".into(),
+                kind: SessionKind::Group("signal:group:deadbeef".into()),
+            },
+            trust: TrustLevel::Familiar,
+            user_name: None,
+        };
+        let msg = inbound("signal", "alice-uuid", Some("group:deadbeef"), true, None);
+        assert!(is_trust_authorized(&decision, &msg, &cfg));
+    }
+
+    #[test]
+    fn find_group_config_matches_exact() {
+        let mut cfg = test_config();
+        cfg.groups.push(GroupConfig {
+            r#match: vec!["signal:group:aabb".to_owned()],
+            trigger: GroupTrigger::Mention,
+            mention_names: vec!["coop".to_owned()],
+            trigger_regex: None,
+            trigger_model: None,
+            trigger_prompt: None,
+            default_trust: TrustLevel::Familiar,
+            trust_ceiling: TrustCeiling::None,
+            history_limit: 50,
+        });
+        let msg = inbound("signal", "alice-uuid", Some("group:aabb"), true, None);
+        assert!(find_group_config(&msg, &cfg).is_some());
+    }
+
+    #[test]
+    fn find_group_config_matches_wildcard() {
+        let mut cfg = test_config();
+        cfg.groups.push(GroupConfig {
+            r#match: vec!["*".to_owned()],
+            trigger: GroupTrigger::Always,
+            mention_names: vec![],
+            trigger_regex: None,
+            trigger_model: None,
+            trigger_prompt: None,
+            default_trust: TrustLevel::Familiar,
+            trust_ceiling: TrustCeiling::None,
+            history_limit: 50,
+        });
+        let msg = inbound("signal", "alice-uuid", Some("group:anything"), true, None);
+        assert!(find_group_config(&msg, &cfg).is_some());
+    }
+
+    #[test]
+    fn find_group_config_returns_none_for_unconfigured() {
+        let cfg = test_config();
+        let msg = inbound("signal", "alice-uuid", Some("group:unknown"), true, None);
+        assert!(find_group_config(&msg, &cfg).is_none());
+    }
+
+    #[test]
+    fn find_group_config_by_session_matches() {
+        let mut cfg = test_config();
+        cfg.groups.push(GroupConfig {
+            r#match: vec!["signal:group:aabb".to_owned()],
+            trigger: GroupTrigger::Mention,
+            mention_names: vec!["coop".to_owned()],
+            trigger_regex: None,
+            trigger_model: None,
+            trigger_prompt: None,
+            default_trust: TrustLevel::Familiar,
+            trust_ceiling: TrustCeiling::None,
+            history_limit: 50,
+        });
+        let key = SessionKey {
+            agent_id: "reid".into(),
+            kind: SessionKind::Group("signal:group:aabb".into()),
+        };
+        assert!(find_group_config_by_session(&key, &cfg).is_some());
     }
 
     #[test]
@@ -689,7 +890,8 @@ match = ["signal:bob-uuid"]
     }
 
     #[test]
-    fn terminal_reply_to_group_applies_familiar_ceiling() {
+    fn terminal_reply_to_group_keeps_user_trust_no_config() {
+        // No [[groups]] config → no ceiling applied → user keeps their trust
         let msg = inbound(
             "terminal:default",
             "alice",
@@ -703,7 +905,7 @@ match = ["signal:bob-uuid"]
             decision.session_key.kind,
             SessionKind::Group("signal:group:deadbeef".to_owned())
         );
-        assert_eq!(decision.trust, TrustLevel::Familiar);
+        assert_eq!(decision.trust, TrustLevel::Full);
     }
 
     #[test]
@@ -1171,6 +1373,7 @@ match = ["signal:bob-uuid"]
             reply_to: None,
             kind: InboundKind::Text,
             message_timestamp: None,
+            group_revision: None,
         }
     }
 
@@ -1185,6 +1388,7 @@ match = ["signal:bob-uuid"]
             reply_to: None,
             kind: InboundKind::Command,
             message_timestamp: None,
+            group_revision: None,
         }
     }
 

@@ -92,6 +92,21 @@ impl FakeProvider {
         }
     }
 
+    pub fn with_model(
+        response: impl Into<String>,
+        model_name: impl Into<String>,
+        context_limit: usize,
+    ) -> Self {
+        Self {
+            name: "fake".into(),
+            model: Mutex::new(ModelInfo {
+                name: model_name.into(),
+                context_limit,
+            }),
+            response: Mutex::new(response.into()),
+        }
+    }
+
     pub fn set_response(&self, response: impl Into<String>) {
         *self.response.lock().unwrap() = response.into();
     }

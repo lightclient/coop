@@ -376,6 +376,7 @@ async fn fire_cron(
             reply_to: None,
             kind: InboundKind::Text,
             message_timestamp: None,
+            group_revision: None,
         };
 
         match router
@@ -542,6 +543,7 @@ fn build_reminder_inbound(reminder: &Reminder) -> InboundMessage {
         reply_to: None,
         kind: InboundKind::Text,
         message_timestamp: None,
+        group_revision: None,
     }
 }
 
