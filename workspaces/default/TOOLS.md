@@ -78,6 +78,38 @@ match = ["signal:bob-uuid"]
 # match = ["signal:carol-uuid"]
 # sandbox = { allow_network = true, memory = "4g", pids_limit = 1024 }
 
+# Group chat configuration
+# Each [[groups]] entry opts a Signal group into agent responses.
+# Without a matching entry, group messages are silently ignored.
+#
+# Trigger modes:
+#   "always"  — respond to every message (agent replies NO_REPLY to stay silent)
+#   "mention" — respond when mention_names appear in the message (default)
+#   "regex"   — respond when trigger_regex matches
+#   "llm"     — a cheap model decides whether to respond
+#
+# Trust: unknown senders get default_trust. Known users keep their
+# configured trust, optionally capped by trust_ceiling.
+#
+# History: non-triggering messages are buffered (up to history_limit)
+# and prepended as context when a trigger fires.
+
+[[groups]]
+match = ["signal:group:<hex-group-id>"]  # from signal traces
+trigger = "mention"                       # default trigger mode
+mention_names = ["coop", "hey coop"]      # case-insensitive
+default_trust = "familiar"                # trust for unknown senders
+# trust_ceiling = { fixed = "familiar" }  # cap all members (optional)
+# trust_ceiling = "min_member"            # cap to lowest-trust member
+# history_limit = 50                      # buffered messages (default: 50)
+
+# LLM trigger example (uses a cheap model to pre-screen messages):
+# [[groups]]
+# match = ["signal:group:<hex-group-id>"]
+# trigger = "llm"
+# trigger_model = "claude-haiku-3-5-20241022"  # default trigger model
+# default_trust = "familiar"
+
 # Sandbox configuration
 # When enabled, non-owner bash commands run in isolated namespaces.
 # Owner trust bypasses the sandbox entirely.
@@ -207,6 +239,7 @@ message = "run cleanup"
 - Sandbox: memory must be a valid size (e.g. `2g`, `512m`), pids_limit > 0
 - Sandbox: at most one user with `trust = "owner"`; warns if sandbox enabled but no owner configured
 - Prompt files: paths must be relative, no `..` or absolute paths, no duplicates
+- Groups: `match` must be non-empty; `trigger = "mention"` requires `mention_names`; `trigger = "regex"` requires valid `trigger_regex`; `default_trust = "owner"` warns (dangerous in groups); duplicate match patterns warn; groups without a signal channel configured warn
 
 ## Sandbox
 
