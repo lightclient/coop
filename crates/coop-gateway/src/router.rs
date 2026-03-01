@@ -252,27 +252,41 @@ impl MessageRouter {
             return GroupTriggerOutcome::Respond(msg.content.clone());
         };
 
-        let should_respond = match group_config.trigger {
-            GroupTrigger::Always => true,
-            GroupTrigger::Llm => {
-                let history_context = self.gateway.peek_group_history(&decision.session_key);
-                let full_input = prepend_history_context(&msg.content, history_context.as_deref());
-                self.gateway
-                    .evaluate_llm_trigger(
-                        &decision.session_key,
-                        &full_input,
-                        decision.trust,
-                        decision.user_name.as_deref(),
-                        Some(&msg.channel),
-                        group_config,
-                    )
-                    .await
-            }
-            GroupTrigger::Mention | GroupTrigger::Regex => {
-                group_trigger::evaluate_trigger(msg, group_config, &config.agent.id)
-                    == TriggerDecision::Respond
-            }
-        };
+        // If the message has unresolved mentions (@mention sentinel from
+        // inbound parsing), always respond — we can't confirm it *wasn't*
+        // directed at this agent, and ignoring a mention is worse than
+        // responding to one not meant for us.
+        let has_unresolved_mention = has_unresolved_mention_sentinel(&msg.content);
+        if has_unresolved_mention {
+            debug!(
+                session = %decision.session_key,
+                "auto-triggering: message contains unresolved @mention"
+            );
+        }
+
+        let should_respond = has_unresolved_mention
+            || match group_config.trigger {
+                GroupTrigger::Always => true,
+                GroupTrigger::Llm => {
+                    let history_context = self.gateway.peek_group_history(&decision.session_key);
+                    let full_input =
+                        prepend_history_context(&msg.content, history_context.as_deref());
+                    self.gateway
+                        .evaluate_llm_trigger(
+                            &decision.session_key,
+                            &full_input,
+                            decision.trust,
+                            decision.user_name.as_deref(),
+                            Some(&msg.channel),
+                            group_config,
+                        )
+                        .await
+                }
+                GroupTrigger::Mention | GroupTrigger::Regex => {
+                    group_trigger::evaluate_trigger(msg, group_config, &config.agent.id)
+                        == TriggerDecision::Respond
+                }
+            };
 
         if !should_respond {
             self.gateway.record_group_history(
@@ -605,6 +619,18 @@ pub(crate) fn find_group_config<'a>(
             .iter()
             .any(|pattern| pattern == &namespaced || pattern == "*")
     })
+}
+
+/// The `@mention` sentinel injected by inbound parsing when a U+FFFC
+/// placeholder could not be resolved to a real user name.
+const UNRESOLVED_MENTION_SENTINEL: &str = "@mention";
+
+/// Check if the message body (after stripping envelope prefix) contains the
+/// unresolved-mention sentinel, indicating someone was @-tagged but we
+/// couldn't determine who.
+fn has_unresolved_mention_sentinel(content: &str) -> bool {
+    let body = group_trigger::strip_envelope_prefix(content);
+    body.contains(UNRESOLVED_MENTION_SENTINEL)
 }
 
 fn prepend_history_context(message: &str, history: Option<&str>) -> String {

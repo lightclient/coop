@@ -443,29 +443,96 @@ fn prepend_sender_context(
     }
 }
 
+/// Convert a 16-byte binary UUID to a hyphenated string (e.g. `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`).
+fn uuid_from_bytes(bytes: &[u8]) -> Option<String> {
+    if bytes.len() != 16 {
+        return None;
+    }
+    Some(format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+        bytes[4],
+        bytes[5],
+        bytes[6],
+        bytes[7],
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15],
+    ))
+}
+
 /// Replace U+FFFC mention placeholders with resolved `@name` text.
 ///
 /// Signal encodes mentions as U+FFFC characters in the body with the
 /// actual user UUID stored in `DataMessage.body_ranges`. Offsets in
-/// body_ranges are in UTF-16 code units.
+/// body_ranges are in UTF-16 code units. The UUID may be delivered as
+/// either a string (`MentionAci`) or 16-byte binary (`MentionAciBinary`).
 fn resolve_mentions(
     body: &str,
     body_ranges: &[BodyRange],
     resolver: &SignalNameResolver,
 ) -> String {
     let has_placeholder = body.contains('\u{FFFC}');
-    let mut mentions: Vec<(u32, u32, &str)> = body_ranges
-        .iter()
-        .filter_map(|range| {
-            let start = range.start?;
-            let length = range.length?;
-            if let Some(body_range::AssociatedValue::MentionAci(aci)) = &range.associated_value {
-                Some((start, length, aci.as_str()))
-            } else {
-                None
+
+    // Extract mention ACIs from body_ranges, handling both string and binary UUID formats.
+    let mut binary_acis: Vec<String> = Vec::new();
+    let mut mentions: Vec<(u32, u32, &str)> = Vec::new();
+
+    for range in body_ranges {
+        let Some(start) = range.start else { continue };
+        let Some(length) = range.length else { continue };
+
+        match &range.associated_value {
+            Some(body_range::AssociatedValue::MentionAci(aci)) => {
+                mentions.push((start, length, aci.as_str()));
             }
-        })
-        .collect();
+            Some(body_range::AssociatedValue::MentionAciBinary(bytes)) => {
+                if let Some(aci) = uuid_from_bytes(bytes) {
+                    debug!(
+                        start,
+                        length,
+                        aci = %aci,
+                        "resolved MentionAciBinary to UUID string"
+                    );
+                    binary_acis.push(aci);
+                    // We'll add the reference after collecting all binary ACIs
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Add binary-resolved ACIs as mentions (need separate lifetime)
+    for (i, range) in body_ranges.iter().enumerate() {
+        let Some(start) = range.start else { continue };
+        let Some(length) = range.length else { continue };
+        if matches!(
+            &range.associated_value,
+            Some(body_range::AssociatedValue::MentionAciBinary(_))
+        ) {
+            // Find the corresponding binary_acis entry
+            let binary_idx = body_ranges[..i]
+                .iter()
+                .filter(|r| {
+                    matches!(
+                        &r.associated_value,
+                        Some(body_range::AssociatedValue::MentionAciBinary(_))
+                    )
+                })
+                .count();
+            if let Some(aci) = binary_acis.get(binary_idx) {
+                mentions.push((start, length, aci.as_str()));
+            }
+        }
+    }
 
     if has_placeholder {
         debug!(
@@ -1017,5 +1084,62 @@ mod tests {
             "should replace U+FFFC even without resolver, got: {:?}",
             inbound.content
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // MentionAciBinary tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn mention_aci_binary_resolved() {
+        // UUID: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa (test_sender)
+        let uuid_bytes: Vec<u8> = vec![
+            0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa,
+            0xaa, 0xaa,
+        ];
+        let body = "hey \u{FFFC}".to_owned();
+        let body_ranges = vec![BodyRange {
+            start: Some(4),
+            length: Some(1),
+            associated_value: Some(body_range::AssociatedValue::MentionAciBinary(uuid_bytes)),
+        }];
+        let resolver = test_resolver();
+        let result = resolve_mentions(&body, &body_ranges, &resolver);
+        assert_eq!(result, "hey @Alice Walker");
+    }
+
+    #[test]
+    fn mention_aci_binary_agent_resolved() {
+        // UUID: bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb (agent)
+        let uuid_bytes: Vec<u8> = vec![
+            0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb,
+            0xbb, 0xbb,
+        ];
+        let body = "\u{FFFC}".to_owned();
+        let body_ranges = vec![BodyRange {
+            start: Some(0),
+            length: Some(1),
+            associated_value: Some(body_range::AssociatedValue::MentionAciBinary(uuid_bytes)),
+        }];
+        let resolver = test_resolver();
+        let result = resolve_mentions(&body, &body_ranges, &resolver);
+        assert_eq!(result, "@reid");
+    }
+
+    #[test]
+    fn uuid_from_bytes_valid() {
+        let bytes: Vec<u8> = vec![
+            0x80, 0xd4, 0x39, 0x56, 0xa7, 0xcb, 0x40, 0xf9, 0x8d, 0x7b, 0x90, 0x1f, 0x75, 0x2d,
+            0x17, 0xdb,
+        ];
+        assert_eq!(
+            uuid_from_bytes(&bytes).unwrap(),
+            "80d43956-a7cb-40f9-8d7b-901f752d17db"
+        );
+    }
+
+    #[test]
+    fn uuid_from_bytes_wrong_length() {
+        assert!(uuid_from_bytes(&[0x01, 0x02]).is_none());
     }
 }

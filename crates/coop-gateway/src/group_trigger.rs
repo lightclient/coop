@@ -88,7 +88,7 @@ pub(crate) fn is_silent_reply(text: &str) -> bool {
 }
 
 /// Strip the `[from ... at ...]` envelope prefix from a message body.
-fn strip_envelope_prefix(content: &str) -> &str {
+pub(crate) fn strip_envelope_prefix(content: &str) -> &str {
     // Format: "[from <sender> in <group> at <timestamp>] <body>"
     if content.starts_with("[from ")
         && let Some(close) = content.find("] ")
