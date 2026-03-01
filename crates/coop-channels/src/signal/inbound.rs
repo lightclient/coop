@@ -6,7 +6,7 @@ use presage::proto::{
     AttachmentPointer, BodyRange, EditMessage, Preview, ReceiptMessage, TypingMessage, body_range,
     receipt_message,
 };
-use tracing::{debug, field, info_span};
+use tracing::{debug, field, info_span, warn};
 
 use super::name_resolver::SignalNameResolver;
 
@@ -285,6 +285,15 @@ fn format_data_message(
         if let Some(resolver) = resolver {
             body = resolve_mentions(&body, &data_message.body_ranges, resolver);
         }
+        // Replace any remaining U+FFFC placeholders that weren't resolved
+        // (e.g. when body_ranges is missing mention data from presage).
+        if body.contains('\u{FFFC}') {
+            warn!(
+                body_ranges_count = data_message.body_ranges.len(),
+                "unresolved U+FFFC mention placeholders in message body, replacing with @mention"
+            );
+            body = body.replace('\u{FFFC}', "@mention");
+        }
         lines.push(body);
     }
 
@@ -444,6 +453,7 @@ fn resolve_mentions(
     body_ranges: &[BodyRange],
     resolver: &SignalNameResolver,
 ) -> String {
+    let has_placeholder = body.contains('\u{FFFC}');
     let mut mentions: Vec<(u32, u32, &str)> = body_ranges
         .iter()
         .filter_map(|range| {
@@ -456,6 +466,15 @@ fn resolve_mentions(
             }
         })
         .collect();
+
+    if has_placeholder {
+        debug!(
+            body_ranges_total = body_ranges.len(),
+            mention_ranges = mentions.len(),
+            body_has_fffc = true,
+            "resolving mentions in message body"
+        );
+    }
 
     if mentions.is_empty() {
         return body.to_owned();
@@ -929,5 +948,74 @@ mod tests {
         assert!(result.contains("hello world"));
         // No resolver → no author resolution
         assert!(!result.contains("Alice"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Unresolved mention fallback tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn unresolved_fffc_replaced_with_mention_text() {
+        // Simulates presage not populating body_ranges for a mention-only message
+        let resolver = test_resolver();
+        let content = test_content(
+            ContentBody::DataMessage(DataMessage {
+                body: Some("\u{FFFC}".to_owned()),
+                body_ranges: vec![], // empty — presage bug
+                ..Default::default()
+            }),
+            6000,
+        );
+
+        let inbound = inbound_from_content(&content, Some(&resolver)).unwrap();
+        assert!(
+            inbound.content.contains("@mention"),
+            "should replace U+FFFC with @mention, got: {:?}",
+            inbound.content
+        );
+        assert!(
+            !inbound.content.contains('\u{FFFC}'),
+            "should not contain raw U+FFFC"
+        );
+    }
+
+    #[test]
+    fn unresolved_fffc_with_surrounding_text() {
+        let resolver = test_resolver();
+        let content = test_content(
+            ContentBody::DataMessage(DataMessage {
+                body: Some("hello \u{FFFC} how are you".to_owned()),
+                body_ranges: vec![], // empty — presage bug
+                ..Default::default()
+            }),
+            7000,
+        );
+
+        let inbound = inbound_from_content(&content, Some(&resolver)).unwrap();
+        assert!(
+            inbound.content.contains("hello @mention how are you"),
+            "got: {:?}",
+            inbound.content
+        );
+    }
+
+    #[test]
+    fn unresolved_fffc_without_resolver() {
+        // When no resolver is available, U+FFFC should still be replaced
+        let content = test_content(
+            ContentBody::DataMessage(DataMessage {
+                body: Some("\u{FFFC}".to_owned()),
+                body_ranges: vec![],
+                ..Default::default()
+            }),
+            8000,
+        );
+
+        let inbound = inbound_from_content(&content, None).unwrap();
+        assert!(
+            inbound.content.contains("@mention"),
+            "should replace U+FFFC even without resolver, got: {:?}",
+            inbound.content
+        );
     }
 }
