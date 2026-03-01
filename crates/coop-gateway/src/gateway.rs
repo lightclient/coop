@@ -406,11 +406,17 @@ impl Gateway {
                 self.build_prompt(trust, user_name, channel, user_input).await?;
 
             // Inject group-specific intro when this is a group session.
+            // Append to the last block to avoid exceeding the cache_control block limit.
             if let SessionKind::Group(_) = &session_key.kind {
                 let cfg = self.config.load();
                 if let Some(group_config) = find_group_config_by_session(session_key, &cfg) {
                     let intro = build_group_intro(&group_config.trigger, &cfg.agent.id);
-                    system_prompt.push(intro);
+                    if let Some(last) = system_prompt.last_mut() {
+                        last.push_str("\n\n");
+                        last.push_str(&intro);
+                    } else {
+                        system_prompt.push(intro);
+                    }
                 }
             }
 
