@@ -307,6 +307,40 @@ pub(crate) fn resolve_cron_delivery_targets(
         .collect()
 }
 
+/// Wait for any in-progress turns on delivery target DM sessions to complete.
+///
+/// When a cron fires while a user has tool calls in flight, running the cron
+/// turn concurrently can compete for provider capacity and the subsequent
+/// `announce_to_session` injection can corrupt the `tool_use`/`tool_result`
+/// pairing. This function acquires (and immediately releases) each target's
+/// turn lock, which blocks until any active turn finishes.
+///
+/// Groups are excluded — they use direct delivery without session injection.
+async fn wait_for_delivery_sessions(
+    delivery_targets: &[(String, String)],
+    agent_id: &str,
+    router: &MessageRouter,
+) {
+    for (channel, target) in delivery_targets {
+        if target.starts_with("group:") {
+            continue;
+        }
+        let dm_session_key = SessionKey {
+            agent_id: agent_id.to_owned(),
+            kind: SessionKind::Dm(format!("{channel}:{target}")),
+        };
+        if router.has_active_turn(&dm_session_key) {
+            info!(
+                session = %dm_session_key,
+                "cron waiting for active turn to complete on delivery target"
+            );
+            let lock = router.session_turn_lock(&dm_session_key);
+            let _guard = lock.lock().await;
+            // Lock acquired → turn finished. Release immediately.
+        }
+    }
+}
+
 async fn fire_cron(
     cfg: &CronConfig,
     router: &MessageRouter,
@@ -336,6 +370,12 @@ async fn fire_cron(
             debug!(cron.name = %cfg.name, "heartbeat skipped: empty heartbeat file");
             return;
         }
+
+        // Wait for any in-progress turns on delivery target sessions to
+        // complete before starting the cron turn. Running concurrently can
+        // compete for provider capacity and corrupt tool_use/tool_result
+        // pairing in the DM history.
+        wait_for_delivery_sessions(&delivery_targets, &agent_id, router).await;
 
         let sender = match &cfg.user {
             Some(user) => format!("cron:{}:{}", cfg.name, user),
@@ -2473,5 +2513,168 @@ match = ["signal:alice-uuid"]
             "expected at least 1 completed turn (2 messages), got {msg_count} messages — \
              scheduler is not firing at all"
         );
+    }
+
+    #[tokio::test]
+    async fn fire_cron_waits_for_active_turn_then_delivers() {
+        let (shared, router, gateway) =
+            make_shared_config_and_router(None, &[], "cron response ok");
+        let (tx, mut rx) = mpsc::channel::<OutboundMessage>(8);
+        let deliver_tx = DeliverySender::new(tx);
+
+        let cfg = CronConfig {
+            name: "heartbeat".to_owned(),
+            cron: "*/30 * * * *".to_owned(),
+            message: "check tasks".to_owned(),
+            user: None,
+            deliver: Some(CronDelivery {
+                channel: "signal".to_owned(),
+                target: "alice-uuid".to_owned(),
+            }),
+            sandbox: None,
+        };
+
+        // Simulate an active turn on the DM session. Acquire the session
+        // turn lock to represent a running turn — fire_cron should wait
+        // for it to be released before dispatching.
+        let dm_key = SessionKey {
+            agent_id: "test".to_owned(),
+            kind: SessionKind::Dm("signal:alice-uuid".to_owned()),
+        };
+        let _active_token = gateway.simulate_active_turn(&dm_key);
+        let dm_lock = gateway.session_turn_lock(&dm_key);
+        let guard = dm_lock.lock().await;
+
+        // Spawn fire_cron in a background task — it will block waiting
+        // for the DM session's turn lock.
+        let shared_clone = Arc::clone(&shared);
+        let cfg_clone = cfg.clone();
+        let router_clone = router.clone();
+        let cron_handle = tokio::spawn(async move {
+            fire_cron(&cfg_clone, &router_clone, Some(&deliver_tx), &shared_clone).await;
+        });
+
+        // Give the cron task time to reach the wait point.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Cron should not have run yet (lock still held).
+        assert!(
+            rx.try_recv().is_err(),
+            "cron should not deliver while DM turn is active"
+        );
+
+        // Release the turn lock (simulating DM turn completion).
+        drop(guard);
+
+        // Cron should now complete.
+        tokio::time::timeout(Duration::from_secs(5), cron_handle)
+            .await
+            .expect("cron did not complete after turn lock released")
+            .expect("cron task panicked");
+
+        let msg = rx.try_recv().unwrap();
+        assert_eq!(msg.channel, "signal");
+        assert_eq!(msg.target, "alice-uuid");
+        assert_eq!(msg.content, "cron response ok");
+    }
+
+    #[tokio::test]
+    async fn fire_cron_proceeds_when_delivery_target_is_idle() {
+        let (shared, router, _gateway) =
+            make_shared_config_and_router(None, &[], "cron response ok");
+        let (tx, mut rx) = mpsc::channel::<OutboundMessage>(8);
+        let deliver_tx = DeliverySender::new(tx);
+
+        let cfg = CronConfig {
+            name: "heartbeat".to_owned(),
+            cron: "*/30 * * * *".to_owned(),
+            message: "check tasks".to_owned(),
+            user: None,
+            deliver: Some(CronDelivery {
+                channel: "signal".to_owned(),
+                target: "alice-uuid".to_owned(),
+            }),
+            sandbox: None,
+        };
+
+        // No active turn on the DM session — cron should proceed immediately.
+        fire_cron(&cfg, &router, Some(&deliver_tx), &shared).await;
+
+        let msg = rx.try_recv().unwrap();
+        assert_eq!(msg.channel, "signal");
+        assert_eq!(msg.target, "alice-uuid");
+        assert_eq!(msg.content, "cron response ok");
+    }
+
+    #[tokio::test]
+    async fn fire_cron_without_delivery_runs_immediately() {
+        let (shared, router, gateway) =
+            make_shared_config_and_router(None, &[], "cron response ok");
+
+        // Cron without delivery targets runs immediately (nothing to wait for).
+        let cfg = CronConfig {
+            name: "cleanup".to_owned(),
+            cron: "0 3 * * *".to_owned(),
+            message: "run cleanup".to_owned(),
+            user: None,
+            deliver: None,
+            sandbox: None,
+        };
+
+        // Even with an active turn on some DM session, cron runs because
+        // it has no delivery targets (no announce_to_session).
+        let dm_key = SessionKey {
+            agent_id: "test".to_owned(),
+            kind: SessionKind::Dm("signal:alice-uuid".to_owned()),
+        };
+        let _active_token = gateway.simulate_active_turn(&dm_key);
+
+        fire_cron(&cfg, &router, None, &shared).await;
+
+        let cron_key = SessionKey {
+            agent_id: "test".to_owned(),
+            kind: SessionKind::Cron("cleanup".to_owned()),
+        };
+        assert_eq!(
+            gateway.session_message_count(&cron_key),
+            2,
+            "cron without delivery should run even with active DM turns"
+        );
+    }
+
+    #[tokio::test]
+    async fn fire_cron_group_targets_not_blocked_by_active_dm() {
+        let (shared, router, gateway) =
+            make_shared_config_and_router(None, &[], "cron response ok");
+        let (tx, mut rx) = mpsc::channel::<OutboundMessage>(8);
+        let deliver_tx = DeliverySender::new(tx);
+
+        // Delivery to a group target — groups use direct delivery, no DM
+        // session injection, so active turns on DM sessions don't block.
+        let cfg = CronConfig {
+            name: "group-briefing".to_owned(),
+            cron: "0 8 * * *".to_owned(),
+            message: "Morning briefing".to_owned(),
+            user: None,
+            deliver: Some(CronDelivery {
+                channel: "signal".to_owned(),
+                target: "group:deadbeef".to_owned(),
+            }),
+            sandbox: None,
+        };
+
+        // Simulate an active turn on a DM session (unrelated to group).
+        let dm_key = SessionKey {
+            agent_id: "test".to_owned(),
+            kind: SessionKind::Dm("signal:alice-uuid".to_owned()),
+        };
+        let _active_token = gateway.simulate_active_turn(&dm_key);
+
+        fire_cron(&cfg, &router, Some(&deliver_tx), &shared).await;
+
+        // Group delivery proceeds without waiting.
+        let msg = rx.try_recv().unwrap();
+        assert_eq!(msg.channel, "signal");
+        assert_eq!(msg.target, "group:deadbeef");
     }
 }

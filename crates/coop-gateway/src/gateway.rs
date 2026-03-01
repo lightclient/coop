@@ -1134,6 +1134,18 @@ impl Gateway {
             .unwrap_or_default()
     }
 
+    /// Simulate an active turn for testing. Returns a `CancellationToken` that
+    /// the caller can drop or cancel to "end" the simulated turn.
+    #[cfg(test)]
+    pub(crate) fn simulate_active_turn(&self, session_key: &SessionKey) -> CancellationToken {
+        let token = CancellationToken::new();
+        self.active_turns
+            .lock()
+            .expect("active_turns mutex poisoned")
+            .insert(session_key.clone(), token.clone());
+        token
+    }
+
     #[cfg(test)]
     pub(crate) fn set_session_usage(&self, session_key: &SessionKey, usage: SessionUsage) {
         self.session_usage

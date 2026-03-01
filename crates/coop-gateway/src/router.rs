@@ -67,6 +67,11 @@ impl MessageRouter {
         self.gateway.append_message(session_key, message);
     }
 
+    /// Returns `true` if the given session has an in-progress turn.
+    pub(crate) fn has_active_turn(&self, session_key: &SessionKey) -> bool {
+        self.gateway.has_active_turn(session_key)
+    }
+
     /// Returns the per-session turn lock. Acquire before appending messages to
     /// a session that may have an in-progress turn (e.g. cron injections).
     pub(crate) fn session_turn_lock(
