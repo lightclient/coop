@@ -9,9 +9,7 @@ mod config_tool;
 mod config_watcher;
 mod config_write;
 mod gateway;
-#[allow(dead_code)]
 mod group_history;
-#[allow(dead_code)]
 mod group_trigger;
 mod heartbeat;
 mod init;
@@ -22,7 +20,6 @@ mod memory_embedding;
 mod memory_prompt_index;
 mod memory_reconcile;
 mod memory_tools;
-#[allow(dead_code)]
 mod provider_registry;
 mod reminder;
 mod router;
@@ -159,6 +156,47 @@ fn create_provider(config: &Config) -> Result<AnthropicProvider> {
         AnthropicProvider::from_env(&config.agent.model)
     } else {
         AnthropicProvider::from_key_refs(&config.provider.api_keys, &config.agent.model)
+    }
+}
+
+/// Build a `ProviderRegistry` with the primary provider and any group trigger models.
+fn build_provider_registry(
+    primary: Arc<dyn Provider>,
+    config: &Config,
+) -> provider_registry::ProviderRegistry {
+    let mut registry = provider_registry::ProviderRegistry::new(primary);
+
+    // Collect unique trigger models that differ from the primary.
+    let primary_model = registry.primary().model_info().name;
+    let mut seen = std::collections::HashSet::new();
+    for group in &config.groups {
+        let model = group.trigger_model_or_default();
+        if model != primary_model && seen.insert(model.to_owned()) {
+            match create_provider_with_model(config, model) {
+                Ok(provider) => {
+                    info!(model = model, "registered trigger model provider");
+                    registry.register(model.to_owned(), Arc::new(provider));
+                }
+                Err(e) => {
+                    warn!(
+                        model = model,
+                        error = %e,
+                        "failed to create trigger model provider, will use primary"
+                    );
+                }
+            }
+        }
+    }
+
+    registry
+}
+
+/// Create a provider instance configured for a specific model.
+fn create_provider_with_model(config: &Config, model: &str) -> Result<AnthropicProvider> {
+    if config.provider.api_keys.is_empty() {
+        AnthropicProvider::from_env(model)
+    } else {
+        AnthropicProvider::from_key_refs(&config.provider.api_keys, model)
     }
 }
 
@@ -422,6 +460,7 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
 
     let provider: Arc<dyn Provider> =
         Arc::new(create_provider(&config).context("failed to initialize Anthropic provider")?);
+    let providers = build_provider_registry(Arc::clone(&provider), &config);
 
     #[cfg(feature = "signal")]
     let mut signal_channel: Option<SignalChannel> = None;
@@ -557,7 +596,7 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
     let gateway = Arc::new(Gateway::new(
         Arc::clone(&shared),
         workspace,
-        provider,
+        providers,
         executor,
         typing_notifier,
         Some(memory),
@@ -850,6 +889,7 @@ async fn cmd_chat(config_path: Option<&str>, user_flag: Option<&str>) -> Result<
 
     let provider: Arc<dyn Provider> =
         Arc::new(create_provider(&config).context("failed to initialize Anthropic provider")?);
+    let providers = build_provider_registry(Arc::clone(&provider), &config);
 
     let memory = init_memory_store(&config, &config_dir, Arc::clone(&provider))?;
 
@@ -871,7 +911,7 @@ async fn cmd_chat(config_path: Option<&str>, user_flag: Option<&str>) -> Result<
     let gateway = Arc::new(Gateway::new(
         Arc::clone(&shared),
         workspace,
-        provider,
+        providers,
         executor,
         None,
         Some(memory),

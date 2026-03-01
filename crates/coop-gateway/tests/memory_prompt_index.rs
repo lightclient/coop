@@ -29,6 +29,15 @@ mod compaction;
 mod compaction_store;
 #[path = "../src/config.rs"]
 mod config;
+#[allow(dead_code)]
+#[path = "../src/group_history.rs"]
+mod group_history;
+#[allow(dead_code)]
+#[path = "../src/group_trigger.rs"]
+mod group_trigger;
+#[allow(dead_code)]
+#[path = "../src/provider_registry.rs"]
+mod provider_registry;
 
 #[path = "../src/gateway.rs"]
 mod gateway;
@@ -36,6 +45,7 @@ mod gateway;
 mod memory_auto_capture;
 #[path = "../src/memory_prompt_index.rs"]
 mod memory_prompt_index;
+#[allow(dead_code)]
 #[path = "../src/session_store.rs"]
 mod session_store;
 
@@ -143,7 +153,7 @@ impl PromptHarness {
             Gateway::new(
                 shared_config(config),
                 workspace,
-                provider_dyn,
+                provider_registry::ProviderRegistry::new(provider_dyn),
                 executor,
                 None,
                 Some(memory_dyn),
@@ -177,7 +187,7 @@ impl PromptHarness {
             Gateway::new(
                 shared_config(config),
                 workspace,
-                provider_dyn,
+                provider_registry::ProviderRegistry::new(provider_dyn),
                 executor,
                 None,
                 Some(memory),

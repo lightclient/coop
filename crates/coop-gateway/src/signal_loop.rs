@@ -185,6 +185,12 @@ async fn dispatch_signal_turn_background(
         }
     }
 
+    // Suppress the silent reply token so NO_REPLY is never sent to the channel.
+    if crate::group_trigger::is_silent_reply(&text) {
+        tracing::debug!(target = target, "suppressing silent reply token");
+        text.clear();
+    }
+
     flush_text_via_action(action_tx, target, &mut text).await?;
 
     match dispatch_task.await {
@@ -277,6 +283,11 @@ async fn dispatch_signal_turn<C: Channel>(
                 break;
             }
         }
+    }
+
+    if crate::group_trigger::is_silent_reply(&text) {
+        tracing::debug!(target = target, "suppressing silent reply token");
+        text.clear();
     }
 
     flush_text(signal_channel, target, &mut text).await?;

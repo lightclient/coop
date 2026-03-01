@@ -7,10 +7,18 @@ use tracing::{Instrument, debug, info, info_span};
 
 use std::sync::Arc;
 
-use crate::config::{Config, GroupConfig, SharedConfig, TrustCeiling};
+use crate::config::{Config, GroupConfig, GroupTrigger, SharedConfig, TrustCeiling};
 use crate::gateway::Gateway;
+use crate::group_trigger::{self, TriggerDecision};
 use crate::injection::SessionInjection;
 use crate::trust::resolve_trust;
+
+enum GroupTriggerOutcome {
+    /// Trigger fired — respond with this (possibly history-enriched) input.
+    Respond(String),
+    /// Trigger did not fire — message was buffered, skip the turn.
+    Skip,
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct RouteDecision {
@@ -195,6 +203,20 @@ impl MessageRouter {
             return Ok(decision);
         }
 
+        // Evaluate group trigger — decide whether to respond or buffer.
+        let user_input = if msg.is_group {
+            let cfg = self.config.load();
+            match self
+                .evaluate_group_trigger(msg, &decision, &cfg, &event_tx)
+                .await
+            {
+                GroupTriggerOutcome::Respond(input) => input,
+                GroupTriggerOutcome::Skip => return Ok(decision),
+            }
+        } else {
+            msg.content.clone()
+        };
+
         let span = info_span!(
             "route_message",
             session = %decision.session_key,
@@ -207,7 +229,7 @@ impl MessageRouter {
         self.gateway
             .run_turn_with_trust(
                 &decision.session_key,
-                &msg.content,
+                &user_input,
                 decision.trust,
                 decision.user_name.as_deref(),
                 Some(channel),
@@ -216,6 +238,68 @@ impl MessageRouter {
             .instrument(span)
             .await?;
         Ok(decision)
+    }
+
+    /// Evaluate group trigger and decide whether to respond or buffer.
+    async fn evaluate_group_trigger(
+        &self,
+        msg: &InboundMessage,
+        decision: &RouteDecision,
+        config: &Config,
+        event_tx: &mpsc::Sender<TurnEvent>,
+    ) -> GroupTriggerOutcome {
+        let Some(group_config) = find_group_config(msg, config) else {
+            return GroupTriggerOutcome::Respond(msg.content.clone());
+        };
+
+        let should_respond = match group_config.trigger {
+            GroupTrigger::Always => true,
+            GroupTrigger::Llm => {
+                let history_context = self.gateway.peek_group_history(&decision.session_key);
+                let full_input = prepend_history_context(&msg.content, history_context.as_deref());
+                self.gateway
+                    .evaluate_llm_trigger(
+                        &decision.session_key,
+                        &full_input,
+                        decision.trust,
+                        decision.user_name.as_deref(),
+                        Some(&msg.channel),
+                        group_config,
+                    )
+                    .await
+            }
+            GroupTrigger::Mention | GroupTrigger::Regex => {
+                group_trigger::evaluate_trigger(msg, group_config) == TriggerDecision::Respond
+            }
+        };
+
+        if !should_respond {
+            self.gateway.record_group_history(
+                &decision.session_key,
+                msg,
+                group_config.history_limit,
+            );
+            debug!(
+                session = %decision.session_key,
+                trigger = %group_config.trigger,
+                "group message skipped by trigger"
+            );
+            let _ = event_tx
+                .send(TurnEvent::Done(TurnResult {
+                    messages: Vec::new(),
+                    usage: Usage::default(),
+                    hit_limit: false,
+                }))
+                .await;
+            return GroupTriggerOutcome::Skip;
+        }
+
+        // Drain buffered history and prepend to the message content.
+        let history_context = self.gateway.drain_group_history(&decision.session_key);
+        GroupTriggerOutcome::Respond(prepend_history_context(
+            &msg.content,
+            history_context.as_deref(),
+        ))
     }
 
     /// Handle slash commands from non-TUI channels (Signal, IPC, etc.).
@@ -522,19 +606,11 @@ pub(crate) fn find_group_config<'a>(
     })
 }
 
-#[allow(dead_code)]
-pub(crate) fn find_group_config_by_session<'a>(
-    session_key: &SessionKey,
-    config: &'a Config,
-) -> Option<&'a GroupConfig> {
-    let SessionKind::Group(group_id) = &session_key.kind else {
-        return None;
-    };
-    config.groups.iter().find(|g| {
-        g.r#match
-            .iter()
-            .any(|pattern| pattern == group_id || pattern == "*")
-    })
+fn prepend_history_context(message: &str, history: Option<&str>) -> String {
+    match history {
+        Some(ctx) => format!("{ctx}\n{message}"),
+        None => message.to_owned(),
+    }
 }
 
 fn parse_explicit_session_kind(session: &str, agent_id: &str) -> Option<SessionKind> {
@@ -563,8 +639,11 @@ fn parse_explicit_session_kind(session: &str, agent_id: &str) -> Option<SessionK
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{GroupConfig, GroupTrigger, TrustCeiling, shared_config};
+    use crate::config::{
+        GroupConfig, GroupTrigger, TrustCeiling, find_group_config_by_session, shared_config,
+    };
     use crate::injection::{InjectionSource, SessionInjection};
+    use crate::provider_registry::ProviderRegistry;
     use chrono::Utc;
     use coop_core::Provider;
     use coop_core::fakes::FakeProvider;
@@ -992,7 +1071,7 @@ match = ["signal:bob-uuid"]
             Gateway::new(
                 Arc::clone(&shared),
                 workspace.path().to_path_buf(),
-                provider,
+                ProviderRegistry::new(provider),
                 executor,
                 None,
                 None,
@@ -1085,7 +1164,7 @@ match = ["signal:bob-uuid"]
             Gateway::new(
                 Arc::clone(&shared),
                 workspace.path().to_path_buf(),
-                provider,
+                ProviderRegistry::new(provider),
                 executor,
                 None,
                 None,
@@ -1118,7 +1197,7 @@ match = ["signal:bob-uuid"]
             Gateway::new(
                 Arc::clone(&shared),
                 workspace.path().to_path_buf(),
-                provider,
+                ProviderRegistry::new(provider),
                 executor,
                 None,
                 None,
@@ -1203,7 +1282,7 @@ match = ["signal:bob-uuid"]
             Gateway::new(
                 Arc::clone(&shared),
                 workspace.path().to_path_buf(),
-                provider,
+                ProviderRegistry::new(provider),
                 executor,
                 None,
                 None,
@@ -1233,7 +1312,7 @@ match = ["signal:bob-uuid"]
             Gateway::new(
                 Arc::clone(&shared),
                 workspace.path().to_path_buf(),
-                provider,
+                ProviderRegistry::new(provider),
                 executor,
                 None,
                 None,
@@ -1275,7 +1354,7 @@ match = ["signal:bob-uuid"]
             Gateway::new(
                 Arc::clone(&shared),
                 workspace.path().to_path_buf(),
-                provider,
+                ProviderRegistry::new(provider),
                 executor,
                 None,
                 None,
@@ -1314,7 +1393,7 @@ match = ["signal:bob-uuid"]
             Gateway::new(
                 Arc::clone(&shared),
                 workspace.path().to_path_buf(),
-                provider,
+                ProviderRegistry::new(provider),
                 executor,
                 None,
                 None,
@@ -1351,7 +1430,7 @@ match = ["signal:bob-uuid"]
             Gateway::new(
                 Arc::clone(&shared),
                 workspace.path().to_path_buf(),
-                provider,
+                ProviderRegistry::new(provider),
                 executor,
                 None,
                 None,

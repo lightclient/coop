@@ -69,6 +69,8 @@ fn format_history(buf: &VecDeque<GroupHistoryEntry>) -> String {
 // Group ceiling cache for min_member mode
 // ---------------------------------------------------------------------------
 
+/// Wired up when Signal `GroupMembers` query lands — suppress until then.
+#[allow(dead_code)]
 pub(crate) struct GroupCeilingCache {
     cache: HashMap<SessionKey, (u32, TrustLevel)>,
 }
@@ -80,6 +82,7 @@ impl GroupCeilingCache {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn get(&self, key: &SessionKey, revision: u32) -> Option<TrustLevel> {
         self.cache
             .get(key)
@@ -87,6 +90,7 @@ impl GroupCeilingCache {
             .map(|(_, ceiling)| *ceiling)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn set(&mut self, key: SessionKey, revision: u32, ceiling: TrustLevel) {
         self.cache.insert(key, (revision, ceiling));
     }
@@ -94,6 +98,7 @@ impl GroupCeilingCache {
 
 /// Compute the min_member trust ceiling by cross-referencing group
 /// members with `[[users]]` config. Members not in config get `default_trust`.
+#[allow(dead_code)]
 pub(crate) fn compute_min_member_ceiling(
     member_uuids: &[String],
     users: &[crate::config::UserConfig],

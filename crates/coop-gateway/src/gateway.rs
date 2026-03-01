@@ -1,8 +1,8 @@
 use anyhow::Result;
 use coop_core::prompt::{PromptBuilder, SkillEntry, WorkspaceIndex, scan_skills};
 use coop_core::{
-    InboundMessage, Message, Provider, Role, SessionKey, SessionKind, ToolContext, ToolDef,
-    ToolExecutor, TrustLevel, TurnConfig, TurnEvent, TurnResult, TypingNotifier, Usage,
+    InboundMessage, Message, Role, SessionKey, SessionKind, ToolContext, ToolDef, ToolExecutor,
+    TrustLevel, TurnConfig, TurnEvent, TurnResult, TypingNotifier, Usage,
 };
 use coop_memory::Memory;
 use futures::StreamExt;
@@ -17,9 +17,12 @@ use uuid::Uuid;
 
 use crate::compaction::{self, CompactionState};
 use crate::compaction_store::CompactionStore;
-use crate::config::SharedConfig;
+use crate::config::{SharedConfig, find_group_config_by_session};
+use crate::group_history::{GroupCeilingCache, GroupHistoryBuffer, GroupHistoryEntry};
+use crate::group_trigger::{self, SILENT_REPLY_TOKEN};
 use crate::memory_auto_capture;
 use crate::memory_prompt_index;
+use crate::provider_registry::ProviderRegistry;
 use crate::session_store::DiskSessionStore;
 
 pub(crate) struct Gateway {
@@ -27,7 +30,7 @@ pub(crate) struct Gateway {
     workspace: PathBuf,
     workspace_index: Mutex<WorkspaceIndex>,
     skills: Mutex<Vec<SkillEntry>>,
-    provider: Arc<dyn Provider>,
+    providers: ProviderRegistry,
     executor: Arc<dyn ToolExecutor>,
     memory: Option<Arc<dyn Memory>>,
     typing_notifier: Option<Arc<dyn TypingNotifier>>,
@@ -41,6 +44,12 @@ pub(crate) struct Gateway {
     active_turns: Mutex<HashMap<SessionKey, CancellationToken>>,
     /// Per-session async mutexes to prevent concurrent turns on the same session.
     session_turn_locks: Mutex<HashMap<SessionKey, Arc<tokio::sync::Mutex<()>>>>,
+    /// Per-group-session pending message buffer for non-triggering messages.
+    group_history: Mutex<GroupHistoryBuffer>,
+    /// Cached group membership ceilings (revision-based invalidation).
+    /// Used by `min_member` trust ceiling mode (wired up when Signal GroupMembers query lands).
+    #[allow(dead_code)]
+    group_ceiling_cache: Mutex<GroupCeilingCache>,
 }
 
 /// Tracks cumulative token usage and context size for a session.
@@ -140,7 +149,7 @@ impl Gateway {
     pub(crate) fn new(
         config: SharedConfig,
         workspace: PathBuf,
-        provider: Arc<dyn Provider>,
+        providers: ProviderRegistry,
         executor: Arc<dyn ToolExecutor>,
         typing_notifier: Option<Arc<dyn TypingNotifier>>,
         memory: Option<Arc<dyn Memory>>,
@@ -160,7 +169,7 @@ impl Gateway {
             workspace,
             workspace_index: Mutex::new(workspace_index),
             skills: Mutex::new(skills),
-            provider,
+            providers,
             executor,
             memory,
             typing_notifier,
@@ -171,6 +180,8 @@ impl Gateway {
             session_usage: Mutex::new(HashMap::new()),
             active_turns: Mutex::new(HashMap::new()),
             session_turn_locks: Mutex::new(HashMap::new()),
+            group_history: Mutex::new(GroupHistoryBuffer::new()),
+            group_ceiling_cache: Mutex::new(GroupCeilingCache::new()),
         })
     }
 
@@ -391,7 +402,17 @@ impl Gateway {
                 debug!(session = %session_key, "cleared cron session for fresh execution");
             }
 
-            let system_prompt = self.build_prompt(trust, user_name, channel, user_input).await?;
+            let mut system_prompt =
+                self.build_prompt(trust, user_name, channel, user_input).await?;
+
+            // Inject group-specific intro when this is a group session.
+            if let SessionKind::Group(_) = &session_key.kind {
+                let cfg = self.config.load();
+                if let Some(group_config) = find_group_config_by_session(session_key, &cfg) {
+                    let intro = build_group_intro(&group_config.trigger, &cfg.agent.id);
+                    system_prompt.push(intro);
+                }
+            }
 
             // Repair corrupt session state: if the last message is an assistant
             // with tool_use blocks but no following tool_result message, append
@@ -715,7 +736,7 @@ impl Gateway {
                     && post_turn_messages.len() >= auto_capture.min_turn_messages
                 {
                     let memory_for_capture = Arc::clone(memory);
-                    let provider = Arc::clone(&self.provider);
+                    let provider = Arc::clone(self.providers.primary());
                     let capture_session_key = session_key.clone();
                     let turn_messages = post_turn_messages.clone();
                     tokio::spawn(async move {
@@ -954,7 +975,7 @@ impl Gateway {
 
         match compaction::compact(
             &all_messages,
-            self.provider.as_ref(),
+            self.providers.primary().as_ref(),
             system_prompt,
             previous_state,
         )
@@ -1066,7 +1087,7 @@ impl Gateway {
     /// Push the current config model into the provider if it has changed.
     fn sync_provider_model(&self) {
         let config_model = self.config.load().agent.model.clone();
-        let provider_model = self.provider.model_info().name;
+        let provider_model = self.providers.primary().model_info().name;
         // Strip prefix for comparison (config may have "anthropic/" prefix, provider won't)
         let config_api_model = config_model
             .strip_prefix("anthropic/")
@@ -1077,7 +1098,7 @@ impl Gateway {
                 new = %config_api_model,
                 "syncing provider model from hot-reloaded config"
             );
-            self.provider.set_model(&config_model);
+            self.providers.sync_primary_model(&config_model);
         }
     }
 
@@ -1093,7 +1114,7 @@ impl Gateway {
 
     /// Context window size in tokens.
     pub(crate) fn context_limit(&self) -> usize {
-        self.provider.model_info().context_limit
+        self.providers.primary().model_info().context_limit
     }
 
     /// Session-level usage stats (cumulative + last context size).
@@ -1174,6 +1195,103 @@ impl Gateway {
         );
     }
 
+    // ── Group chat helpers ──────────────────────────────────────────────
+
+    /// Record a non-triggering group message for future context injection.
+    pub(crate) fn record_group_history(
+        &self,
+        session_key: &SessionKey,
+        msg: &InboundMessage,
+        limit: usize,
+    ) {
+        let entry = GroupHistoryEntry {
+            sender: msg.sender.clone(),
+            body: msg.content.clone(),
+            timestamp: msg.timestamp.timestamp().unsigned_abs(),
+        };
+        self.group_history
+            .lock()
+            .expect("group_history mutex poisoned")
+            .record(session_key, entry, limit);
+    }
+
+    /// Peek at buffered group history without consuming it.
+    pub(crate) fn peek_group_history(&self, session_key: &SessionKey) -> Option<String> {
+        self.group_history
+            .lock()
+            .expect("group_history mutex poisoned")
+            .peek_context(session_key)
+    }
+
+    /// Drain buffered group history (consuming it).
+    pub(crate) fn drain_group_history(&self, session_key: &SessionKey) -> Option<String> {
+        self.group_history
+            .lock()
+            .expect("group_history mutex poisoned")
+            .drain_context(session_key)
+    }
+
+    /// Evaluate LLM trigger: ask a cheap model if the assistant should respond.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn evaluate_llm_trigger(
+        &self,
+        session_key: &SessionKey,
+        user_input: &str,
+        trust: TrustLevel,
+        user_name: Option<&str>,
+        channel: Option<&str>,
+        group_config: &crate::config::GroupConfig,
+    ) -> bool {
+        let trigger_model = group_config.trigger_model_or_default();
+        let provider = self.providers.get(trigger_model);
+
+        let system_prompt = match self
+            .build_prompt(trust, user_name, channel, user_input)
+            .await
+        {
+            Ok(blocks) => blocks,
+            Err(e) => {
+                warn!(error = %e, "LLM trigger prompt build failed, defaulting to skip");
+                return false;
+            }
+        };
+
+        let trigger_prompt = group_config
+            .trigger_prompt
+            .as_deref()
+            .unwrap_or(group_trigger::DEFAULT_TRIGGER_PROMPT);
+
+        let messages = {
+            let mut msgs = self.messages(session_key);
+            let combined = format!("{user_input}\n\n---\n{trigger_prompt}");
+            msgs.push(Message::user().with_text(combined));
+            msgs
+        };
+
+        match provider.complete(&system_prompt, &messages, &[]).await {
+            Ok((response, _usage)) => {
+                let text = response.text();
+                let decision = text.trim().to_uppercase().starts_with("YES");
+                debug!(
+                    session = %session_key,
+                    model = trigger_model,
+                    response = text.trim(),
+                    decision,
+                    "LLM trigger evaluated"
+                );
+                decision
+            }
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    session = %session_key,
+                    "LLM trigger call failed, defaulting to skip"
+                );
+                false
+            }
+        }
+    }
+
     async fn assistant_response(
         &self,
         system_prompt: &[String],
@@ -1181,7 +1299,7 @@ impl Gateway {
         tool_defs: &[ToolDef],
         event_tx: &mpsc::Sender<TurnEvent>,
     ) -> Result<(Message, Usage)> {
-        let streaming = self.provider.supports_streaming();
+        let streaming = self.providers.primary().supports_streaming();
         let span = info_span!(
             "provider_request",
             message_count = messages.len(),
@@ -1210,7 +1328,8 @@ impl Gateway {
         event_tx: &mpsc::Sender<TurnEvent>,
     ) -> Result<(Message, Usage)> {
         let mut stream = self
-            .provider
+            .providers
+            .primary()
             .stream(system_prompt, messages, tool_defs)
             .await?;
 
@@ -1253,7 +1372,8 @@ impl Gateway {
         event_tx: &mpsc::Sender<TurnEvent>,
     ) -> Result<(Message, Usage)> {
         let (response, usage) = self
-            .provider
+            .providers
+            .primary()
             .complete(system_prompt, messages, tool_defs)
             .await?;
 
@@ -1273,6 +1393,49 @@ impl Gateway {
 
         Ok((response, usage))
     }
+}
+
+fn build_group_intro(trigger: &crate::config::GroupTrigger, _agent_id: &str) -> String {
+    use crate::config::GroupTrigger;
+
+    let activation = match trigger {
+        GroupTrigger::Always => "always-on (you receive every group message)",
+        GroupTrigger::Llm => {
+            "trigger-only (a classifier determined you should respond; \
+             recent chat context may be included)"
+        }
+        GroupTrigger::Mention | GroupTrigger::Regex => {
+            "trigger-only (you are invoked only when explicitly mentioned or triggered; \
+             recent chat context may be included)"
+        }
+    };
+
+    let mut lines = vec![
+        "You are replying inside a group chat.".to_owned(),
+        format!("Activation: {activation}."),
+    ];
+
+    if matches!(trigger, GroupTrigger::Always) {
+        lines.push(format!(
+            "If no response is needed, reply with exactly \"{SILENT_REPLY_TOKEN}\" \
+             (and nothing else) so the system stays silent. Do not add any other \
+             words, punctuation, or explanations.",
+        ));
+        lines.push(
+            "Be extremely selective: reply only when directly addressed \
+             or clearly helpful. Otherwise stay silent."
+                .to_owned(),
+        );
+    }
+
+    lines.push(
+        "Be a good group participant: mostly lurk and follow the conversation; \
+         reply only when directly addressed or you can add clear value."
+            .to_owned(),
+    );
+    lines.push("Address the specific sender noted in the message context.".to_owned());
+
+    lines.join(" ")
 }
 
 fn parse_session_key(session: &str, agent_id: &str) -> Option<SessionKey> {
@@ -1330,6 +1493,7 @@ fn parse_session_key(session: &str, agent_id: &str) -> Option<SessionKey> {
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use coop_core::Provider;
     use coop_core::fakes::FakeProvider;
     use coop_core::tools::DefaultExecutor;
     use coop_core::traits::ProviderStream;
@@ -1338,6 +1502,11 @@ mod tests {
     use std::time::Duration;
 
     use crate::config::{Config, shared_config};
+    use crate::provider_registry::ProviderRegistry;
+
+    fn registry(provider: Arc<dyn Provider>) -> ProviderRegistry {
+        ProviderRegistry::new(provider)
+    }
 
     struct RecordingTypingNotifier {
         events: tokio::sync::Mutex<Vec<bool>>,
@@ -1575,7 +1744,7 @@ model = "test-model"
             Gateway::new(
                 shared_config(test_config()),
                 workspace.path().to_path_buf(),
-                provider,
+                registry(provider),
                 executor,
                 None,
                 None,
@@ -1634,7 +1803,7 @@ model = "test-model"
             Gateway::new(
                 shared_config(test_config()),
                 workspace.path().to_path_buf(),
-                provider,
+                registry(provider),
                 executor,
                 None,
                 None,
@@ -1697,7 +1866,7 @@ model = "test-model"
             Gateway::new(
                 shared_config(test_config()),
                 workspace.path().to_path_buf(),
-                provider,
+                registry(provider),
                 executor,
                 None,
                 None,
@@ -1749,7 +1918,7 @@ model = "test-model"
         let gateway = Gateway::new(
             shared_config(test_config()),
             workspace.path().to_path_buf(),
-            provider,
+            registry(provider),
             executor,
             Some(typing_notifier),
             None,
@@ -1969,7 +2138,7 @@ model = "test-model"
             Gateway::new(
                 shared_config(test_config()),
                 workspace.path().to_path_buf(),
-                provider,
+                registry(provider),
                 executor,
                 None,
                 None,
@@ -2027,7 +2196,7 @@ model = "test-model"
         let gateway = Gateway::new(
             shared_config(test_config()),
             workspace.path().to_path_buf(),
-            provider,
+            registry(provider),
             executor,
             None,
             None,
@@ -2051,7 +2220,7 @@ model = "test-model"
             Gateway::new(
                 shared_config(test_config()),
                 workspace.path().to_path_buf(),
-                provider,
+                registry(provider),
                 executor,
                 None,
                 None,
@@ -2137,7 +2306,7 @@ model = "test-model"
             Gateway::new(
                 shared_config(test_config()),
                 workspace.path().to_path_buf(),
-                provider as Arc<dyn Provider>,
+                registry(provider as Arc<dyn Provider>),
                 executor,
                 None,
                 None,
@@ -2268,7 +2437,7 @@ model = "test-model"
             Gateway::new(
                 shared_config(test_config()),
                 workspace.path().to_path_buf(),
-                provider,
+                registry(provider),
                 executor,
                 None,
                 None,
@@ -2330,7 +2499,7 @@ model = "test-model"
         let gateway = Gateway::new(
             Arc::clone(&shared),
             workspace.path().to_path_buf(),
-            provider,
+            registry(provider),
             executor,
             None,
             None,
@@ -2338,7 +2507,7 @@ model = "test-model"
         .unwrap();
 
         // Default model from FakeProvider is "fake-model".
-        assert_eq!(gateway.provider.model_info().name, "fake-model");
+        assert_eq!(gateway.providers.primary().model_info().name, "fake-model");
 
         // Simulate hot-reload: change agent.model.
         let mut new_config = shared.load().as_ref().clone();
@@ -2349,7 +2518,7 @@ model = "test-model"
 
         // FakeProvider implements set_model, so the provider should now
         // report the new model name — proving the full hot-reload path works.
-        assert_eq!(gateway.provider.model_info().name, "new-model");
+        assert_eq!(gateway.providers.primary().model_info().name, "new-model");
         assert_eq!(gateway.model_name(), "new-model");
     }
 
@@ -2363,7 +2532,7 @@ model = "test-model"
         let gateway = Gateway::new(
             Arc::clone(&shared),
             workspace.path().to_path_buf(),
-            provider,
+            registry(provider),
             executor,
             None,
             None,
@@ -2383,7 +2552,7 @@ model = "test-model"
         // FakeProvider doesn't strip prefix, but the sync did execute.
         // The actual prefix stripping is tested in coop-agent's
         // set_model_strips_anthropic_prefix test.
-        let provider_model = gateway.provider.model_info().name;
+        let provider_model = gateway.providers.primary().model_info().name;
         assert!(
             provider_model.contains("claude-haiku-3-20250514"),
             "provider should have received the new model: {provider_model}"
@@ -2400,7 +2569,7 @@ model = "test-model"
         let gateway = Gateway::new(
             Arc::clone(&shared),
             workspace.path().to_path_buf(),
-            provider,
+            registry(provider),
             executor,
             None,
             None,
@@ -2410,11 +2579,11 @@ model = "test-model"
         // Config model is "test-model", provider model is "fake-model".
         // They differ, so first sync will update.
         gateway.sync_provider_model();
-        assert_eq!(gateway.provider.model_info().name, "test-model");
+        assert_eq!(gateway.providers.primary().model_info().name, "test-model");
 
         // Second sync should be a no-op (same model).
         gateway.sync_provider_model();
-        assert_eq!(gateway.provider.model_info().name, "test-model");
+        assert_eq!(gateway.providers.primary().model_info().name, "test-model");
     }
 
     #[test]
@@ -2426,7 +2595,7 @@ model = "test-model"
             Gateway::new(
                 shared_config(test_config()),
                 workspace.path().to_path_buf(),
-                provider,
+                registry(provider),
                 executor,
                 None,
                 None,
@@ -2481,7 +2650,7 @@ model = "test-model"
             Gateway::new(
                 shared_config(test_config()),
                 workspace.path().to_path_buf(),
-                provider,
+                registry(provider),
                 executor,
                 None,
                 None,
@@ -2523,7 +2692,7 @@ model = "test-model"
             Gateway::new(
                 shared_config(test_config()),
                 workspace.path().to_path_buf(),
-                provider,
+                registry(provider),
                 executor,
                 None,
                 None,
@@ -2641,7 +2810,7 @@ model = "test-model"
             Gateway::new(
                 shared_config(test_config()),
                 workspace.path().to_path_buf(),
-                provider,
+                registry(provider),
                 executor,
                 None,
                 None,
@@ -2721,7 +2890,7 @@ model = "test-model"
             Gateway::new(
                 shared_config(test_config()),
                 workspace.path().to_path_buf(),
-                Arc::clone(&provider) as Arc<dyn Provider>,
+                registry(Arc::clone(&provider) as Arc<dyn Provider>),
                 executor,
                 None,
                 None,
@@ -2822,7 +2991,7 @@ model = "test-model"
             Gateway::new(
                 shared_config(test_config()),
                 workspace.path().to_path_buf(),
-                provider,
+                registry(provider),
                 executor,
                 None,
                 None,
@@ -2869,7 +3038,7 @@ model = "test-model"
             Gateway::new(
                 shared_config(test_config()),
                 workspace.path().to_path_buf(),
-                provider,
+                registry(provider),
                 executor,
                 None,
                 None,
@@ -3048,7 +3217,7 @@ model = "test-model"
             Gateway::new(
                 shared_config(test_config()),
                 workspace.path().to_path_buf(),
-                provider,
+                registry(provider),
                 executor,
                 None,
                 None,
@@ -3094,7 +3263,7 @@ model = "test-model"
             Gateway::new(
                 shared_config(test_config()),
                 workspace.path().to_path_buf(),
-                provider,
+                registry(provider),
                 executor,
                 None,
                 None,

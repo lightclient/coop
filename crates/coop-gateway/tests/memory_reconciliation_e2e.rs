@@ -28,6 +28,15 @@ mod compaction;
 mod compaction_store;
 #[path = "../src/config.rs"]
 mod config;
+#[allow(dead_code)]
+#[path = "../src/group_history.rs"]
+mod group_history;
+#[allow(dead_code)]
+#[path = "../src/group_trigger.rs"]
+mod group_trigger;
+#[allow(dead_code)]
+#[path = "../src/provider_registry.rs"]
+mod provider_registry;
 
 #[path = "../src/gateway.rs"]
 mod gateway;
@@ -39,6 +48,7 @@ mod memory_prompt_index;
 mod memory_reconcile;
 #[path = "../src/memory_tools.rs"]
 mod memory_tools;
+#[allow(dead_code)]
 #[path = "../src/session_store.rs"]
 mod session_store;
 
@@ -193,7 +203,7 @@ impl GatewayHarness {
             Gateway::new(
                 shared_config(test_config()),
                 workspace,
-                provider_dyn,
+                provider_registry::ProviderRegistry::new(provider_dyn),
                 executor,
                 None,
                 Some(memory_dyn),

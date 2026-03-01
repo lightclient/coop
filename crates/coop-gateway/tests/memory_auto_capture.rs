@@ -22,10 +22,20 @@ mod compaction_store;
 mod config;
 #[path = "../src/gateway.rs"]
 mod gateway;
+#[allow(dead_code)]
+#[path = "../src/group_history.rs"]
+mod group_history;
+#[allow(dead_code)]
+#[path = "../src/group_trigger.rs"]
+mod group_trigger;
 #[path = "../src/memory_auto_capture.rs"]
 mod memory_auto_capture;
 #[path = "../src/memory_prompt_index.rs"]
 mod memory_prompt_index;
+#[allow(dead_code)]
+#[path = "../src/provider_registry.rs"]
+mod provider_registry;
+#[allow(dead_code)]
 #[path = "../src/session_store.rs"]
 mod session_store;
 
@@ -54,7 +64,7 @@ impl AutoCaptureHarness {
             Gateway::new(
                 shared_config(config),
                 workspace,
-                provider,
+                provider_registry::ProviderRegistry::new(provider),
                 executor,
                 None,
                 Some(memory_dyn),

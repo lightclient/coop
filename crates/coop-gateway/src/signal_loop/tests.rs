@@ -20,6 +20,7 @@ use tokio::sync::mpsc;
 
 use crate::config::{Config, shared_config};
 use crate::gateway::Gateway;
+use crate::provider_registry::ProviderRegistry;
 
 #[derive(Debug)]
 struct CountingProvider {
@@ -177,7 +178,7 @@ fn build_router(
         Gateway::new(
             Arc::clone(&shared),
             workspace.path().to_path_buf(),
-            provider,
+            ProviderRegistry::new(provider),
             executor,
             typing_notifier,
             None,
@@ -701,7 +702,7 @@ fn build_router_verbose(
         Gateway::new(
             Arc::clone(&shared),
             workspace.path().to_path_buf(),
-            provider,
+            ProviderRegistry::new(provider),
             executor,
             None,
             None,
@@ -768,7 +769,7 @@ fn build_router_with_gateway(
         Gateway::new(
             Arc::clone(&shared),
             workspace.path().to_path_buf(),
-            provider,
+            ProviderRegistry::new(provider),
             executor,
             typing_notifier,
             None,
@@ -814,7 +815,7 @@ fn build_router_with_typing(
         Gateway::new(
             Arc::clone(&shared),
             workspace.path().to_path_buf(),
-            provider,
+            ProviderRegistry::new(provider),
             Arc::new(DefaultExecutor::new()) as Arc<dyn ToolExecutor>,
             Some(typing),
             None,

@@ -26,6 +26,7 @@ pub(crate) enum TriggerDecision {
 
 /// Evaluate non-LLM triggers (always, mention, regex).
 /// For trigger = "llm", the caller must use `Gateway::evaluate_llm_trigger()`.
+// TODO: implicit mention on reply-to (requires tracking message timestamps)
 pub(crate) fn evaluate_trigger(
     msg: &InboundMessage,
     group_config: &GroupConfig,
@@ -68,6 +69,8 @@ pub(crate) fn evaluate_trigger(
 }
 
 /// Check if assistant output is the silent reply token.
+/// Used by signal_loop (cfg=signal) — allow dead_code for non-signal builds.
+#[allow(dead_code)]
 pub(crate) fn is_silent_reply(text: &str) -> bool {
     let trimmed = text.trim();
     trimmed == SILENT_REPLY_TOKEN

@@ -740,6 +740,7 @@ mod tests {
     use super::*;
     use crate::config::{Config, CronDelivery, UserConfig, shared_config};
     use crate::gateway::Gateway;
+    use crate::provider_registry::ProviderRegistry;
     use async_trait::async_trait;
     use coop_core::fakes::FakeProvider;
     use coop_core::tools::DefaultExecutor;
@@ -2346,7 +2347,7 @@ match = ["signal:alice-uuid"]
             Gateway::new(
                 Arc::clone(&shared),
                 dir.path().to_path_buf(),
-                provider,
+                ProviderRegistry::new(provider),
                 executor,
                 None,
                 None,
@@ -2409,7 +2410,7 @@ match = ["signal:alice-uuid"]
             Gateway::new(
                 Arc::clone(&shared),
                 dir.path().to_path_buf(),
-                provider,
+                ProviderRegistry::new(provider),
                 executor,
                 None,
                 None,

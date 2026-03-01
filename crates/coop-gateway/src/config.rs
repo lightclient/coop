@@ -17,6 +17,21 @@ pub(crate) fn shared_config(config: Config) -> SharedConfig {
     Arc::new(ArcSwap::from_pointee(config))
 }
 
+/// Find group config matching a session key (for use where `InboundMessage` is not available).
+pub(crate) fn find_group_config_by_session<'a>(
+    session_key: &coop_core::SessionKey,
+    config: &'a Config,
+) -> Option<&'a GroupConfig> {
+    let coop_core::SessionKind::Group(group_id) = &session_key.kind else {
+        return None;
+    };
+    config.groups.iter().find(|g| {
+        g.r#match
+            .iter()
+            .any(|pattern| pattern == group_id || pattern == "*")
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Config {
     pub agent: AgentConfig,
@@ -88,6 +103,14 @@ pub(crate) struct GroupConfig {
     pub trust_ceiling: TrustCeiling,
     #[serde(default = "default_group_history_limit")]
     pub history_limit: usize,
+}
+
+impl GroupConfig {
+    pub(crate) fn trigger_model_or_default(&self) -> &str {
+        self.trigger_model
+            .as_deref()
+            .unwrap_or(DEFAULT_TRIGGER_MODEL)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
