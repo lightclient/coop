@@ -54,6 +54,12 @@ pub trait Memory: Send + Sync {
 
     async fn people(&self, query: &str) -> Result<Vec<Person>>;
 
+    /// Add an alias for a known person. If the person doesn't exist, this is a no-op.
+    /// Aliases are deduplicated (case-insensitive).
+    async fn add_person_alias(&self, _name: &str, _alias: &str) -> Result<bool> {
+        Ok(false)
+    }
+
     async fn summarize_session(&self, session_key: &SessionKey) -> Result<SessionSummary>;
 
     async fn recent_session_summaries(&self, limit: usize) -> Result<Vec<SessionSummary>>;

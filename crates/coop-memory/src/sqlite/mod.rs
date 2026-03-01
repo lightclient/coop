@@ -545,6 +545,11 @@ impl Memory for SqliteMemory {
         write_ops::people(self, query)
     }
 
+    #[instrument(skip(self))]
+    async fn add_person_alias(&self, name: &str, alias: &str) -> Result<bool> {
+        write_ops::add_person_alias(self, name, alias)
+    }
+
     #[instrument(skip(self, session_key))]
     async fn summarize_session(&self, session_key: &SessionKey) -> Result<SessionSummary> {
         write_ops::summarize_session(self, session_key)

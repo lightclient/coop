@@ -269,7 +269,8 @@ impl MessageRouter {
                     .await
             }
             GroupTrigger::Mention | GroupTrigger::Regex => {
-                group_trigger::evaluate_trigger(msg, group_config) == TriggerDecision::Respond
+                group_trigger::evaluate_trigger(msg, group_config, &config.agent.id)
+                    == TriggerDecision::Respond
             }
         };
 

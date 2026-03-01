@@ -184,6 +184,7 @@ pub struct Person {
     pub name: String,
     pub store: String,
     pub facts: serde_json::Value,
+    pub aliases: Vec<String>,
     pub last_mentioned: Option<DateTime<Utc>>,
     pub mention_count: u32,
 }

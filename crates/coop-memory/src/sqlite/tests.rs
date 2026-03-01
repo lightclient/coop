@@ -1112,3 +1112,74 @@ fn trust_roundtrip_helpers() {
     assert_eq!(trust_to_str(TrustLevel::Inner), "inner");
     assert_eq!(min_trust_for_store("private"), TrustLevel::Full);
 }
+
+// ---------------------------------------------------------------------------
+// People and alias tests
+// ---------------------------------------------------------------------------
+
+fn obs_with_people(title: &str, people: &[&str]) -> NewObservation {
+    let mut obs = sample_obs(title, &["test fact"]);
+    obs.related_people = people.iter().map(|s| (*s).to_owned()).collect();
+    obs
+}
+
+#[tokio::test]
+async fn people_query_returns_results() {
+    let m = memory();
+    m.write(obs_with_people("project alpha", &["Alice", "Bob"]))
+        .await
+        .unwrap();
+    let results = m.people("Alice").await.unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].name, "Alice");
+    assert!(results[0].aliases.is_empty());
+}
+
+#[tokio::test]
+async fn add_alias_to_existing_person() {
+    let m = memory();
+    m.write(obs_with_people("project alpha", &["Alice"]))
+        .await
+        .unwrap();
+
+    let added = m.add_person_alias("Alice", "ally").await.unwrap();
+    assert!(added);
+
+    let results = m.people("Alice").await.unwrap();
+    assert_eq!(results[0].aliases, vec!["ally"]);
+}
+
+#[tokio::test]
+async fn alias_deduplicates_case_insensitive() {
+    let m = memory();
+    m.write(obs_with_people("project alpha", &["Alice"]))
+        .await
+        .unwrap();
+
+    assert!(m.add_person_alias("Alice", "ally").await.unwrap());
+    assert!(!m.add_person_alias("Alice", "Ally").await.unwrap());
+
+    let results = m.people("Alice").await.unwrap();
+    assert_eq!(results[0].aliases.len(), 1);
+}
+
+#[tokio::test]
+async fn alias_noop_for_unknown_person() {
+    let m = memory();
+    let added = m.add_person_alias("Nobody", "alias").await.unwrap();
+    assert!(!added);
+}
+
+#[tokio::test]
+async fn people_searchable_by_alias() {
+    let m = memory();
+    m.write(obs_with_people("project alpha", &["Alice"]))
+        .await
+        .unwrap();
+    m.add_person_alias("Alice", "ally").await.unwrap();
+
+    // Searching by alias should find the person
+    let results = m.people("ally").await.unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].name, "Alice");
+}

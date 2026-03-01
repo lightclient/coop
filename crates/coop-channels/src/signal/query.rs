@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use anyhow::{Context, Result};
 use coop_core::InboundMessage;
 use presage::libsignal_service::prelude::Uuid;
@@ -8,6 +10,7 @@ use tracing::{Instrument, debug, info_span, warn};
 use super::SignalManager;
 use super::SignalTarget;
 use super::inbound::parse_content;
+use super::name_resolver::SignalNameResolver;
 
 /// A query to the Signal runtime for reading stored messages.
 pub enum SignalQuery {
@@ -42,7 +45,11 @@ impl std::fmt::Debug for SignalQuery {
 }
 
 /// Handles incoming queries on the signal runtime thread.
-pub(super) async fn query_task(manager: SignalManager, mut query_rx: mpsc::Receiver<SignalQuery>) {
+pub(super) async fn query_task(
+    manager: SignalManager,
+    mut query_rx: mpsc::Receiver<SignalQuery>,
+    resolver: Arc<SignalNameResolver>,
+) {
     while let Some(query) = query_rx.recv().await {
         match query {
             SignalQuery::RecentMessages {
@@ -58,10 +65,11 @@ pub(super) async fn query_task(manager: SignalManager, mut query_rx: mpsc::Recei
                     signal.before = ?before,
                     signal.after = ?after,
                 );
-                let result =
-                    async { fetch_recent_messages(&manager, &target, limit, before, after).await }
-                        .instrument(span)
-                        .await;
+                let result = async {
+                    fetch_recent_messages(&manager, &target, limit, before, after, &resolver).await
+                }
+                .instrument(span)
+                .await;
                 let _ = reply.send(result);
             }
         }
@@ -74,6 +82,7 @@ async fn fetch_recent_messages(
     limit: usize,
     before: Option<u64>,
     after: Option<u64>,
+    resolver: &SignalNameResolver,
 ) -> Result<Vec<InboundMessage>> {
     let thread = signal_target_to_thread(target)?;
     let start = after.unwrap_or(0);
@@ -89,7 +98,7 @@ async fn fetch_recent_messages(
     for content_result in messages_iter {
         match content_result {
             Ok(content) => {
-                if let Some(inbound) = parse_content(&content) {
+                if let Some(inbound) = parse_content(&content, Some(resolver)) {
                     results.push(inbound);
                 }
             }

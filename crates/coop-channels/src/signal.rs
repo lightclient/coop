@@ -2,6 +2,7 @@
 #[cfg(test)]
 mod image_ext_tests;
 mod inbound;
+pub(crate) mod name_resolver;
 mod query;
 #[allow(clippy::unwrap_used)]
 #[cfg(test)]
@@ -162,12 +163,28 @@ impl SignalChannel {
     /// `trusted_senders` is the set of Signal sender UUIDs with at least
     /// inner trust. Attachments are only downloaded and saved for senders
     /// in this set.
+    ///
+    /// `agent_name` is the agent's display name (typically `agent.id`).
+    /// `user_mappings` maps Signal ACIs to coop user names from `[[users]]` config.
     pub async fn connect(
         db_path: impl AsRef<Path>,
         attachments_dir: impl Into<PathBuf>,
         trusted_senders: HashSet<String>,
+        agent_name: String,
+        user_mappings: Vec<(String, String)>,
     ) -> Result<Self> {
         let manager = load_registered_manager(db_path.as_ref()).await?;
+
+        let self_aci = manager.registration_data().service_ids.aci.to_string();
+        info!(self_aci = %self_aci, agent_name = %agent_name, "building signal name resolver");
+
+        let contacts = load_contacts(db_path.as_ref()).await;
+        let resolver = Arc::new(name_resolver::SignalNameResolver::build(
+            self_aci,
+            agent_name,
+            &user_mappings,
+            &contacts,
+        ));
 
         let (inbound_tx, inbound_rx) = mpsc::channel(64);
         let (action_tx, action_rx) = mpsc::channel(64);
@@ -183,6 +200,7 @@ impl SignalChannel {
             Arc::clone(&health),
             attachments_dir.into(),
             trusted_senders,
+            Arc::clone(&resolver),
         );
 
         Ok(Self {
@@ -295,6 +313,7 @@ fn start_signal_runtime(
     health: HealthState,
     attachments_dir: PathBuf,
     trusted_senders: HashSet<String>,
+    resolver: Arc<name_resolver::SignalNameResolver>,
 ) {
     std::thread::Builder::new()
         .name("signal-runtime".to_owned())
@@ -324,6 +343,8 @@ fn start_signal_runtime(
                 let query_manager = manager.clone();
                 let receive_health = Arc::clone(&health);
                 let send_health = Arc::clone(&health);
+                let receive_resolver = Arc::clone(&resolver);
+                let query_resolver = Arc::clone(&resolver);
 
                 let receive_task = tokio::task::spawn_local(Box::pin(receive_task(
                     receive_manager,
@@ -332,11 +353,15 @@ fn start_signal_runtime(
                     receive_health,
                     attachments_dir,
                     trusted_senders,
+                    receive_resolver,
                 )));
                 let send_task =
                     tokio::task::spawn_local(Box::pin(send_task(manager, action_rx, send_health)));
-                let query_task =
-                    tokio::task::spawn_local(Box::pin(query::query_task(query_manager, query_rx)));
+                let query_task = tokio::task::spawn_local(Box::pin(query::query_task(
+                    query_manager,
+                    query_rx,
+                    query_resolver,
+                )));
 
                 let _ = futures::future::join3(receive_task, send_task, query_task).await;
             });
@@ -369,7 +394,7 @@ impl Channel for SignalChannel {
     }
 }
 
-#[allow(clippy::large_futures)]
+#[allow(clippy::large_futures, clippy::too_many_arguments)]
 async fn receive_task(
     mut manager: SignalManager,
     inbound_tx: mpsc::Sender<InboundMessage>,
@@ -377,6 +402,7 @@ async fn receive_task(
     health: HealthState,
     attachments_dir: PathBuf,
     trusted_senders: HashSet<String>,
+    resolver: Arc<name_resolver::SignalNameResolver>,
 ) {
     // Separate manager clone for downloading attachments. The receive stream
     // holds `&mut manager`, so we can't call `get_attachment` on the same
@@ -414,7 +440,7 @@ async fn receive_task(
 
                     let inbound = {
                         let _guard = receive_span.enter();
-                        inbound_from_content(&content)
+                        inbound_from_content(&content, Some(&resolver))
                     };
 
                     if let Some(mut inbound) = inbound {
@@ -558,7 +584,16 @@ async fn send_signal_action(manager: &mut SignalManager, action: SignalAction) -
             let target_kind = signal_target_kind(&target);
             let target_value = signal_target_value(&target);
             let timestamp = now_epoch_millis();
-            let raw_content = outbound.content.clone();
+
+            let (content, redacted) = name_resolver::sanitize_uuids(&outbound.content);
+            if redacted > 0 {
+                warn!(
+                    count = redacted,
+                    "redacted UUIDs from outbound signal message"
+                );
+            }
+
+            let raw_content = content.clone();
             let span = info_span!(
                 "signal_action_send",
                 signal.action = "send_text",
@@ -568,7 +603,7 @@ async fn send_signal_action(manager: &mut SignalManager, action: SignalAction) -
                 signal.raw_content = %raw_content,
             );
             let message = DataMessage {
-                body: Some(outbound.content),
+                body: Some(content),
                 group_v2: group_context_for_target(&target),
                 ..Default::default()
             };
@@ -675,6 +710,15 @@ async fn send_signal_action(manager: &mut SignalManager, action: SignalAction) -
             let target_kind = signal_target_kind(&target);
             let target_value = signal_target_value(&target);
             let timestamp = now_epoch_millis();
+
+            let (text, redacted) = name_resolver::sanitize_uuids(&text);
+            if redacted > 0 {
+                warn!(
+                    count = redacted,
+                    "redacted UUIDs from outbound signal reply"
+                );
+            }
+
             let raw_content = text.clone();
             let quote_author_aci_for_trace = quote_author_aci.clone();
             let span = info_span!(
@@ -1043,6 +1087,42 @@ fn now_epoch_millis() -> u64 {
         .as_millis()
         .try_into()
         .unwrap_or(u64::MAX)
+}
+
+/// Load contact names from a separate store connection for name resolution.
+async fn load_contacts(db_path: &Path) -> Vec<(String, String)> {
+    use presage::store::ContentsStore;
+
+    let store = match open_store(db_path).await {
+        Ok(store) => store,
+        Err(e) => {
+            warn!(error = %e, "failed to open store for contact resolution");
+            return vec![];
+        }
+    };
+
+    match store.contacts().await {
+        Ok(iter) => iter
+            .filter_map(|result| match result {
+                Ok(contact) => {
+                    let name = contact.name.trim().to_owned();
+                    if name.is_empty() {
+                        None
+                    } else {
+                        Some((contact.uuid.to_string(), name))
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, "skipping unreadable contact");
+                    None
+                }
+            })
+            .collect(),
+        Err(e) => {
+            warn!(error = %e, "failed to load contacts for name resolution");
+            vec![]
+        }
+    }
 }
 
 async fn load_registered_manager(db_path: &Path) -> Result<SignalManager> {

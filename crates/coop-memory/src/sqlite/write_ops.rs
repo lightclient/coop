@@ -679,24 +679,28 @@ pub(super) fn people(memory: &SqliteMemory, query: &str) -> Result<Vec<Person>> 
     let conn = memory.conn.lock().expect("memory db mutex poisoned");
     let mut stmt = conn.prepare(
         "
-            SELECT name, store, facts, last_mentioned, mention_count
+            SELECT name, store, facts, aliases, last_mentioned, mention_count
             FROM people
             WHERE agent_id = ?
-              AND name LIKE ?
+              AND (name LIKE ? OR aliases LIKE ?)
             ORDER BY mention_count DESC, COALESCE(last_mentioned, 0) DESC
             LIMIT 20
             ",
     )?;
 
-    let rows = stmt.query_map(params![memory.agent_id, needle], |row| {
+    let rows = stmt.query_map(params![memory.agent_id, needle, needle], |row| {
         let facts: String = row.get(2)?;
         let facts_value = serde_json::from_str(&facts).unwrap_or_else(|_| serde_json::json!({}));
-        let last_mentioned: Option<i64> = row.get(3)?;
-        let mention_count: u32 = row.get(4)?;
+        let aliases_raw: String = row.get(3)?;
+        let aliases: Vec<String> =
+            serde_json::from_str(&aliases_raw).unwrap_or_else(|_| Vec::new());
+        let last_mentioned: Option<i64> = row.get(4)?;
+        let mention_count: u32 = row.get(5)?;
         Ok(Person {
             name: row.get(0)?,
             store: row.get(1)?,
             facts: facts_value,
+            aliases,
             last_mentioned: last_mentioned.map(helpers::dt_from_ms),
             mention_count,
         })
@@ -709,6 +713,48 @@ pub(super) fn people(memory: &SqliteMemory, query: &str) -> Result<Vec<Person>> 
     drop(stmt);
     drop(conn);
     Ok(out)
+}
+
+pub(super) fn add_person_alias(memory: &SqliteMemory, name: &str, alias: &str) -> Result<bool> {
+    let alias = alias.trim();
+    if alias.is_empty() {
+        return Ok(false);
+    }
+
+    let conn = memory.conn.lock().expect("memory db mutex poisoned");
+
+    // Read current aliases
+    let current: Option<String> = conn
+        .query_row(
+            "SELECT aliases FROM people WHERE agent_id = ? AND name = ?",
+            params![memory.agent_id, name],
+            |row| row.get(0),
+        )
+        .ok();
+
+    let Some(current_json) = current else {
+        return Ok(false);
+    };
+
+    let mut aliases: Vec<String> =
+        serde_json::from_str(&current_json).unwrap_or_else(|_| Vec::new());
+
+    // Deduplicate case-insensitively
+    let alias_lower = alias.to_lowercase();
+    if aliases.iter().any(|a| a.to_lowercase() == alias_lower) {
+        return Ok(false);
+    }
+
+    aliases.push(alias.to_owned());
+    let new_json = helpers::to_json(&aliases);
+
+    conn.execute(
+        "UPDATE people SET aliases = ? WHERE agent_id = ? AND name = ?",
+        params![new_json, memory.agent_id, name],
+    )?;
+
+    drop(conn);
+    Ok(true)
 }
 
 pub(super) fn summarize_session(

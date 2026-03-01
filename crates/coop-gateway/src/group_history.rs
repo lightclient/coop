@@ -2,9 +2,7 @@ use coop_core::{SessionKey, TrustLevel};
 use std::collections::{HashMap, VecDeque};
 
 pub(crate) struct GroupHistoryEntry {
-    pub sender: String,
     pub body: String,
-    pub timestamp: u64,
 }
 
 pub(crate) struct GroupHistoryBuffer {
@@ -54,12 +52,11 @@ impl GroupHistoryBuffer {
 }
 
 fn format_history(buf: &VecDeque<GroupHistoryEntry>) -> String {
+    // The entry.body already contains `[from DisplayName ... at timestamp]`
+    // from the inbound parser, so we don't wrap it again.
     let mut lines = vec!["[Chat messages since your last reply — for context]".to_owned()];
     for entry in buf {
-        lines.push(format!(
-            "[{} at {}] {}",
-            entry.sender, entry.timestamp, entry.body
-        ));
+        lines.push(entry.body.clone());
     }
     lines.push("[Current message — respond to this]".to_owned());
     lines.join("\n")
@@ -130,11 +127,9 @@ mod tests {
         }
     }
 
-    fn entry(sender: &str, body: &str, ts: u64) -> GroupHistoryEntry {
+    fn entry(_sender: &str, body: &str, _ts: u64) -> GroupHistoryEntry {
         GroupHistoryEntry {
-            sender: sender.to_owned(),
             body: body.to_owned(),
-            timestamp: ts,
         }
     }
 
@@ -142,13 +137,13 @@ mod tests {
     fn record_and_drain_returns_formatted() {
         let mut buf = GroupHistoryBuffer::new();
         let key = session_key("signal:group:dead");
-        buf.record(&key, entry("Alice", "hello", 100), 50);
-        buf.record(&key, entry("Bob", "hi there", 101), 50);
+        buf.record(&key, entry("Alice", "[from Alice at 100]\nhello", 100), 50);
+        buf.record(&key, entry("Bob", "[from Bob at 101]\nhi there", 101), 50);
 
         let ctx = buf.drain_context(&key).unwrap();
         assert!(ctx.contains("[Chat messages since your last reply"));
-        assert!(ctx.contains("[Alice at 100] hello"));
-        assert!(ctx.contains("[Bob at 101] hi there"));
+        assert!(ctx.contains("[from Alice at 100]\nhello"));
+        assert!(ctx.contains("[from Bob at 101]\nhi there"));
         assert!(ctx.contains("[Current message — respond to this]"));
     }
 

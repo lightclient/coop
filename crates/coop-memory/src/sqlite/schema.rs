@@ -175,12 +175,22 @@ pub(super) fn init_schema(conn: &Connection) -> Result<()> {
             name TEXT NOT NULL,
             store TEXT NOT NULL,
             facts TEXT,
+            aliases TEXT NOT NULL DEFAULT '[]',
             last_mentioned INTEGER,
             mention_count INTEGER DEFAULT 0,
             UNIQUE(agent_id, name)
         );
         ",
     )?;
+
+    // Add aliases column to existing people tables (idempotent).
+    let has_aliases: bool = conn
+        .prepare("SELECT 1 FROM pragma_table_info('people') WHERE name = 'aliases'")
+        .and_then(|mut stmt| stmt.exists([]))
+        .unwrap_or(false);
+    if !has_aliases {
+        conn.execute_batch("ALTER TABLE people ADD COLUMN aliases TEXT NOT NULL DEFAULT '[]'")?;
+    }
 
     Ok(())
 }

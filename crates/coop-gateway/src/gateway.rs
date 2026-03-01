@@ -410,7 +410,8 @@ impl Gateway {
             if let SessionKind::Group(_) = &session_key.kind {
                 let cfg = self.config.load();
                 if let Some(group_config) = find_group_config_by_session(session_key, &cfg) {
-                    let intro = build_group_intro(&group_config.trigger, &cfg.agent.id);
+                    let intro =
+                        build_group_intro(&group_config.trigger, &cfg.agent.id, &cfg.users);
                     if let Some(last) = system_prompt.last_mut() {
                         last.push_str("\n\n");
                         last.push_str(&intro);
@@ -1211,9 +1212,7 @@ impl Gateway {
         limit: usize,
     ) {
         let entry = GroupHistoryEntry {
-            sender: msg.sender.clone(),
             body: msg.content.clone(),
-            timestamp: msg.timestamp.timestamp().unsigned_abs(),
         };
         self.group_history
             .lock()
@@ -1401,7 +1400,11 @@ impl Gateway {
     }
 }
 
-fn build_group_intro(trigger: &crate::config::GroupTrigger, _agent_id: &str) -> String {
+fn build_group_intro(
+    trigger: &crate::config::GroupTrigger,
+    agent_id: &str,
+    users: &[crate::config::UserConfig],
+) -> String {
     use crate::config::GroupTrigger;
 
     let activation = match trigger {
@@ -1418,8 +1421,30 @@ fn build_group_intro(trigger: &crate::config::GroupTrigger, _agent_id: &str) -> 
 
     let mut lines = vec![
         "You are replying inside a group chat.".to_owned(),
+        format!(
+            "Your name in this group is \"{agent_id}\". \
+             When a message contains @{agent_id}, the sender is addressing you directly."
+        ),
         format!("Activation: {activation}."),
     ];
+
+    // Participant roster: list coop users who have Signal match patterns.
+    // Bounded by [[users]] config size (typically 2-5), not the people DB.
+    let signal_users: Vec<_> = users
+        .iter()
+        .filter(|u| u.r#match.iter().any(|p| p.starts_with("signal:")))
+        .collect();
+    if !signal_users.is_empty() {
+        let roster: Vec<String> = signal_users
+            .iter()
+            .map(|u| format!("{} (trust:{:?})", u.name, u.trust))
+            .collect();
+        lines.push(format!(
+            "Known participants: {}. \
+             Messages from known participants include a (user:name) tag in the sender header.",
+            roster.join(", ")
+        ));
+    }
 
     if matches!(trigger, GroupTrigger::Always) {
         lines.push(format!(
@@ -1439,7 +1464,12 @@ fn build_group_intro(trigger: &crate::config::GroupTrigger, _agent_id: &str) -> 
          reply only when directly addressed or you can add clear value."
             .to_owned(),
     );
-    lines.push("Address the specific sender noted in the message context.".to_owned());
+    lines.push(
+        "Address the specific sender noted in the message context. \
+         Sender headers show names like \"Alice (user:alice)\" — \
+         use the display name (Alice) when addressing them."
+            .to_owned(),
+    );
 
     lines.join(" ")
 }

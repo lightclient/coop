@@ -26,16 +26,25 @@ pub(crate) enum TriggerDecision {
 
 /// Evaluate non-LLM triggers (always, mention, regex).
 /// For trigger = "llm", the caller must use `Gateway::evaluate_llm_trigger()`.
+///
+/// `agent_id` is the agent's configured name — mention trigger automatically
+/// fires on `@agent_id` without requiring explicit `mention_names` config.
 // TODO: implicit mention on reply-to (requires tracking message timestamps)
 pub(crate) fn evaluate_trigger(
     msg: &InboundMessage,
     group_config: &GroupConfig,
+    agent_id: &str,
 ) -> TriggerDecision {
     match group_config.trigger {
         GroupTrigger::Always => TriggerDecision::Respond,
         GroupTrigger::Mention => {
             let body = strip_envelope_prefix(&msg.content);
             let lower = body.to_lowercase();
+            // Always trigger on @agent_name
+            let agent_mention = format!("@{}", agent_id.to_lowercase());
+            if lower.contains(&agent_mention) {
+                return TriggerDecision::Respond;
+            }
             if group_config
                 .mention_names
                 .iter()
@@ -160,7 +169,7 @@ mod tests {
     fn always_trigger_responds() {
         let msg = make_msg("random chatter");
         assert_eq!(
-            evaluate_trigger(&msg, &always_config()),
+            evaluate_trigger(&msg, &always_config(), "reid"),
             TriggerDecision::Respond
         );
     }
@@ -169,49 +178,64 @@ mod tests {
     fn mention_matches_case_insensitively() {
         let msg = make_msg("Hey COOP, what's up?");
         let cfg = mention_config(&["coop"]);
-        assert_eq!(evaluate_trigger(&msg, &cfg), TriggerDecision::Respond);
+        assert_eq!(
+            evaluate_trigger(&msg, &cfg, "reid"),
+            TriggerDecision::Respond
+        );
     }
 
     #[test]
     fn mention_skips_unrelated() {
         let msg = make_msg("hey everyone, random chatter");
         let cfg = mention_config(&["coop"]);
-        assert_eq!(evaluate_trigger(&msg, &cfg), TriggerDecision::Skip);
+        assert_eq!(evaluate_trigger(&msg, &cfg, "reid"), TriggerDecision::Skip);
     }
 
     #[test]
     fn mention_strips_envelope_prefix() {
         let msg = make_msg("[from alice-uuid in group:dead at 12345] hey coop help me");
         let cfg = mention_config(&["coop"]);
-        assert_eq!(evaluate_trigger(&msg, &cfg), TriggerDecision::Respond);
+        assert_eq!(
+            evaluate_trigger(&msg, &cfg, "reid"),
+            TriggerDecision::Respond
+        );
     }
 
     #[test]
     fn mention_matches_partial_word() {
         let msg = make_msg("@coop please help");
         let cfg = mention_config(&["coop"]);
-        assert_eq!(evaluate_trigger(&msg, &cfg), TriggerDecision::Respond);
+        assert_eq!(
+            evaluate_trigger(&msg, &cfg, "reid"),
+            TriggerDecision::Respond
+        );
     }
 
     #[test]
     fn regex_matches_pattern() {
         let msg = make_msg("!ask what time is it");
         let cfg = regex_config("^!(ask|help)");
-        assert_eq!(evaluate_trigger(&msg, &cfg), TriggerDecision::Respond);
+        assert_eq!(
+            evaluate_trigger(&msg, &cfg, "reid"),
+            TriggerDecision::Respond
+        );
     }
 
     #[test]
     fn regex_skips_non_matching() {
         let msg = make_msg("just chatting");
         let cfg = regex_config("^!(ask|help)");
-        assert_eq!(evaluate_trigger(&msg, &cfg), TriggerDecision::Skip);
+        assert_eq!(evaluate_trigger(&msg, &cfg, "reid"), TriggerDecision::Skip);
     }
 
     #[test]
     fn regex_strips_envelope_prefix() {
         let msg = make_msg("[from alice in group:dead at 123] !ask something");
         let cfg = regex_config("^!(ask|help)");
-        assert_eq!(evaluate_trigger(&msg, &cfg), TriggerDecision::Respond);
+        assert_eq!(
+            evaluate_trigger(&msg, &cfg, "reid"),
+            TriggerDecision::Respond
+        );
     }
 
     #[test]
@@ -245,5 +269,32 @@ mod tests {
     #[test]
     fn strip_envelope_prefix_handles_no_prefix() {
         assert_eq!(strip_envelope_prefix("just a message"), "just a message");
+    }
+
+    #[test]
+    fn mention_auto_triggers_on_agent_name() {
+        let msg = make_msg("hey @reid can you help?");
+        let cfg = mention_config(&[]); // no explicit mention_names
+        assert_eq!(
+            evaluate_trigger(&msg, &cfg, "reid"),
+            TriggerDecision::Respond
+        );
+    }
+
+    #[test]
+    fn mention_auto_trigger_case_insensitive() {
+        let msg = make_msg("@REID what do you think?");
+        let cfg = mention_config(&[]);
+        assert_eq!(
+            evaluate_trigger(&msg, &cfg, "reid"),
+            TriggerDecision::Respond
+        );
+    }
+
+    #[test]
+    fn mention_skips_without_agent_or_config_names() {
+        let msg = make_msg("hey @someone else");
+        let cfg = mention_config(&[]);
+        assert_eq!(evaluate_trigger(&msg, &cfg, "reid"), TriggerDecision::Skip);
     }
 }

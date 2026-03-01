@@ -215,6 +215,21 @@ fn trusted_signal_senders(config: &Config) -> std::collections::HashSet<String> 
         .collect()
 }
 
+/// Extract `(signal_aci, coop_user_name)` pairs for identity resolution.
+#[cfg(feature = "signal")]
+fn signal_user_mappings(config: &Config) -> Vec<(String, String)> {
+    config
+        .users
+        .iter()
+        .flat_map(|u| {
+            u.r#match
+                .iter()
+                .filter_map(|pattern| pattern.strip_prefix("signal:"))
+                .map(|aci| (aci.to_owned(), u.name.clone()))
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // cmd_check — validate config without starting
 // ---------------------------------------------------------------------------
@@ -477,7 +492,17 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
 
             let attachments_dir = workspace.join("attachments");
             let trusted_senders = trusted_signal_senders(&config);
-            match SignalChannel::connect(&db_path, attachments_dir, trusted_senders).await {
+            let agent_name = config.agent.id.clone();
+            let user_mappings = signal_user_mappings(&config);
+            match SignalChannel::connect(
+                &db_path,
+                attachments_dir,
+                trusted_senders,
+                agent_name,
+                user_mappings,
+            )
+            .await
+            {
                 Ok(channel) => {
                     signal_action_tx = Some(channel.action_sender());
                     signal_query_tx = Some(channel.query_sender());

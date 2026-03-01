@@ -166,6 +166,25 @@ impl MemoryToolExecutor {
                     }
                 }),
             ),
+            ToolDef::new(
+                "memory_alias",
+                "Add an alias for a known person. Use when you learn someone's nickname, \
+                 abbreviation, or alternative name. Aliases are searchable via memory_people.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Exact canonical name of the person (as shown in memory_people)"
+                        },
+                        "alias": {
+                            "type": "string",
+                            "description": "The alternative name, nickname, or abbreviation to add"
+                        }
+                    },
+                    "required": ["name", "alias"]
+                }),
+            ),
         ]
     }
 
@@ -524,6 +543,36 @@ impl MemoryToolExecutor {
     }
 
     #[instrument(skip(self, arguments, ctx))]
+    async fn exec_alias(&self, arguments: Value, ctx: &ToolContext) -> Result<ToolOutput> {
+        if ctx.trust > TrustLevel::Inner {
+            return Ok(ToolOutput::error(
+                "memory_alias requires at least inner trust",
+            ));
+        }
+
+        let name = arguments
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let alias = arguments
+            .get("alias")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+
+        if name.is_empty() || alias.is_empty() {
+            return Ok(ToolOutput::error("both name and alias are required"));
+        }
+
+        let added = self.memory.add_person_alias(name, alias).await?;
+        let payload = if added {
+            serde_json::json!({ "status": "added", "person": name, "alias": alias })
+        } else {
+            serde_json::json!({ "status": "no_change", "reason": "person not found or alias already exists" })
+        };
+        Ok(ToolOutput::success(serde_json::to_string_pretty(&payload)?))
+    }
+
+    #[instrument(skip(self, arguments, ctx))]
     async fn exec_sessions(&self, arguments: Value, ctx: &ToolContext) -> Result<ToolOutput> {
         if ctx.trust > TrustLevel::Full {
             return Ok(ToolOutput::success("{\"count\":0,\"sessions\":[]}"));
@@ -556,6 +605,7 @@ impl ToolExecutor for MemoryToolExecutor {
             "memory_write" => self.exec_write(arguments, ctx).await,
             "memory_history" => self.exec_history(arguments, ctx).await,
             "memory_people" => self.exec_people(arguments, ctx).await,
+            "memory_alias" => self.exec_alias(arguments, ctx).await,
             "memory_sessions" => self.exec_sessions(arguments, ctx).await,
             _ => Ok(ToolOutput::error(format!("unknown tool: {name}"))),
         }
