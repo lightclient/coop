@@ -10,7 +10,7 @@ async-trait.workspace = true
 chrono.workspace = true
 coop-core = { version = "0.1.0", path = "../coop-core" }
 hex.workspace = true
-rusqlite = { version = "0.32.1", features = ["bundled"] }
+rusqlite = { version = "0.38.0", features = ["bundled"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10.9"

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use coop_core::InboundMessage;
 use presage::libsignal_service::prelude::Uuid;
+use presage::libsignal_service::protocol::ServiceId;
 use presage::store::{ContentsStore, Thread};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{Instrument, debug, info_span, warn};
@@ -122,7 +123,7 @@ fn signal_target_to_thread(target: &SignalTarget) -> Result<Thread> {
         SignalTarget::Direct(uuid_str) => {
             let uuid =
                 Uuid::parse_str(uuid_str).with_context(|| format!("invalid uuid: {uuid_str}"))?;
-            Ok(Thread::Contact(uuid))
+            Ok(Thread::Contact(ServiceId::Aci(uuid.into())))
         }
         SignalTarget::Group { master_key } => {
             let key: [u8; 32] = master_key

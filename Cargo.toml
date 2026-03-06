@@ -82,10 +82,11 @@ opt-level = 1 # slight optimization for deps reduces monomorphization bloat
 
 [patch.crates-io]
 curve25519-dalek = { git = "https://github.com/signalapp/curve25519-dalek", tag = "signal-curve25519-4.1.3" }
+libsqlite3-sys = { version = "0.36.0", git = "https://github.com/whisperfish/rusqlite", rev = "2a42b3354c9194700d08aa070f70a131a470e7dc" }
 
 [patch."https://github.com/whisperfish/presage"]
-presage = { git = "https://github.com/lightclient/presage", branch = "main" }
-presage-store-sqlite = { git = "https://github.com/lightclient/presage", branch = "main" }
+presage = { git = "https://github.com/lightclient/presage", rev = "3ad97fe285a0e72833e2fb71c44d614eede203f0" }
+presage-store-sqlite = { git = "https://github.com/lightclient/presage", rev = "3ad97fe285a0e72833e2fb71c44d614eede203f0" }
 
 [patch."https://github.com/whisperfish/libsignal-service-rs"]
-libsignal-service = { git = "https://github.com/lightclient/libsignal-service-rs", branch = "main" }
+libsignal-service = { git = "https://github.com/lightclient/libsignal-service-rs", rev = "f76673c8de9e890399862c83ca7205bdecf3e09c" }
