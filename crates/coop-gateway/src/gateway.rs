@@ -3355,4 +3355,150 @@ model = "test-model"
         assert_eq!(usage.cumulative.input_tokens, Some(700));
         assert_eq!(usage.cumulative.output_tokens, Some(140));
     }
+
+    #[derive(Debug)]
+    struct TruncatedToolUseStreamingProvider {
+        model: ModelInfo,
+    }
+
+    impl TruncatedToolUseStreamingProvider {
+        fn new() -> Self {
+            Self {
+                model: ModelInfo {
+                    name: "truncated-tool-stream".into(),
+                    context_limit: 128_000,
+                },
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Provider for TruncatedToolUseStreamingProvider {
+        fn name(&self) -> &'static str {
+            "truncated-tool-stream"
+        }
+
+        fn model_info(&self) -> ModelInfo {
+            self.model.clone()
+        }
+
+        async fn complete(
+            &self,
+            _system: &[String],
+            _messages: &[Message],
+            _tools: &[ToolDef],
+        ) -> Result<(Message, Usage)> {
+            anyhow::bail!("not supported")
+        }
+
+        async fn stream(
+            &self,
+            _system: &[String],
+            _messages: &[Message],
+            _tools: &[ToolDef],
+        ) -> Result<ProviderStream> {
+            let stream = futures::stream::once(async {
+                Err(anyhow::anyhow!(
+                    "Anthropic streamed tool_use for `write_file` ended with invalid/incomplete input_json after max_tokens"
+                ))
+            });
+            Ok(Box::pin(stream))
+        }
+
+        fn supports_streaming(&self) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn trace_does_not_log_missing_required_parameter_after_truncated_tool_stream() {
+        use std::io::BufRead;
+        use tracing_subscriber::fmt::format::FmtSpan;
+        use tracing_subscriber::prelude::*;
+
+        let dir = tempfile::tempdir().unwrap();
+        let trace_file = dir.path().join("traces.jsonl");
+
+        let file_appender = tracing_appender::rolling::never(dir.path(), "traces.jsonl");
+        let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+
+        let jsonl_layer = tracing_subscriber::fmt::layer()
+            .json()
+            .with_writer(non_blocking)
+            .with_span_list(true)
+            .with_file(true)
+            .with_line_number(true)
+            .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
+            .with_filter(tracing_subscriber::EnvFilter::new("debug"));
+
+        let subscriber = tracing_subscriber::Registry::default().with(jsonl_layer);
+        let dispatch = tracing::dispatcher::Dispatch::new(subscriber);
+        let default_guard = tracing::dispatcher::set_default(&dispatch);
+
+        let workspace = test_workspace();
+        let provider: Arc<dyn Provider> = Arc::new(TruncatedToolUseStreamingProvider::new());
+        let executor = Arc::new(DefaultExecutor::new());
+        let gateway = Arc::new(
+            Gateway::new(
+                shared_config(test_config()),
+                workspace.path().to_path_buf(),
+                registry(provider),
+                executor,
+                None,
+                None,
+            )
+            .unwrap(),
+        );
+
+        let session_key = gateway.default_session_key();
+        let (event_tx, mut event_rx) = mpsc::channel(32);
+
+        let result = gateway
+            .run_turn_with_trust(
+                &session_key,
+                "hello",
+                TrustLevel::Full,
+                Some("alice"),
+                None,
+                event_tx,
+            )
+            .await;
+
+        assert!(result.is_ok());
+        let mut saw_error_event = false;
+        while let Ok(event) = event_rx.try_recv() {
+            if matches!(event, TurnEvent::Error(_)) {
+                saw_error_event = true;
+            }
+        }
+        assert!(saw_error_event, "expected turn error event");
+
+        drop(default_guard);
+        drop(guard);
+
+        let file = std::fs::File::open(&trace_file).unwrap();
+        let lines: Vec<String> = std::io::BufReader::new(file)
+            .lines()
+            .map(|line| line.unwrap())
+            .filter(|line| !line.is_empty())
+            .collect();
+
+        let all_text = lines.join("\n");
+        assert!(
+            all_text.contains("provider request failed"),
+            "expected provider failure trace"
+        );
+        assert!(
+            all_text.contains("invalid/incomplete input_json after max_tokens"),
+            "expected truncated tool-call error in trace"
+        );
+        assert!(
+            !all_text.contains("tool execution failed"),
+            "turn trace should not execute a truncated tool call"
+        );
+        assert!(
+            !all_text.contains("missing required parameter"),
+            "turn trace should not report missing required params from a truncated tool call"
+        );
+    }
 }

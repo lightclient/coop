@@ -727,6 +727,16 @@ fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<u64> {
         .ok()
 }
 
+fn parse_streamed_tool_input(json_buf: &str) -> Result<Value> {
+    let input: Value = serde_json::from_str(json_buf)
+        .context("streamed tool_use input_json was invalid or incomplete")?;
+    anyhow::ensure!(
+        input.is_object(),
+        "streamed tool_use input_json must decode to a JSON object"
+    );
+    Ok(input)
+}
+
 #[async_trait]
 impl Provider for AnthropicProvider {
     fn name(&self) -> &'static str {
@@ -956,6 +966,54 @@ where
         }
     }
 
+    fn finish_message(&mut self) -> SseAction {
+        let stop_reason = self.usage.stop_reason.clone();
+        let blocks: Vec<_> = self.blocks.drain(..).collect();
+        let mut msg = Message::assistant();
+
+        for block in blocks {
+            match block {
+                BlockAccumulator::Text(text) => {
+                    if !text.is_empty() {
+                        msg = msg.with_text(text);
+                    }
+                }
+                BlockAccumulator::ToolUse { id, name, json_buf } => {
+                    let coop_name = if self.is_oauth {
+                        name.strip_prefix(TOOL_PREFIX).unwrap_or(&name).to_owned()
+                    } else {
+                        name
+                    };
+
+                    match parse_streamed_tool_input(&json_buf) {
+                        Ok(input) => {
+                            msg = msg.with_tool_request(id, coop_name, input);
+                        }
+                        Err(error) => {
+                            warn!(
+                                tool_id = %id,
+                                tool_name = %coop_name,
+                                stop_reason = %stop_reason.as_deref().unwrap_or("unknown"),
+                                input_json_len = json_buf.len(),
+                                error = %error,
+                                "streamed tool_use input_json parse failed"
+                            );
+
+                            if stop_reason.as_deref() == Some("max_tokens") {
+                                return SseAction::Error(anyhow::anyhow!(
+                                    "Anthropic streamed tool_use for `{coop_name}` ended with invalid/incomplete input_json after max_tokens"
+                                ));
+                            }
+                        }
+                    }
+                }
+                BlockAccumulator::Thinking => {}
+            }
+        }
+
+        SseAction::YieldFinal(msg, self.usage.clone())
+    }
+
     fn handle_event(&mut self, event: SseEvent) -> SseAction {
         match event {
             SseEvent::MessageStart { message } => {
@@ -1021,31 +1079,7 @@ where
                 }
                 SseAction::Continue
             }
-            SseEvent::MessageStop => {
-                let is_oauth = self.is_oauth;
-                let blocks: Vec<_> = self.blocks.drain(..).collect();
-                let mut msg = Message::assistant();
-                for block in blocks {
-                    match block {
-                        BlockAccumulator::Text(text) => {
-                            if !text.is_empty() {
-                                msg = msg.with_text(text);
-                            }
-                        }
-                        BlockAccumulator::ToolUse { id, name, json_buf } => {
-                            let coop_name = if is_oauth {
-                                name.strip_prefix(TOOL_PREFIX).unwrap_or(&name).to_owned()
-                            } else {
-                                name
-                            };
-                            let input: Value = serde_json::from_str(&json_buf).unwrap_or_default();
-                            msg = msg.with_tool_request(id, coop_name, input);
-                        }
-                        BlockAccumulator::Thinking => {}
-                    }
-                }
-                SseAction::YieldFinal(msg, self.usage.clone())
-            }
+            SseEvent::MessageStop => self.finish_message(),
             SseEvent::Error { error } => SseAction::Error(anyhow::anyhow!(
                 "Anthropic SSE error: {} - {}",
                 error.error_type,
@@ -1411,6 +1445,195 @@ mod tests {
         assert_eq!(usage.output_tokens, Some(50));
         assert_eq!(usage.cache_write_tokens, None);
         assert_eq!(usage.cache_read_tokens, None);
+    }
+
+    fn streamed_tool_use_action(
+        tool_name: &str,
+        partial_json: &str,
+        stop_reason: Option<&str>,
+        is_oauth: bool,
+    ) -> SseAction {
+        let byte_stream = futures::stream::empty::<Result<bytes::Bytes, reqwest::Error>>();
+        let mut state = SseState::new(byte_stream, is_oauth);
+
+        assert!(matches!(
+            state.handle_event(SseEvent::MessageStart {
+                message: SseMessageStart {
+                    usage: Some(SseMessageStartUsage {
+                        input_tokens: 1,
+                        output_tokens: Some(0),
+                        cache_creation_input_tokens: None,
+                        cache_read_input_tokens: None,
+                    }),
+                },
+            }),
+            SseAction::Continue
+        ));
+
+        assert!(matches!(
+            state.handle_event(SseEvent::ContentBlockStart {
+                index: 0,
+                content_block: SseContentBlock::ToolUse {
+                    id: "toolu_test".into(),
+                    name: tool_name.into(),
+                },
+            }),
+            SseAction::Continue
+        ));
+
+        assert!(matches!(
+            state.handle_event(SseEvent::ContentBlockDelta {
+                index: 0,
+                delta: SseDelta::InputJson {
+                    partial_json: partial_json.into(),
+                },
+            }),
+            SseAction::Continue
+        ));
+
+        if let Some(stop_reason) = stop_reason {
+            assert!(matches!(
+                state.handle_event(SseEvent::MessageDelta {
+                    delta: SseMessageDeltaDelta {
+                        stop_reason: Some(stop_reason.into()),
+                    },
+                    usage: SseMessageDeltaUsage {
+                        output_tokens: Some(8192),
+                        cache_creation_input_tokens: None,
+                        cache_read_input_tokens: None,
+                    },
+                }),
+                SseAction::Continue
+            ));
+        }
+
+        state.handle_event(SseEvent::MessageStop)
+    }
+
+    #[test]
+    fn streamed_tool_use_errors_on_truncated_write_file_json_at_max_tokens() {
+        let action = streamed_tool_use_action(
+            "write_file",
+            r#"{"path":"notes/todo.txt","content":"hello""#,
+            Some("max_tokens"),
+            false,
+        );
+
+        let SseAction::Error(error) = action else {
+            panic!("expected provider error for truncated write_file JSON");
+        };
+        let error_text = error.to_string();
+        assert!(error_text.contains("write_file"));
+        assert!(error_text.contains("max_tokens"));
+    }
+
+    #[test]
+    fn streamed_tool_use_errors_on_truncated_oauth_bash_json_at_max_tokens() {
+        let action = streamed_tool_use_action(
+            "mcp_bash",
+            r#"{"command":"echo hello","timeout":30"#,
+            Some("max_tokens"),
+            true,
+        );
+
+        let SseAction::Error(error) = action else {
+            panic!("expected provider error for truncated bash JSON");
+        };
+        let error_text = error.to_string();
+        assert!(error_text.contains("bash"));
+        assert!(error_text.contains("max_tokens"));
+    }
+
+    #[test]
+    fn streamed_tool_use_skips_invalid_json_without_emitting_empty_object() {
+        let action = streamed_tool_use_action(
+            "write_file",
+            r#"{"path":"notes/todo.txt","content":"hello""#,
+            None,
+            false,
+        );
+
+        let SseAction::YieldFinal(message, usage) = action else {
+            panic!("expected final message when stop_reason is not max_tokens");
+        };
+        assert!(!message.has_tool_requests());
+        assert!(message.tool_requests().is_empty());
+        assert!(message.text().is_empty());
+        assert_eq!(usage.stop_reason, None);
+    }
+
+    #[test]
+    fn streamed_tool_use_keeps_valid_json_object_arguments() {
+        let action = streamed_tool_use_action(
+            "write_file",
+            r#"{"path":"notes/todo.txt","content":"hello"}"#,
+            Some("tool_use"),
+            false,
+        );
+
+        let SseAction::YieldFinal(message, usage) = action else {
+            panic!("expected final message");
+        };
+        let tool_requests = message.tool_requests();
+        assert_eq!(tool_requests.len(), 1);
+        assert_eq!(tool_requests[0].name, "write_file");
+        assert_eq!(
+            tool_requests[0].arguments,
+            json!({"path": "notes/todo.txt", "content": "hello"})
+        );
+        assert_eq!(usage.stop_reason.as_deref(), Some("tool_use"));
+    }
+
+    #[test]
+    fn streamed_tool_use_parse_failure_is_traced() {
+        use std::fs::OpenOptions;
+        use std::time::{SystemTime, UNIX_EPOCH};
+        use tracing_subscriber::fmt::format::FmtSpan;
+        use tracing_subscriber::prelude::*;
+
+        let trace_path = std::env::temp_dir().join(format!(
+            "coop-agent-streamed-tool-use-{}.jsonl",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+
+        let writer_path = trace_path.clone();
+        let layer = tracing_subscriber::fmt::layer()
+            .json()
+            .with_writer(move || {
+                OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&writer_path)
+                    .unwrap()
+            })
+            .with_span_list(true)
+            .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
+            .with_file(true)
+            .with_line_number(true)
+            .with_filter(tracing_subscriber::EnvFilter::new("debug"));
+
+        std::fs::File::create(&trace_path).unwrap();
+
+        let subscriber = tracing_subscriber::Registry::default().with(layer);
+        tracing::subscriber::with_default(subscriber, || {
+            let action = streamed_tool_use_action(
+                "write_file",
+                r#"{"path":"notes/todo.txt","content":"hello""#,
+                Some("max_tokens"),
+                false,
+            );
+            assert!(matches!(action, SseAction::Error(_)));
+        });
+
+        let trace = std::fs::read_to_string(&trace_path).unwrap();
+        let _ = std::fs::remove_file(&trace_path);
+
+        assert!(trace.contains("streamed tool_use input_json parse failed"));
+        assert!(trace.contains("write_file"));
+        assert!(trace.contains("max_tokens"));
     }
 
     #[test]
