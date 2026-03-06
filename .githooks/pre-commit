@@ -9,7 +9,8 @@ if ! cargo fmt --all -- --check 2>/dev/null; then
 fi
 
 if command -v taplo &>/dev/null; then
-    if ! taplo fmt --check 2>/dev/null; then
+    mapfile -t toml_files < <(git ls-files '*.toml')
+    if ((${#toml_files[@]} > 0)) && ! taplo fmt --check "${toml_files[@]}" 2>/dev/null; then
         echo "❌ taplo fmt check failed. Run 'taplo fmt' to fix."
         exit 1
     fi
