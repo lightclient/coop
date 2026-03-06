@@ -30,9 +30,6 @@ static CONTAINER_REGISTRY: std::sync::LazyLock<Mutex<HashMap<String, ContainerIn
 #[derive(Debug, Clone)]
 struct ContainerInfo {
     id: String,
-    /// Workspace path that was mounted in this container.
-    /// Used to validate workspace matches when reusing containers.
-    workspace: String,
     last_used: std::time::Instant,
     user_name: Option<String>,
     user_trust: Option<coop_core::TrustLevel>,
@@ -84,7 +81,6 @@ fn container_name(workspace: &std::path::Path) -> String {
 /// Insert or update the in-memory container registry entry.
 fn register_container(
     name: &str,
-    policy: &SandboxPolicy,
     user_name: Option<&str>,
     user_trust: Option<coop_core::TrustLevel>,
 ) {
@@ -102,7 +98,6 @@ fn register_container(
         })
         .or_insert_with(|| ContainerInfo {
             id: name.to_owned(),
-            workspace: policy.workspace.display().to_string(),
             last_used: std::time::Instant::now(),
             user_name: user_name.map(|s| s.to_string()),
             user_trust,
@@ -140,7 +135,7 @@ async fn ensure_container(
     if let Ok(status) = probe
         && status.success()
     {
-        register_container(&name, policy, user_name, user_trust);
+        register_container(&name, user_name, user_trust);
         info!(container = %name, workspace = %policy.workspace.display(), "reusing running container");
         return Ok(name);
     }
@@ -156,7 +151,7 @@ async fn ensure_container(
     if let Ok(status) = start
         && status.success()
     {
-        register_container(&name, policy, user_name, user_trust);
+        register_container(&name, user_name, user_trust);
         info!(container = %name, workspace = %policy.workspace.display(), "started and reusing stopped container");
         return Ok(name);
     }
@@ -202,7 +197,7 @@ async fn ensure_container(
                 .status()
                 .await;
 
-            register_container(&name, policy, user_name, user_trust);
+            register_container(&name, user_name, user_trust);
             info!(container = %name, workspace = %policy.workspace.display(), "reused existing container after create conflict");
             return Ok(name);
         }
@@ -239,7 +234,7 @@ async fn ensure_container(
         info!(container = %name, "development tools installed successfully");
     }
 
-    register_container(&name, policy, user_name, user_trust);
+    register_container(&name, user_name, user_trust);
     info!(container = %name, workspace = %policy.workspace.display(), "created new long-lived container");
     Ok(name)
 }
