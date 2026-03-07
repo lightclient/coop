@@ -1,5 +1,8 @@
 #[allow(clippy::unwrap_used)]
 #[cfg(test)]
+mod attachment_rewrite_tests;
+#[allow(clippy::unwrap_used)]
+#[cfg(test)]
 mod image_ext_tests;
 mod inbound;
 pub(crate) mod name_resolver;
@@ -944,75 +947,138 @@ async fn download_and_rewrite_attachments(
         return;
     }
 
-    for pointer in pointers {
+    let mut original_metas = Vec::with_capacity(pointers.len());
+    let mut replacements = Vec::with_capacity(pointers.len());
+
+    for (index, pointer) in pointers.iter().enumerate() {
+        let attachment_index = index + 1;
         let original_meta = format_attachment_metadata(pointer);
         let file_name = pointer.file_name.as_deref().unwrap_or("unnamed");
 
-        // Check declared size before downloading
-        if let Some(size) = pointer.size
+        let replacement = if let Some(size) = pointer.size
             && size as usize > MAX_ATTACHMENT_BYTES
         {
             warn!(
+                attachment_index,
                 file_name,
                 declared_size = size,
                 max = MAX_ATTACHMENT_BYTES,
                 "attachment too large, skipping download"
             );
             let max = MAX_ATTACHMENT_BYTES;
-            let replacement = format!(
-                "{original_meta}\n[skipped: file too large ({size} bytes, max {max} bytes)]"
+            format!("{original_meta}\n[skipped: file too large ({size} bytes, max {max} bytes)]")
+        } else {
+            let save_name = attachment_save_name(
+                timestamp,
+                attachment_index,
+                file_name,
+                pointer.content_type.as_deref(),
             );
-            inbound.content = inbound.content.replace(&original_meta, &replacement);
-            continue;
-        }
+            let save_path = attachments_dir.join(&save_name);
 
-        let sanitized = sanitize_filename(file_name);
-        let save_name = format!("{timestamp}_{sanitized}");
-        let save_name = ensure_media_extension(&save_name, pointer.content_type.as_deref());
-        let save_path = attachments_dir.join(&save_name);
-
-        match manager.get_attachment(pointer).await {
-            Ok(data) => {
-                if data.len() > MAX_ATTACHMENT_BYTES {
-                    let actual_size = data.len();
-                    let max = MAX_ATTACHMENT_BYTES;
-                    warn!(
-                        file_name,
-                        actual_size, max, "downloaded attachment too large, discarding"
-                    );
-                    let replacement = format!(
-                        "{original_meta}\n[skipped: file too large ({actual_size} bytes, max {max} bytes)]"
-                    );
-                    inbound.content = inbound.content.replace(&original_meta, &replacement);
-                    continue;
-                }
-
-                match std::fs::write(&save_path, &data) {
-                    Ok(()) => {
-                        info!(
-                            path = %save_path.display(),
-                            size = data.len(),
+            match manager.get_attachment(pointer).await {
+                Ok(data) => {
+                    if data.len() > MAX_ATTACHMENT_BYTES {
+                        let actual_size = data.len();
+                        let max = MAX_ATTACHMENT_BYTES;
+                        warn!(
+                            attachment_index,
                             file_name,
-                            "saved signal attachment"
+                            actual_size,
+                            max,
+                            "downloaded attachment too large, discarding"
                         );
-                        let replacement =
-                            format!("{original_meta}\n[file saved: {}]", save_path.display());
-                        inbound.content = inbound.content.replace(&original_meta, &replacement);
-                    }
-                    Err(e) => {
-                        warn!(error = %e, path = %save_path.display(), "failed to write attachment");
-                        let replacement = format!("{original_meta}\n[file save failed: {e}]");
-                        inbound.content = inbound.content.replace(&original_meta, &replacement);
+                        format!(
+                            "{original_meta}\n[skipped: file too large ({actual_size} bytes, max {max} bytes)]"
+                        )
+                    } else {
+                        match std::fs::write(&save_path, &data) {
+                            Ok(()) => {
+                                info!(
+                                    attachment_index,
+                                    path = %save_path.display(),
+                                    size = data.len(),
+                                    file_name,
+                                    "saved signal attachment"
+                                );
+                                format!("{original_meta}\n[file saved: {}]", save_path.display())
+                            }
+                            Err(e) => {
+                                warn!(
+                                    attachment_index,
+                                    error = %e,
+                                    path = %save_path.display(),
+                                    "failed to write attachment"
+                                );
+                                format!("{original_meta}\n[file save failed: {e}]")
+                            }
+                        }
                     }
                 }
+                Err(e) => {
+                    warn!(
+                        attachment_index,
+                        error = %e,
+                        file_name,
+                        "failed to download signal attachment"
+                    );
+                    format!("{original_meta}\n[download failed: {e}]")
+                }
             }
-            Err(e) => {
-                warn!(error = %e, file_name, "failed to download signal attachment");
-                let replacement = format!("{original_meta}\n[download failed: {e}]");
-                inbound.content = inbound.content.replace(&original_meta, &replacement);
-            }
+        };
+
+        original_metas.push(original_meta);
+        replacements.push(replacement);
+    }
+
+    inbound.content = rewrite_attachment_lines(&inbound.content, &original_metas, &replacements);
+}
+
+fn attachment_save_name(
+    timestamp: u64,
+    attachment_index: usize,
+    file_name: &str,
+    content_type: Option<&str>,
+) -> String {
+    let sanitized = sanitize_filename(file_name);
+    let base_name = format!("{timestamp}_{attachment_index:03}_{sanitized}");
+    ensure_media_extension(&base_name, content_type)
+}
+
+fn rewrite_attachment_lines(
+    content: &str,
+    originals: &[String],
+    replacements: &[String],
+) -> String {
+    debug_assert_eq!(originals.len(), replacements.len());
+
+    let mut rewritten = Vec::new();
+    let mut attachment_index = 0usize;
+
+    for line in content.lines() {
+        if let Some(original) = originals.get(attachment_index)
+            && line == original
+        {
+            rewritten.extend(
+                replacements[attachment_index]
+                    .lines()
+                    .map(ToOwned::to_owned),
+            );
+            attachment_index += 1;
+        } else {
+            rewritten.push(line.to_owned());
         }
     }
+
+    if attachment_index != originals.len() {
+        warn!(
+            matched_attachment_lines = attachment_index,
+            expected_attachment_lines = originals.len(),
+            "failed to rewrite all signal attachment lines"
+        );
+    }
+
+    rewritten.join("\n")
 }
 
 /// Append a file extension when the filename lacks one and the content-type
