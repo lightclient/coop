@@ -8,25 +8,14 @@ pub(crate) fn resolve_trust(user_trust: TrustLevel, situation_ceiling: TrustLeve
     std::cmp::max(user_trust, situation_ceiling)
 }
 
-/// Memory stores accessible at a given trust level.
-#[allow(dead_code)]
-pub(crate) fn accessible_stores(trust: TrustLevel) -> Vec<&'static str> {
-    match trust {
-        TrustLevel::Owner | TrustLevel::Full => vec!["private", "shared", "social"],
-        TrustLevel::Inner => vec!["shared", "social"],
-        TrustLevel::Familiar => vec!["social"],
-        TrustLevel::Public => vec![],
-    }
-}
-
 #[allow(clippy::unwrap_used)]
 #[cfg(test)]
 mod tests {
     use super::*;
+    use coop_memory::accessible_stores;
 
     #[test]
     fn owner_in_dm_gets_owner() {
-        // DM ceiling is Owner (most permissive non-group context)
         assert_eq!(
             resolve_trust(TrustLevel::Owner, TrustLevel::Owner),
             TrustLevel::Owner
@@ -109,7 +98,11 @@ mod tests {
     fn accessible_stores_full() {
         assert_eq!(
             accessible_stores(TrustLevel::Full),
-            vec!["private", "shared", "social"]
+            vec![
+                "private".to_owned(),
+                "shared".to_owned(),
+                "social".to_owned(),
+            ]
         );
     }
 

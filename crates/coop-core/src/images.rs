@@ -52,66 +52,6 @@ pub fn validate_image_magic(bytes: &[u8]) -> Option<String> {
     None
 }
 
-/// Detect media type from file header bytes for audio and video formats.
-///
-/// Returns the MIME type if recognized, or `None` for unknown formats.
-pub fn detect_media_magic(bytes: &[u8]) -> Option<String> {
-    // Try image first
-    if let Some(mime) = validate_image_magic(bytes) {
-        return Some(mime);
-    }
-    if bytes.len() < 12 {
-        return None;
-    }
-    // OGG: audio/ogg or video/ogg
-    if bytes.starts_with(b"OggS") {
-        return Some("audio/ogg".to_owned());
-    }
-    // MP3: ID3 tag or MPEG sync word
-    if bytes.starts_with(b"ID3") || (bytes[0] == 0xFF && (bytes[1] & 0xE0) == 0xE0) {
-        return Some("audio/mpeg".to_owned());
-    }
-    // FLAC
-    if bytes.starts_with(b"fLaC") {
-        return Some("audio/flac".to_owned());
-    }
-    // WAV (RIFF + WAVE)
-    if bytes.starts_with(b"RIFF") && bytes.len() >= 12 && &bytes[8..12] == b"WAVE" {
-        return Some("audio/wav".to_owned());
-    }
-    // MP4/M4A/MOV: ISO BMFF container with 'ftyp'
-    if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" {
-        let brand = &bytes[8..12];
-        // Audio-specific brands
-        if brand == b"M4A " || brand == b"M4B " {
-            return Some("audio/mp4".to_owned());
-        }
-        // Video brands
-        if brand == b"isom"
-            || brand == b"mp41"
-            || brand == b"mp42"
-            || brand == b"avc1"
-            || brand == b"iso5"
-            || brand == b"iso6"
-            || brand == b"dash"
-        {
-            return Some("video/mp4".to_owned());
-        }
-        if brand == b"qt  " {
-            return Some("video/quicktime".to_owned());
-        }
-        // HEIC/HEIF image (can't be API-injected but gets correct extension)
-        if brand == b"heic" || brand == b"heix" || brand == b"hevc" || brand == b"mif1" {
-            return Some("image/heic".to_owned());
-        }
-    }
-    // PDF
-    if bytes.starts_with(b"%PDF") {
-        return Some("application/pdf".to_owned());
-    }
-    None
-}
-
 /// Maximum file size we'll read for image injection (20 MB raw).
 /// Files larger than this are skipped to avoid excessive memory usage.
 /// The provider layer handles further downsizing to API limits (5 MB).

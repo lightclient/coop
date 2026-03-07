@@ -2,7 +2,6 @@
 pub mod signal;
 #[cfg(feature = "signal")]
 pub mod signal_tools;
-pub mod terminal;
 
 #[cfg(feature = "signal")]
 pub use signal::{
@@ -10,4 +9,3 @@ pub use signal::{
 };
 #[cfg(feature = "signal")]
 pub use signal_tools::SignalToolExecutor;
-pub use terminal::TerminalChannel;

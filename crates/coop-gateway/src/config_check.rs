@@ -47,7 +47,6 @@ impl CheckReport {
             .any(|r| r.severity == Severity::Error && !r.passed)
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn has_warnings(&self) -> bool {
         self.results
             .iter()
@@ -824,8 +823,9 @@ fn check_users(report: &mut CheckReport, config: &Config) {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn check_groups(report: &mut CheckReport, config: &Config) {
-    use crate::config::GroupTrigger;
+    use crate::config::{GroupTrigger, TrustCeiling};
     use std::collections::HashSet;
 
     if config.groups.is_empty() {
@@ -908,6 +908,15 @@ fn check_groups(report: &mut CheckReport, config: &Config) {
                 message: format!(
                     "groups[{i}]: default_trust='owner' grants owner trust to unknown senders"
                 ),
+            });
+        }
+
+        if group.trust_ceiling == TrustCeiling::MinMember {
+            report.push(CheckResult {
+                name: "groups",
+                severity: Severity::Error,
+                passed: false,
+                message: format!("groups[{i}]: trust_ceiling='min_member' is not supported yet"),
             });
         }
     }
@@ -1938,6 +1947,20 @@ mod tests {
                 && r.message.contains("owner trust")
         });
         assert!(check.is_some(), "owner default_trust should warn");
+    }
+
+    #[test]
+    fn test_group_min_member_trust_ceiling_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = write_config_with_groups(
+            dir.path(),
+            "[[groups]]\nmatch = [\"signal:group:aabb\"]\ntrigger = \"always\"\ntrust_ceiling = \"min_member\"\n",
+        );
+        let report = validate_config(&config_path, dir.path());
+        let check = report.results.iter().find(|r| {
+            r.name == "groups" && r.severity == Severity::Error && r.message.contains("min_member")
+        });
+        assert!(check.is_some(), "min_member trust_ceiling should fail");
     }
 
     #[test]

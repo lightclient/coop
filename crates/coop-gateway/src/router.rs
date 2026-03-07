@@ -10,6 +10,7 @@ use std::sync::Arc;
 use crate::config::{Config, GroupConfig, GroupTrigger, SharedConfig, TrustCeiling};
 use crate::gateway::Gateway;
 use crate::group_trigger::{self, TriggerDecision};
+#[cfg(test)]
 use crate::injection::SessionInjection;
 use crate::trust::resolve_trust;
 
@@ -42,12 +43,12 @@ impl MessageRouter {
         route_message(msg, &self.config.load())
     }
 
-    #[allow(dead_code)]
+    #[cfg(feature = "signal")]
     pub(crate) fn session_is_empty(&self, session_key: &SessionKey) -> bool {
         self.gateway.session_is_empty(session_key)
     }
 
-    #[allow(dead_code)]
+    #[cfg(feature = "signal")]
     pub(crate) fn seed_signal_history(&self, session_key: &SessionKey, history: &[InboundMessage]) {
         self.gateway.seed_signal_history(session_key, history);
     }
@@ -89,7 +90,7 @@ impl MessageRouter {
         self.dispatch_inner(msg, event_tx, None).await
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) async fn dispatch_injection(
         &self,
         injection: &SessionInjection,
@@ -378,7 +379,7 @@ impl MessageRouter {
         }
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) async fn dispatch_collect_text(
         &self,
         msg: &InboundMessage,
@@ -439,7 +440,7 @@ impl MessageRouter {
         Ok((decision, text))
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) async fn inject_collect_text(
         &self,
         injection: &SessionInjection,
@@ -560,8 +561,9 @@ pub(crate) fn route_message(msg: &InboundMessage, config: &Config) -> RouteDecis
     let ceiling = if group_context {
         match group_config.map(|gc| &gc.trust_ceiling) {
             Some(TrustCeiling::Fixed(level)) => *level,
-            // min_member requires async query; None/wildcard = no ceiling.
-            // Resolved later in dispatch for min_member.
+            // `min_member` is rejected by config validation until group member
+            // lookup support lands. If validation was bypassed, treat it like
+            // no extra ceiling rather than guessing.
             _ => TrustLevel::Owner,
         }
     } else {
@@ -1364,7 +1366,7 @@ match = ["signal:bob-uuid"]
             trust: TrustLevel::Full,
             user_name: Some("alice".to_owned()),
             prompt_channel: Some("signal".to_owned()),
-            source: InjectionSource::Cron("heartbeat".to_owned()),
+            source: InjectionSource::Cron,
         };
 
         let (decision, response) = router.inject_collect_text(&injection).await.unwrap();
@@ -1443,7 +1445,7 @@ match = ["signal:bob-uuid"]
             trust: TrustLevel::Full,
             user_name: Some("alice".to_owned()),
             prompt_channel: Some("signal".to_owned()),
-            source: InjectionSource::Cron("heartbeat".to_owned()),
+            source: InjectionSource::Cron,
         };
 
         let result = router.inject_collect_text(&injection).await;

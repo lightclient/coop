@@ -73,65 +73,6 @@ pub fn visible_width(s: &str) -> usize {
     width
 }
 
-/// Truncate a string to fit within `max_width` visible columns.
-/// ANSI-aware: escape sequences don't count toward width.
-#[allow(clippy::unwrap_used)] // chars.next() after chars.peek() is always Some
-pub fn truncate_to_width(s: &str, max_width: usize) -> String {
-    let mut result = String::new();
-    let mut current_width = 0;
-    let mut chars = s.chars().peekable();
-
-    while let Some(c) = chars.next() {
-        if c == '\x1b' {
-            // Copy entire ANSI escape sequence
-            result.push(c);
-            if let Some(&next) = chars.peek() {
-                match next {
-                    '[' => {
-                        result.push(chars.next().unwrap());
-                        while let Some(&ch) = chars.peek() {
-                            result.push(chars.next().unwrap());
-                            if ch.is_ascii_alphabetic()
-                                || ch == 'm'
-                                || ch == 'G'
-                                || ch == 'K'
-                                || ch == 'H'
-                                || ch == 'J'
-                            {
-                                break;
-                            }
-                        }
-                    }
-                    ']' | '_' => {
-                        result.push(chars.next().unwrap());
-                        while let Some(&ch) = chars.peek() {
-                            result.push(chars.next().unwrap());
-                            if ch == '\x07' {
-                                break;
-                            }
-                            if ch == '\x1b' {
-                                if chars.peek() == Some(&'\\') {
-                                    result.push(chars.next().unwrap());
-                                }
-                                break;
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        } else {
-            let w = UnicodeWidthChar::width(c).unwrap_or(0);
-            if current_width + w > max_width {
-                break;
-            }
-            result.push(c);
-            current_width += w;
-        }
-    }
-    result
-}
-
 /// Word-wrap text preserving ANSI escape sequences.
 /// Returns lines each ≤ `width` visible characters.
 pub fn wrap_text_with_ansi(text: &str, width: usize) -> Vec<String> {
@@ -351,24 +292,9 @@ pub fn fg_rgb(r: u8, g: u8, b: u8, text: &str) -> String {
     format!("\x1b[38;2;{r};{g};{b}m{text}\x1b[0m")
 }
 
-/// Wrap text in 24-bit background color.
-pub fn bg_rgb(r: u8, g: u8, b: u8, text: &str) -> String {
-    format!("\x1b[48;2;{r};{g};{b}m{text}\x1b[0m")
-}
-
 /// Bold text.
 pub fn bold(text: &str) -> String {
     format!("\x1b[1m{text}\x1b[0m")
-}
-
-/// Italic text.
-pub fn italic(text: &str) -> String {
-    format!("\x1b[3m{text}\x1b[0m")
-}
-
-/// Inverse video text.
-pub fn inverse(text: &str) -> String {
-    format!("\x1b[7m{text}\x1b[0m")
 }
 
 /// Pad a line to exactly `width` visible characters with spaces.
@@ -407,19 +333,6 @@ mod tests {
     fn visible_width_with_ansi() {
         assert_eq!(visible_width("\x1b[31mhello\x1b[0m"), 5);
         assert_eq!(visible_width("\x1b[38;2;128;128;128mtest\x1b[0m"), 4);
-    }
-
-    #[test]
-    fn truncate_plain() {
-        assert_eq!(truncate_to_width("hello world", 5), "hello");
-    }
-
-    #[test]
-    fn truncate_with_ansi() {
-        let s = "\x1b[31mhello world\x1b[0m";
-        let t = truncate_to_width(s, 5);
-        assert_eq!(visible_width(&t), 5);
-        assert!(t.contains("\x1b[31m"));
     }
 
     #[test]

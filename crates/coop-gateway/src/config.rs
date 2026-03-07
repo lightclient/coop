@@ -81,7 +81,6 @@ pub(crate) struct UserConfig {
 // Group config
 // ---------------------------------------------------------------------------
 
-#[allow(dead_code)]
 pub(crate) const DEFAULT_TRIGGER_MODEL: &str = "claude-haiku-3-5-20241022";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

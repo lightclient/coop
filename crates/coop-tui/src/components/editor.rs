@@ -38,14 +38,6 @@ impl Editor {
         }
     }
 
-    pub fn set_border_color(&mut self, color: (u8, u8, u8)) {
-        self.border_color = color;
-    }
-
-    pub fn set_focused(&mut self, focused: bool) {
-        self.focused = focused;
-    }
-
     pub fn set_max_visible_lines(&mut self, max: usize) {
         self.max_visible_lines = max.max(1);
     }
@@ -149,12 +141,6 @@ impl Editor {
 
     pub fn cursor_end(&mut self) {
         self.cursor_col = self.lines[self.cursor_line].len();
-    }
-
-    pub fn take_text(&mut self) -> String {
-        let text = self.text();
-        self.clear();
-        text
     }
 
     fn border_color_str(&self, text: &str) -> String {

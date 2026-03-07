@@ -14,8 +14,6 @@ pub struct MarkdownComponent {
     padding_x: usize,
     padding_y: usize,
     bg_color: Option<(u8, u8, u8)>,
-    text_color: Option<(u8, u8, u8)>,
-    is_italic: bool,
 }
 
 impl MarkdownComponent {
@@ -25,26 +23,12 @@ impl MarkdownComponent {
             padding_x,
             padding_y,
             bg_color: None,
-            text_color: None,
-            is_italic: false,
         }
     }
 
     #[must_use]
     pub fn with_bg(mut self, r: u8, g: u8, b: u8) -> Self {
         self.bg_color = Some((r, g, b));
-        self
-    }
-
-    #[must_use]
-    pub fn with_text_color(mut self, r: u8, g: u8, b: u8) -> Self {
-        self.text_color = Some((r, g, b));
-        self
-    }
-
-    #[must_use]
-    pub fn with_italic(mut self, italic: bool) -> Self {
-        self.is_italic = italic;
         self
     }
 
@@ -62,7 +46,7 @@ impl Component for MarkdownComponent {
         let content_width = width.saturating_sub(self.padding_x * 2).max(1);
         let normalized = self.text.replace('\t', "   ");
 
-        let rendered_lines = render_markdown_to_lines(&normalized, self.text_color, self.is_italic);
+        let rendered_lines = render_markdown_to_lines(&normalized);
 
         let mut wrapped = Vec::new();
         for line in &rendered_lines {
@@ -102,11 +86,7 @@ impl Component for MarkdownComponent {
 
 /// Render markdown text to styled terminal lines.
 #[allow(clippy::too_many_lines)]
-fn render_markdown_to_lines(
-    text: &str,
-    text_color: Option<(u8, u8, u8)>,
-    is_italic: bool,
-) -> Vec<String> {
+fn render_markdown_to_lines(text: &str) -> Vec<String> {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_STRIKETHROUGH);
 
@@ -114,7 +94,6 @@ fn render_markdown_to_lines(
     let mut lines = Vec::new();
     let mut current_line = String::new();
     let mut in_code_block = false;
-    let mut in_heading = false;
     let mut list_depth: usize = 0;
     let mut first_paragraph = true;
 
@@ -125,7 +104,6 @@ fn render_markdown_to_lines(
                     if !current_line.is_empty() || !lines.is_empty() {
                         flush_line(&mut current_line, &mut lines);
                     }
-                    in_heading = true;
                     let prefix = "#".repeat(level as usize);
                     current_line
                         .push_str(&theme::fg(theme::MD_HEADING, &format!("\x1b[1m{prefix} ")));
@@ -167,7 +145,6 @@ fn render_markdown_to_lines(
                 TagEnd::Heading(_) => {
                     current_line.push_str("\x1b[0m");
                     flush_line(&mut current_line, &mut lines);
-                    in_heading = false;
                 }
                 TagEnd::CodeBlock => {
                     lines.push(theme::fg(theme::MD_CODE_BLOCK_BORDER, "───"));
@@ -192,12 +169,6 @@ fn render_markdown_to_lines(
             Event::Text(text) => {
                 let styled = if in_code_block {
                     theme::fg(theme::MD_CODE_BLOCK, &text)
-                } else if in_heading {
-                    text.to_string()
-                } else if let Some(color) = text_color {
-                    theme::fg(color, &text)
-                } else if is_italic {
-                    format!("\x1b[3m{text}\x1b[23m")
                 } else {
                     text.to_string()
                 };

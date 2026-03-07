@@ -78,8 +78,7 @@ pub(crate) fn evaluate_trigger(
 }
 
 /// Check if assistant output is the silent reply token.
-/// Used by signal_loop (cfg=signal) — allow dead_code for non-signal builds.
-#[allow(dead_code)]
+#[cfg(any(test, feature = "signal"))]
 pub(crate) fn is_silent_reply(text: &str) -> bool {
     let trimmed = text.trim();
     trimmed == SILENT_REPLY_TOKEN

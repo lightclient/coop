@@ -18,7 +18,7 @@ use uuid::Uuid;
 use crate::compaction::{self, CompactionState};
 use crate::compaction_store::CompactionStore;
 use crate::config::{SharedConfig, find_group_config_by_session};
-use crate::group_history::{GroupCeilingCache, GroupHistoryBuffer, GroupHistoryEntry};
+use crate::group_history::{GroupHistoryBuffer, GroupHistoryEntry};
 use crate::group_trigger::{self, SILENT_REPLY_TOKEN};
 use crate::memory_auto_capture;
 use crate::memory_prompt_index;
@@ -46,10 +46,6 @@ pub(crate) struct Gateway {
     session_turn_locks: Mutex<HashMap<SessionKey, Arc<tokio::sync::Mutex<()>>>>,
     /// Per-group-session pending message buffer for non-triggering messages.
     group_history: Mutex<GroupHistoryBuffer>,
-    /// Cached group membership ceilings (revision-based invalidation).
-    /// Used by `min_member` trust ceiling mode (wired up when Signal GroupMembers query lands).
-    #[allow(dead_code)]
-    group_ceiling_cache: Mutex<GroupCeilingCache>,
 }
 
 /// Tracks cumulative token usage and context size for a session.
@@ -181,7 +177,6 @@ impl Gateway {
             active_turns: Mutex::new(HashMap::new()),
             session_turn_locks: Mutex::new(HashMap::new()),
             group_history: Mutex::new(GroupHistoryBuffer::new()),
-            group_ceiling_cache: Mutex::new(GroupCeilingCache::new()),
         })
     }
 
@@ -824,6 +819,10 @@ impl Gateway {
             .lock()
             .expect("sessions mutex poisoned")
             .remove(session_key);
+        self.group_history
+            .lock()
+            .expect("group_history mutex poisoned")
+            .clear(session_key);
         if let Err(e) = self.session_store.delete(session_key) {
             warn!(session = %session_key, error = %e, "failed to delete persisted session");
         }
@@ -1081,7 +1080,7 @@ impl Gateway {
     }
 
     /// Returns true if a session has no messages (checks disk too).
-    #[allow(dead_code)]
+    #[cfg(feature = "signal")]
     pub(crate) fn session_is_empty(&self, session_key: &SessionKey) -> bool {
         self.messages(session_key).is_empty()
     }
@@ -1188,7 +1187,7 @@ impl Gateway {
     }
 
     /// Seed a session with formatted Signal chat history for context.
-    #[allow(dead_code)]
+    #[cfg(feature = "signal")]
     pub(crate) fn seed_signal_history(&self, session_key: &SessionKey, history: &[InboundMessage]) {
         if history.is_empty() {
             return;

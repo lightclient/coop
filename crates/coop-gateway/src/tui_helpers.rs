@@ -14,8 +14,8 @@ pub(crate) fn update_chat_messages(tui: &mut Tui, app: &App, chat_idx: usize) {
     for msg in &app.messages {
         match &msg.role {
             coop_tui::DisplayRole::User => {
-                let md =
-                    MarkdownComponent::new(msg.content.clone(), 1, 1).with_bg(0x34, 0x35, 0x41);
+                let (r, g, b) = coop_tui::theme::USER_MSG_BG;
+                let md = MarkdownComponent::new(msg.content.clone(), 1, 1).with_bg(r, g, b);
                 chat.add_child(Box::new(md));
             }
             coop_tui::DisplayRole::Assistant => {
@@ -23,7 +23,7 @@ pub(crate) fn update_chat_messages(tui: &mut Tui, app: &App, chat_idx: usize) {
                 chat.add_child(Box::new(md));
             }
             coop_tui::DisplayRole::System => {
-                let styled = coop_tui::utils::fg_rgb(0x80, 0x80, 0x80, &msg.content);
+                let styled = coop_tui::theme::fg(coop_tui::theme::MUTED, &msg.content);
                 chat.add_child(Box::new(Text::new(styled, 1, 0)));
             }
             coop_tui::DisplayRole::ToolCall { name, .. } => {
@@ -38,10 +38,11 @@ pub(crate) fn update_chat_messages(tui: &mut Tui, app: &App, chat_idx: usize) {
                 };
                 let content = format!(
                     "{}\n{}",
-                    coop_tui::utils::bold(&coop_tui::utils::fg_rgb(0xff, 0xff, 0x00, &header)),
-                    coop_tui::utils::fg_rgb(0x50, 0x50, 0x50, &msg.content)
+                    coop_tui::utils::bold(&coop_tui::theme::fg(coop_tui::theme::WARNING, &header)),
+                    coop_tui::theme::fg(coop_tui::theme::DARK_GRAY, &msg.content)
                 );
-                let mut tb = ToolBox::new(1, 1).with_bg(0x28, 0x28, 0x32);
+                let (r, g, b) = coop_tui::theme::TOOL_PENDING_BG;
+                let mut tb = ToolBox::new(1, 1).with_bg(r, g, b);
                 tb.set_lines(vec![content]);
                 chat.add_child(Box::new(tb));
             }
@@ -50,14 +51,14 @@ pub(crate) fn update_chat_messages(tui: &mut Tui, app: &App, chat_idx: usize) {
                     continue;
                 }
                 let bg = if *is_error {
-                    (0x3c, 0x28, 0x28)
+                    coop_tui::theme::TOOL_ERROR_BG
                 } else {
-                    (0x28, 0x32, 0x28)
+                    coop_tui::theme::TOOL_SUCCESS_BG
                 };
                 let text_color = if *is_error {
-                    (0xcc, 0x66, 0x66)
+                    coop_tui::theme::ERROR
                 } else {
-                    (0x80, 0x80, 0x80)
+                    coop_tui::theme::MUTED
                 };
 
                 let content_lines: Vec<&str> = msg.content.lines().collect();
@@ -71,10 +72,8 @@ pub(crate) fn update_chat_messages(tui: &mut Tui, app: &App, chat_idx: usize) {
                             l,
                         ));
                     }
-                    lines.push(coop_tui::utils::fg_rgb(
-                        0x80,
-                        0x80,
-                        0x80,
+                    lines.push(coop_tui::theme::fg(
+                        coop_tui::theme::MUTED,
                         &format!(
                             "... ({} earlier lines, ctrl+o to expand)",
                             content_lines.len() - 20

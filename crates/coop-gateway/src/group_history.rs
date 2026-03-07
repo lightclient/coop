@@ -1,4 +1,4 @@
-use coop_core::{SessionKey, TrustLevel};
+use coop_core::SessionKey;
 use std::collections::{HashMap, VecDeque};
 
 pub(crate) struct GroupHistoryEntry {
@@ -45,15 +45,12 @@ impl GroupHistoryBuffer {
         Some(result)
     }
 
-    #[allow(dead_code)]
     pub(crate) fn clear(&mut self, key: &SessionKey) {
         self.buffers.remove(key);
     }
 }
 
 fn format_history(buf: &VecDeque<GroupHistoryEntry>) -> String {
-    // The entry.body already contains `[from DisplayName ... at timestamp]`
-    // from the inbound parser, so we don't wrap it again.
     let mut lines = vec!["[Chat messages since your last reply — for context]".to_owned()];
     for entry in buf {
         lines.push(entry.body.clone());
@@ -62,63 +59,11 @@ fn format_history(buf: &VecDeque<GroupHistoryEntry>) -> String {
     lines.join("\n")
 }
 
-// ---------------------------------------------------------------------------
-// Group ceiling cache for min_member mode
-// ---------------------------------------------------------------------------
-
-/// Wired up when Signal `GroupMembers` query lands — suppress until then.
-#[allow(dead_code)]
-pub(crate) struct GroupCeilingCache {
-    cache: HashMap<SessionKey, (u32, TrustLevel)>,
-}
-
-impl GroupCeilingCache {
-    pub(crate) fn new() -> Self {
-        Self {
-            cache: HashMap::new(),
-        }
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn get(&self, key: &SessionKey, revision: u32) -> Option<TrustLevel> {
-        self.cache
-            .get(key)
-            .filter(|(cached_rev, _)| *cached_rev == revision)
-            .map(|(_, ceiling)| *ceiling)
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn set(&mut self, key: SessionKey, revision: u32, ceiling: TrustLevel) {
-        self.cache.insert(key, (revision, ceiling));
-    }
-}
-
-/// Compute the min_member trust ceiling by cross-referencing group
-/// members with `[[users]]` config. Members not in config get `default_trust`.
-#[allow(dead_code)]
-pub(crate) fn compute_min_member_ceiling(
-    member_uuids: &[String],
-    users: &[crate::config::UserConfig],
-    default_trust: TrustLevel,
-) -> TrustLevel {
-    member_uuids
-        .iter()
-        .map(|uuid| {
-            let signal_id = format!("signal:{uuid}");
-            users
-                .iter()
-                .find(|u| u.r#match.iter().any(|p| p == &signal_id || p == uuid))
-                .map_or(default_trust, |u| u.trust)
-        })
-        .max() // max in Ord = least privileged = most restrictive
-        .unwrap_or(default_trust)
-}
-
 #[allow(clippy::unwrap_used)]
 #[cfg(test)]
 mod tests {
     use super::*;
-    use coop_core::{SessionKey, SessionKind, TrustLevel};
+    use coop_core::{SessionKey, SessionKind};
 
     fn session_key(group: &str) -> SessionKey {
         SessionKey {
@@ -169,6 +114,17 @@ mod tests {
     }
 
     #[test]
+    fn clear_discards_buffered_history() {
+        let mut buf = GroupHistoryBuffer::new();
+        let key = session_key("signal:group:dead");
+        buf.record(&key, entry("Alice", "hello", 100), 50);
+
+        buf.clear(&key);
+
+        assert!(buf.peek_context(&key).is_none());
+    }
+
+    #[test]
     fn history_respects_limit() {
         let mut buf = GroupHistoryBuffer::new();
         let key = session_key("signal:group:dead");
@@ -176,7 +132,6 @@ mod tests {
             buf.record(&key, entry("Alice", &format!("msg {i}"), i), 3);
         }
         let ctx = buf.peek_context(&key).unwrap();
-        // Limit 3: only last 3 messages
         assert!(!ctx.contains("msg 0"));
         assert!(!ctx.contains("msg 1"));
         assert!(ctx.contains("msg 2"));
@@ -207,78 +162,5 @@ mod tests {
         assert!(!c1.contains("session2"));
         assert!(c2.contains("session2"));
         assert!(!c2.contains("session1"));
-    }
-
-    #[test]
-    fn ceiling_cache_returns_none_for_uncached() {
-        let cache = GroupCeilingCache::new();
-        assert!(cache.get(&session_key("g"), 0).is_none());
-    }
-
-    #[test]
-    fn ceiling_cache_returns_none_on_revision_mismatch() {
-        let mut cache = GroupCeilingCache::new();
-        let key = session_key("g");
-        cache.set(key.clone(), 1, TrustLevel::Familiar);
-        assert!(cache.get(&key, 2).is_none());
-    }
-
-    #[test]
-    fn ceiling_cache_returns_hit_on_match() {
-        let mut cache = GroupCeilingCache::new();
-        let key = session_key("g");
-        cache.set(key.clone(), 5, TrustLevel::Inner);
-        assert_eq!(cache.get(&key, 5), Some(TrustLevel::Inner));
-    }
-
-    #[test]
-    fn ceiling_cache_overwrites_on_new_revision() {
-        let mut cache = GroupCeilingCache::new();
-        let key = session_key("g");
-        cache.set(key.clone(), 1, TrustLevel::Familiar);
-        cache.set(key.clone(), 2, TrustLevel::Full);
-        assert!(cache.get(&key, 1).is_none());
-        assert_eq!(cache.get(&key, 2), Some(TrustLevel::Full));
-    }
-
-    fn user(name: &str, trust: TrustLevel, patterns: &[&str]) -> crate::config::UserConfig {
-        crate::config::UserConfig {
-            name: name.to_owned(),
-            trust,
-            r#match: patterns.iter().map(|s| (*s).to_owned()).collect(),
-            sandbox: None,
-        }
-    }
-
-    #[test]
-    fn min_member_returns_least_privileged() {
-        let users = vec![
-            user("alice", TrustLevel::Full, &["signal:alice-uuid"]),
-            user("bob", TrustLevel::Inner, &["signal:bob-uuid"]),
-        ];
-        let members = vec!["alice-uuid".to_owned(), "bob-uuid".to_owned()];
-        let ceiling = compute_min_member_ceiling(&members, &users, TrustLevel::Familiar);
-        // Inner > Full in ordering (less privileged), so ceiling = Inner
-        assert_eq!(ceiling, TrustLevel::Inner);
-    }
-
-    #[test]
-    fn min_member_uses_default_for_unknown() {
-        let users = vec![user("alice", TrustLevel::Full, &["signal:alice-uuid"])];
-        let members = vec!["alice-uuid".to_owned(), "unknown-uuid".to_owned()];
-        let ceiling = compute_min_member_ceiling(&members, &users, TrustLevel::Familiar);
-        // unknown → Familiar, Alice → Full; max = Familiar
-        assert_eq!(ceiling, TrustLevel::Familiar);
-    }
-
-    #[test]
-    fn min_member_all_known_full() {
-        let users = vec![
-            user("alice", TrustLevel::Full, &["signal:alice-uuid"]),
-            user("bob", TrustLevel::Full, &["signal:bob-uuid"]),
-        ];
-        let members = vec!["alice-uuid".to_owned(), "bob-uuid".to_owned()];
-        let ceiling = compute_min_member_ceiling(&members, &users, TrustLevel::Familiar);
-        assert_eq!(ceiling, TrustLevel::Full);
     }
 }

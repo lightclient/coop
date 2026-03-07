@@ -1,5 +1,5 @@
 use crate::engine::{Component, StyledLine};
-use crate::utils::{apply_bg_to_line, pad_to_width, wrap_text_with_ansi};
+use crate::utils::{pad_to_width, wrap_text_with_ansi};
 
 /// Text component — displays multi-line text with word wrapping.
 /// Direct translation of pi's text.js.
@@ -8,7 +8,6 @@ pub struct Text {
     content: String,
     padding_x: usize,
     padding_y: usize,
-    bg_color: Option<(u8, u8, u8)>,
 }
 
 impl Text {
@@ -17,14 +16,7 @@ impl Text {
             content: text.into(),
             padding_x,
             padding_y,
-            bg_color: None,
         }
-    }
-
-    #[must_use]
-    pub fn with_bg(mut self, r: u8, g: u8, b: u8) -> Self {
-        self.bg_color = Some((r, g, b));
-        self
     }
 
     pub fn set_text(&mut self, text: impl Into<String>) {
@@ -48,21 +40,13 @@ impl Component for Text {
         let mut content_lines = Vec::new();
         for line in &wrapped {
             let with_margins = format!("{left_margin}{line}{right_margin}");
-            if let Some((r, g, b)) = self.bg_color {
-                content_lines.push(apply_bg_to_line(&with_margins, width, r, g, b));
-            } else {
-                content_lines.push(pad_to_width(&with_margins, width));
-            }
+            content_lines.push(pad_to_width(&with_margins, width));
         }
 
         let empty_line = " ".repeat(width);
         let mut empty_lines = Vec::new();
         for _ in 0..self.padding_y {
-            if let Some((r, g, b)) = self.bg_color {
-                empty_lines.push(apply_bg_to_line(&empty_line, width, r, g, b));
-            } else {
-                empty_lines.push(empty_line.clone());
-            }
+            empty_lines.push(empty_line.clone());
         }
 
         let mut result = Vec::new();

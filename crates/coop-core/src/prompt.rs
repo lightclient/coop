@@ -440,8 +440,6 @@ pub fn default_channel_prompt(channel: &str) -> Option<&'static str> {
 struct IndexedFile {
     entry: MemoryIndexEntry,
     mtime: SystemTime,
-    #[allow(dead_code)]
-    cache: CacheHint,
 }
 
 /// Scans workspace files, caches token counts keyed by mtime for invalidation.
@@ -483,7 +481,6 @@ impl WorkspaceIndex {
                                 min_trust: cfg.min_trust,
                             },
                             mtime: SystemTime::UNIX_EPOCH,
-                            cache: cfg.cache,
                         },
                     );
                 }
@@ -515,7 +512,6 @@ impl WorkspaceIndex {
                             min_trust: cfg.min_trust,
                         },
                         mtime: SystemTime::UNIX_EPOCH,
-                        cache: cfg.cache,
                     },
                 );
             } else {
@@ -627,7 +623,6 @@ impl WorkspaceIndex {
                 min_trust: cfg.min_trust,
             },
             mtime,
-            cache: cfg.cache,
         }))
     }
 

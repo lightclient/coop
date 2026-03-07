@@ -14,6 +14,7 @@ mod group_trigger;
 mod heartbeat;
 mod init;
 mod init_templates;
+#[cfg(test)]
 mod injection;
 mod memory_auto_capture;
 mod memory_embedding;

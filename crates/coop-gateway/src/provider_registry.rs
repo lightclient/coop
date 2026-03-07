@@ -32,7 +32,7 @@ impl ProviderRegistry {
         self.by_model.get(model).unwrap_or(&self.primary)
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn get_exact(&self, model: &str) -> Option<&Arc<dyn Provider>> {
         self.by_model.get(model)
     }
