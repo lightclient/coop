@@ -64,8 +64,27 @@ impl MessageRouter {
             .is_some_and(|s| s.verbose)
     }
 
+    /// How to handle messages arriving during an active turn.
+    #[cfg(feature = "signal")]
+    pub(crate) fn mid_turn_messages_mode(&self) -> crate::config::MidTurnMessages {
+        self.config
+            .load()
+            .channels
+            .signal
+            .as_ref()
+            .map_or_else(crate::config::MidTurnMessages::default, |s| {
+                s.mid_turn_messages
+            })
+    }
+
     pub(crate) fn append_to_session(&self, session_key: &SessionKey, message: coop_core::Message) {
         self.gateway.append_message(session_key, message);
+    }
+
+    /// Queue a message for injection into a running turn's context.
+    #[cfg(feature = "signal")]
+    pub(crate) fn inject_pending_inbound(&self, session_key: &SessionKey, content: String) {
+        self.gateway.inject_pending_inbound(session_key, content);
     }
 
     /// Returns `true` if the given session has an in-progress turn.

@@ -46,6 +46,8 @@ pub(crate) struct Gateway {
     session_turn_locks: Mutex<HashMap<SessionKey, Arc<tokio::sync::Mutex<()>>>>,
     /// Per-group-session pending message buffer for non-triggering messages.
     group_history: Mutex<GroupHistoryBuffer>,
+    /// Messages injected mid-turn, drained at the start of each iteration.
+    pending_inbound: Mutex<HashMap<SessionKey, Vec<String>>>,
 }
 
 /// Tracks cumulative token usage and context size for a session.
@@ -177,6 +179,7 @@ impl Gateway {
             active_turns: Mutex::new(HashMap::new()),
             session_turn_locks: Mutex::new(HashMap::new()),
             group_history: Mutex::new(GroupHistoryBuffer::new()),
+            pending_inbound: Mutex::new(HashMap::new()),
         })
     }
 
@@ -463,6 +466,11 @@ impl Gateway {
                 );
 
                 let iter_result: Result<(Message, bool)> = async {
+                    // Drain any messages injected mid-turn before reading
+                    // session state. This keeps them after the last
+                    // tool_result and before the next provider call.
+                    self.drain_pending_inbound(session_key);
+
                     let all_messages = self.messages(session_key);
                     let compaction_state = self.get_compaction(session_key);
                     let messages = match &compaction_state {
@@ -616,6 +624,12 @@ impl Gateway {
                 }
             }
 
+            // Drain any messages that were injected during the last
+            // iteration's provider call. They won't get their own AI response
+            // in this turn, but they'll be in the session for the next turn
+            // rather than silently lost.
+            self.drain_pending_inbound(session_key);
+
             let cancelled = turn_cancel.is_cancelled();
 
             // If we hit the iteration limit while the model still wanted to use
@@ -626,6 +640,8 @@ impl Gateway {
                 let final_span = info_span!("turn_limit_completion");
                 let final_result: Result<()> = async {
                     info!("forcing final completion (iteration limit reached)");
+
+                    self.drain_pending_inbound(session_key);
 
                     let limit_msg = Message::user().with_text(
                         "You have reached the maximum number of tool-call iterations for this turn. \
@@ -1088,6 +1104,44 @@ impl Gateway {
     /// Number of messages in a session.
     pub(crate) fn session_message_count(&self, session_key: &SessionKey) -> usize {
         self.messages(session_key).len()
+    }
+
+    /// Queue a message for injection into a running turn.
+    ///
+    /// The message is appended to the session at the next safe point
+    /// (between turn iterations, after tool results are committed).
+    #[cfg(any(feature = "signal", test))]
+    pub(crate) fn inject_pending_inbound(&self, session_key: &SessionKey, content: String) {
+        let mut pending = self
+            .pending_inbound
+            .lock()
+            .expect("pending_inbound mutex poisoned");
+        pending
+            .entry(session_key.clone())
+            .or_default()
+            .push(content);
+    }
+
+    /// Drain any pending inbound messages into the session as user messages.
+    ///
+    /// Called at the start of each turn iteration so injected messages appear
+    /// in the provider context without breaking tool_use/tool_result pairing.
+    fn drain_pending_inbound(&self, session_key: &SessionKey) {
+        let messages: Vec<String> = {
+            let mut pending = self
+                .pending_inbound
+                .lock()
+                .expect("pending_inbound mutex poisoned");
+            pending.remove(session_key).unwrap_or_default()
+        };
+        for content in &messages {
+            info!(
+                session = %session_key,
+                content_len = content.len(),
+                "injecting mid-turn inbound message into session"
+            );
+            self.append_message(session_key, Message::user().with_text(content));
+        }
     }
 
     /// Push the current config model into the provider if it has changed.
@@ -3498,6 +3552,115 @@ model = "test-model"
         assert!(
             !all_text.contains("missing required parameter"),
             "turn trace should not report missing required params from a truncated tool call"
+        );
+    }
+
+    #[test]
+    fn inject_pending_inbound_queues_and_drains() {
+        let workspace = test_workspace();
+        let provider: Arc<dyn Provider> = Arc::new(FakeProvider::new("ok"));
+        let gateway = Gateway::new(
+            shared_config(test_config()),
+            workspace.path().to_path_buf(),
+            registry(provider),
+            Arc::new(DefaultExecutor::new()),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let key = gateway.default_session_key();
+
+        // Nothing pending initially — drain is a no-op.
+        gateway.drain_pending_inbound(&key);
+        assert!(gateway.messages(&key).is_empty());
+
+        // Inject two messages.
+        gateway.inject_pending_inbound(&key, "first message".into());
+        gateway.inject_pending_inbound(&key, "second message".into());
+
+        // Not yet in the session — only in the pending queue.
+        assert!(gateway.messages(&key).is_empty());
+
+        // Drain moves them into the session.
+        gateway.drain_pending_inbound(&key);
+        let msgs = gateway.messages(&key);
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].text(), "first message");
+        assert_eq!(msgs[1].text(), "second message");
+
+        // Second drain is a no-op.
+        gateway.drain_pending_inbound(&key);
+        assert_eq!(gateway.messages(&key).len(), 2);
+    }
+
+    #[tokio::test]
+    async fn mid_turn_injected_messages_appear_in_session() {
+        use coop_core::fakes::SlowFakeProvider;
+
+        let workspace = test_workspace();
+        let delay = Duration::from_millis(200);
+        let provider: Arc<dyn Provider> = Arc::new(SlowFakeProvider::new("slow reply", delay));
+        let gateway = Arc::new(
+            Gateway::new(
+                shared_config(test_config()),
+                workspace.path().to_path_buf(),
+                registry(provider),
+                Arc::new(DefaultExecutor::new()),
+                None,
+                None,
+            )
+            .unwrap(),
+        );
+
+        let session_key = gateway.default_session_key();
+        let (event_tx, mut event_rx) = mpsc::channel(32);
+
+        // Start a turn in the background.
+        let gw = Arc::clone(&gateway);
+        let key = session_key.clone();
+        let turn_handle = tokio::spawn(async move {
+            gw.run_turn_with_trust(
+                &key,
+                "original message",
+                TrustLevel::Full,
+                Some("alice"),
+                None,
+                event_tx,
+            )
+            .await
+        });
+
+        // Wait a bit for the turn to start, then inject a message.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        gateway.inject_pending_inbound(&session_key, "injected mid-turn follow-up".into());
+
+        // Wait for the turn to complete.
+        turn_handle.await.unwrap().unwrap();
+        while event_rx.try_recv().is_ok() {}
+
+        // The session should contain: user(original) + user(injected) + assistant
+        let msgs = gateway.messages(&session_key);
+        assert!(
+            msgs.len() >= 3,
+            "expected at least 3 messages (original + injected + assistant), got {}",
+            msgs.len()
+        );
+
+        let user_texts: Vec<String> = msgs
+            .iter()
+            .filter(|m| matches!(m.role, Role::User))
+            .map(Message::text)
+            .collect();
+        assert!(
+            user_texts.iter().any(|t| t.contains("original message")),
+            "original message should be in session"
+        );
+        assert!(
+            user_texts
+                .iter()
+                .any(|t| t.contains("injected mid-turn follow-up")),
+            "injected message should be in session"
         );
     }
 }

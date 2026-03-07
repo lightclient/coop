@@ -7,6 +7,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::warn;
 
+use crate::config::MidTurnMessages;
 use crate::router::MessageRouter;
 
 /// Max messages to load from Signal history when bootstrapping a new session.
@@ -21,6 +22,10 @@ pub(crate) async fn run_signal_loop(
     // Per-session turn tracking: each session can have one active turn.
     // Different sessions run concurrently.
     let mut active_turns: HashMap<SessionKey, JoinHandle<Result<()>>> = HashMap::new();
+
+    // Messages queued for dispatch after the current turn completes
+    // (only used in `MidTurnMessages::Queue` mode).
+    let mut queued_inbound: HashMap<SessionKey, Vec<(InboundMessage, String)>> = HashMap::new();
 
     loop {
         let inbound = Channel::recv(&mut signal_channel).await?;
@@ -50,16 +55,41 @@ pub(crate) async fn run_signal_loop(
         // Route to determine the target session
         let decision = router.route(&inbound);
 
-        // If this session already has an active turn, skip.
-        // The gateway's try_lock would reject it anyway, but we avoid the
-        // spawn overhead and log a clearer message.
+        // If this session already has an active turn, handle the message
+        // according to the configured mid-turn strategy.
         if active_turns.contains_key(&decision.session_key) {
-            tracing::debug!(
-                session = %decision.session_key,
-                "skipping message: session already has an active turn"
-            );
+            let mode = router.mid_turn_messages_mode();
+            match mode {
+                MidTurnMessages::Inject => {
+                    tracing::info!(
+                        session = %decision.session_key,
+                        content_len = inbound.content.len(),
+                        "injecting mid-turn message into active session"
+                    );
+                    router.inject_pending_inbound(&decision.session_key, inbound.content.clone());
+                }
+                MidTurnMessages::Queue => {
+                    tracing::info!(
+                        session = %decision.session_key,
+                        content_len = inbound.content.len(),
+                        "queuing message for after current turn completes"
+                    );
+                    queued_inbound
+                        .entry(decision.session_key.clone())
+                        .or_default()
+                        .push((inbound.clone(), target.clone()));
+                }
+            }
             continue;
         }
+
+        // Dispatch queued messages for sessions whose turns just finished.
+        drain_queued_inbound(
+            &mut queued_inbound,
+            &mut active_turns,
+            &signal_channel.action_sender(),
+            &router,
+        );
 
         // Bootstrap: seed session with recent Signal history if this is a new session
         if router.session_is_empty(&decision.session_key)
@@ -364,6 +394,59 @@ fn signal_inbound_kind_name(kind: &InboundKind) -> &'static str {
         InboundKind::Edit => "edit",
         InboundKind::Attachment => "attachment",
         InboundKind::Command => "command",
+    }
+}
+
+/// Dispatch queued messages for sessions whose turns just finished.
+///
+/// Takes one message per session (the oldest) and spawns a turn for it.
+/// Remaining messages stay queued and will be processed on the next drain.
+fn drain_queued_inbound(
+    queued: &mut HashMap<SessionKey, Vec<(InboundMessage, String)>>,
+    active_turns: &mut HashMap<SessionKey, JoinHandle<Result<()>>>,
+    action_tx: &mpsc::Sender<coop_channels::SignalAction>,
+    router: &Arc<MessageRouter>,
+) {
+    let ready: Vec<SessionKey> = queued
+        .keys()
+        .filter(|k| !active_turns.contains_key(k))
+        .cloned()
+        .collect();
+
+    for key in ready {
+        let Some(messages) = queued.get_mut(&key) else {
+            continue;
+        };
+        if messages.is_empty() {
+            queued.remove(&key);
+            continue;
+        }
+
+        let (inbound, target) = messages.remove(0);
+        if messages.is_empty() {
+            queued.remove(&key);
+        }
+
+        tracing::info!(
+            session = %key,
+            remaining = queued.get(&key).map_or(0, Vec::len),
+            "dispatching queued mid-turn message"
+        );
+
+        let router_clone = Arc::clone(router);
+        let action_tx = action_tx.clone();
+        active_turns.insert(
+            key,
+            tokio::spawn(async move {
+                dispatch_signal_turn_background(
+                    &action_tx,
+                    router_clone.as_ref(),
+                    &inbound,
+                    &target,
+                )
+                .await
+            }),
+        );
     }
 }
 

@@ -979,3 +979,281 @@ async fn signal_e2e_recovers_from_dangling_tool_use() {
     assert_eq!(outbound.len(), 1);
     assert_eq!(outbound[0].content, "recovered");
 }
+
+/// Simulate what `run_signal_loop` does when a message arrives during an
+/// active turn in inject mode: the message should be injected into the
+/// running turn's pending queue and appear in the session after the turn.
+#[tokio::test]
+async fn inject_mode_mid_turn_message_appears_in_session() {
+    use coop_core::fakes::SlowFakeProvider;
+
+    let delay = Duration::from_millis(200);
+    let provider: Arc<dyn Provider> = Arc::new(SlowFakeProvider::new("slow reply", delay));
+    let (router, gateway) = build_router_with_gateway(
+        provider,
+        Arc::new(DefaultExecutor::new()) as Arc<dyn ToolExecutor>,
+        None,
+    );
+
+    // The session key that will be used for alice-uuid DM
+    let session_key = SessionKey {
+        agent_id: "coop".to_owned(),
+        kind: SessionKind::Dm("signal:alice-uuid".to_owned()),
+    };
+
+    let first_msg = {
+        let mut msg = inbound_message(
+            InboundKind::Text,
+            "alice-uuid",
+            None,
+            false,
+            Some("alice-uuid"),
+        );
+        msg.content = "first message".to_owned();
+        msg
+    };
+
+    // Start a turn in the background (simulates what run_signal_loop does)
+    let (event_tx, mut event_rx) = mpsc::channel(64);
+    let router_for_turn = Arc::clone(&router);
+    let msg_for_turn = first_msg.clone();
+    let turn_handle =
+        tokio::spawn(async move { router_for_turn.dispatch(&msg_for_turn, event_tx).await });
+
+    // Wait for the turn to be in progress, then inject a second message.
+    // This is the exact code path run_signal_loop executes in inject mode.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    router.inject_pending_inbound(&session_key, "follow-up during turn".to_owned());
+
+    // Wait for the turn to complete
+    turn_handle.await.unwrap().unwrap();
+    while event_rx.try_recv().is_ok() {}
+
+    // Verify the injected message is in the session
+    let msgs = gateway.messages(&session_key);
+    let user_texts: Vec<String> = msgs
+        .iter()
+        .filter(|m| matches!(m.role, coop_core::Role::User))
+        .map(Message::text)
+        .collect();
+
+    assert!(
+        user_texts.iter().any(|t| t.contains("first message")),
+        "original message should be in session, got: {user_texts:?}"
+    );
+    assert!(
+        user_texts
+            .iter()
+            .any(|t| t.contains("follow-up during turn")),
+        "injected mid-turn message should be in session, got: {user_texts:?}"
+    );
+}
+
+/// In queue mode, messages arriving during an active turn should be queued
+/// and dispatched as separate turns after the first turn completes.
+/// This test exercises `drain_queued_inbound` directly.
+#[tokio::test]
+async fn queue_mode_dispatches_after_turn_completes() {
+    let provider = Arc::new(CountingProvider::new("reply"));
+    let mut channel = MockSignalChannel::new();
+    let (router, gateway) = build_router_with_gateway(
+        Arc::clone(&provider) as Arc<dyn Provider>,
+        Arc::new(DefaultExecutor::new()) as Arc<dyn ToolExecutor>,
+        None,
+    );
+
+    let session_key = SessionKey {
+        agent_id: "coop".to_owned(),
+        kind: SessionKind::Dm("signal:alice-uuid".to_owned()),
+    };
+
+    let make_msg = |content: &str| {
+        let mut msg = inbound_message(
+            InboundKind::Text,
+            "alice-uuid",
+            None,
+            false,
+            Some("alice-uuid"),
+        );
+        msg.content = content.to_owned();
+        msg
+    };
+
+    // --- Simulate run_signal_loop's queue mode ---
+
+    // 1. First message starts a turn normally
+    let mut active_turns: HashMap<SessionKey, JoinHandle<Result<()>>> = HashMap::new();
+    let mut queued_inbound: HashMap<SessionKey, Vec<(InboundMessage, String)>> = HashMap::new();
+
+    let decision = router.route(&make_msg("first"));
+    let action_tx = channel.action_sender();
+    let router_clone = Arc::clone(&router);
+    let first_msg = make_msg("first");
+    let target = "alice-uuid".to_owned();
+    active_turns.insert(
+        decision.session_key.clone(),
+        tokio::spawn({
+            let action_tx = action_tx.clone();
+            let target = target.clone();
+            async move {
+                dispatch_signal_turn_background(
+                    &action_tx,
+                    router_clone.as_ref(),
+                    &first_msg,
+                    &target,
+                )
+                .await
+            }
+        }),
+    );
+
+    // 2. Second message arrives — session has active turn, so queue it
+    let second_msg = make_msg("second (queued)");
+    queued_inbound
+        .entry(session_key.clone())
+        .or_default()
+        .push((second_msg, target.clone()));
+
+    // 3. Wait for first turn to complete
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        active_turns.retain(|_, task| !task.is_finished());
+        if !active_turns.contains_key(&session_key) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "first turn did not complete in time"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // 4. Drain queued messages (this is what run_signal_loop does)
+    drain_queued_inbound(
+        &mut queued_inbound,
+        &mut active_turns,
+        &channel.action_sender(),
+        &router,
+    );
+
+    // A new turn should have been spawned for the queued message
+    assert!(
+        active_turns.contains_key(&session_key),
+        "queued message should have spawned a new turn"
+    );
+
+    // Wait for the second turn to complete
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        active_turns.retain(|_, task| !task.is_finished());
+        if active_turns.is_empty() {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "second turn did not complete in time"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // Provider should have been called twice (once per turn)
+    assert_eq!(
+        provider.calls(),
+        2,
+        "expected 2 provider calls (one per turn)"
+    );
+
+    // Session should have both user messages and both assistant responses
+    let msgs = gateway.messages(&session_key);
+    assert_eq!(
+        msgs.len(),
+        4,
+        "expected 4 messages (2 user + 2 assistant), got {}",
+        msgs.len()
+    );
+
+    let user_texts: Vec<String> = msgs
+        .iter()
+        .filter(|m| matches!(m.role, coop_core::Role::User))
+        .map(Message::text)
+        .collect();
+    assert!(user_texts.iter().any(|t| t.contains("first")));
+    assert!(user_texts.iter().any(|t| t.contains("second (queued)")));
+
+    // Both turns should have produced outbound messages
+    let actions = wait_for_actions(&mut channel, 2).await;
+    assert!(
+        actions.len() >= 2,
+        "expected at least 2 outbound messages (one per turn), got {}",
+        actions.len()
+    );
+}
+
+/// Verify that the old bug is fixed: previously, messages arriving during
+/// an active turn were silently dropped. Now in inject mode (default),
+/// the message is preserved in the session.
+#[tokio::test]
+async fn previously_dropped_messages_are_now_preserved() {
+    use coop_core::fakes::SlowFakeProvider;
+
+    let delay = Duration::from_millis(200);
+    let provider: Arc<dyn Provider> = Arc::new(SlowFakeProvider::new("response", delay));
+    let (router, gateway) = build_router_with_gateway(
+        provider,
+        Arc::new(DefaultExecutor::new()) as Arc<dyn ToolExecutor>,
+        None,
+    );
+
+    let session_key = SessionKey {
+        agent_id: "coop".to_owned(),
+        kind: SessionKind::Dm("signal:alice-uuid".to_owned()),
+    };
+
+    // Start a turn
+    let (event_tx, mut event_rx) = mpsc::channel(64);
+    let router_for_turn = Arc::clone(&router);
+    let msg = {
+        let mut m = inbound_message(
+            InboundKind::Attachment,
+            "alice-uuid",
+            None,
+            false,
+            Some("alice-uuid"),
+        );
+        m.content =
+            "[attachment: photo.jpg]\n[file saved: /workspace/attachments/photo.jpg]".to_owned();
+        m
+    };
+
+    let turn_handle = tokio::spawn({
+        let msg = msg.clone();
+        async move { router_for_turn.dispatch(&msg, event_tx).await }
+    });
+
+    // Inject a follow-up while the turn is active (the exact bug scenario:
+    // an attachment arrived during a running turn and was silently dropped)
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    router.inject_pending_inbound(
+        &session_key,
+        "[attachment: screenshot.png]\n[file saved: /workspace/attachments/screenshot.png]"
+            .to_owned(),
+    );
+
+    turn_handle.await.unwrap().unwrap();
+    while event_rx.try_recv().is_ok() {}
+
+    // The attachment message must be in the session — not dropped
+    let all_text: String = gateway
+        .messages(&session_key)
+        .iter()
+        .filter(|m| matches!(m.role, coop_core::Role::User))
+        .map(Message::text)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        all_text.contains("screenshot.png"),
+        "injected attachment message must be in session (was previously dropped). \
+         Session user texts: {all_text}"
+    );
+}

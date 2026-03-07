@@ -159,6 +159,19 @@ pub(crate) struct ChannelsConfig {
     pub signal: Option<SignalChannelConfig>,
 }
 
+/// How to handle messages that arrive while a turn is already active
+/// for the same session.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MidTurnMessages {
+    /// Inject into the running turn's context so the agent sees them
+    /// at the next iteration (default).
+    #[default]
+    Inject,
+    /// Queue and start a new turn after the current one completes.
+    Queue,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct SignalChannelConfig {
     pub db_path: String,
@@ -167,6 +180,10 @@ pub(crate) struct SignalChannelConfig {
     /// (one consolidated reply at the end of the turn).
     #[serde(default)]
     pub verbose: bool,
+    /// How to handle messages that arrive while a turn is already running
+    /// for the same session. Default: `inject` (visible to the running turn).
+    #[serde(default)]
+    pub mid_turn_messages: MidTurnMessages,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
