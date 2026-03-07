@@ -2047,6 +2047,57 @@ mod tests {
     }
 
     #[test]
+    fn format_messages_downscales_every_oversized_image_in_many_image_request() {
+        let wide_jpeg = make_jpeg(2_200, 400);
+        let tall_png = make_png(400, 2_300);
+        let small_jpeg = make_jpeg(800, 600);
+
+        let messages = vec![
+            Message::user()
+                .with_text("Compare these images")
+                .with_image(wide_jpeg.clone(), "image/jpeg")
+                .with_image(tall_png.clone(), "image/png")
+                .with_image(small_jpeg.clone(), "image/jpeg"),
+        ];
+
+        let formatted = AnthropicProvider::format_messages(&messages, false, None);
+
+        let content = formatted[0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 4);
+
+        let image_blocks: Vec<_> = content
+            .iter()
+            .filter(|block| block["type"] == "image")
+            .collect();
+        assert_eq!(image_blocks.len(), 3);
+
+        assert_eq!(image_blocks[0]["source"]["media_type"], "image/jpeg");
+        assert_eq!(image_blocks[1]["source"]["media_type"], "image/png");
+        assert_eq!(image_blocks[2]["source"]["media_type"], "image/jpeg");
+
+        let wide_result = image_blocks[0]["source"]["data"].as_str().unwrap();
+        let tall_result = image_blocks[1]["source"]["data"].as_str().unwrap();
+        let small_result = image_blocks[2]["source"]["data"].as_str().unwrap();
+
+        assert_ne!(wide_result, wide_jpeg);
+        assert_ne!(tall_result, tall_png);
+        assert_eq!(small_result, small_jpeg);
+
+        for (index, block) in image_blocks.iter().enumerate() {
+            let result_b64 = block["source"]["data"].as_str().unwrap();
+            let raw = BASE64.decode(result_b64).unwrap();
+            let img = image::load_from_memory(&raw).unwrap();
+            assert!(
+                img.width() <= MAX_IMAGE_DIMENSION && img.height() <= MAX_IMAGE_DIMENSION,
+                "image {index} dimensions {}x{} should fit within {}px",
+                img.width(),
+                img.height(),
+                MAX_IMAGE_DIMENSION
+            );
+        }
+    }
+
+    #[test]
     fn format_messages_downscales_wide_image_under_5mb() {
         // 2200×400 JPEG — under 5MB but exceeds 2000px dimension limit.
         let b64 = make_jpeg(2200, 400);
