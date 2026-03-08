@@ -1052,6 +1052,7 @@ async fn inject_mode_mid_turn_message_appears_in_session() {
 /// In queue mode, messages arriving during an active turn should be queued
 /// and dispatched as separate turns after the first turn completes.
 /// This test exercises `drain_queued_inbound` directly.
+#[allow(clippy::too_many_lines)]
 #[tokio::test]
 async fn queue_mode_dispatches_after_turn_completes() {
     let provider = Arc::new(CountingProvider::new("reply"));
@@ -1220,8 +1221,7 @@ async fn previously_dropped_messages_are_now_preserved() {
             false,
             Some("alice-uuid"),
         );
-        m.content =
-            "[attachment: photo.jpg]\n[file saved: /workspace/attachments/photo.jpg]".to_owned();
+        m.content = "[attachment: photo.jpg]\n[file saved: ./attachments/photo.jpg]".to_owned();
         m
     };
 
@@ -1235,8 +1235,7 @@ async fn previously_dropped_messages_are_now_preserved() {
     tokio::time::sleep(Duration::from_millis(10)).await;
     router.inject_pending_inbound(
         &session_key,
-        "[attachment: screenshot.png]\n[file saved: /workspace/attachments/screenshot.png]"
-            .to_owned(),
+        "[attachment: screenshot.png]\n[file saved: ./attachments/screenshot.png]".to_owned(),
     );
 
     turn_handle.await.unwrap().unwrap();

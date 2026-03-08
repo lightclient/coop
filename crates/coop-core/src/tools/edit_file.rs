@@ -187,7 +187,7 @@ impl Tool for EditFileTool {
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| anyhow::anyhow!("missing required parameter: newText"))?;
 
-        let resolved = match super::read_file::resolve_workspace_path(&ctx.workspace, path_str) {
+        let resolved = match super::read_file::resolve_workspace_path(ctx, path_str) {
             Ok(p) => p,
             Err(e) => return Ok(e),
         };
@@ -275,16 +275,12 @@ impl Tool for EditFileTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::SessionKind;
     use crate::traits::ToolContext;
     use crate::types::TrustLevel;
 
     fn test_ctx(dir: &std::path::Path) -> ToolContext {
-        ToolContext {
-            session_id: "test".into(),
-            trust: TrustLevel::Full,
-            workspace: dir.to_path_buf(),
-            user_name: None,
-        }
+        ToolContext::new("test", SessionKind::Main, TrustLevel::Full, dir, None)
     }
 
     async fn run_edit(
@@ -413,12 +409,7 @@ mod tests {
         std::fs::write(dir.path().join("file.txt"), "hello").unwrap();
 
         for trust in [TrustLevel::Familiar, TrustLevel::Public] {
-            let ctx = ToolContext {
-                session_id: "test".into(),
-                trust,
-                workspace: dir.path().to_path_buf(),
-                user_name: None,
-            };
+            let ctx = ToolContext::new("test", SessionKind::Main, trust, dir.path(), None);
             let output = run_edit(&EditFileTool, &ctx, "file.txt", "hello", "hi").await;
             assert!(output.is_error);
             assert!(output.content.contains("trust level"));

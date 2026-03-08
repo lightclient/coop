@@ -6,7 +6,7 @@ use base64::Engine as _;
 use std::collections::HashSet;
 use std::path::Path;
 
-use crate::{Content, Message};
+use crate::{Content, Message, WorkspaceScope};
 
 /// Image extensions we recognize (lowercase, without dot).
 const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "gif", "webp", "heic", "heif"];
@@ -57,13 +57,14 @@ pub fn validate_image_magic(bytes: &[u8]) -> Option<String> {
 /// The provider layer handles further downsizing to API limits (5 MB).
 const MAX_INJECTABLE_FILE_SIZE: u64 = 20 * 1024 * 1024;
 
-/// Read a file, base64-encode it, and return `(base64_data, mime_type)`.
+/// Read a file from the current workspace scope, base64-encode it, and return
+/// `(base64_data, mime_type)`.
 ///
 /// Refuses to load files larger than `MAX_INJECTABLE_FILE_SIZE` to prevent
 /// excessive memory use. The provider layer handles downsizing to API limits.
-pub fn load_image(path: &str) -> Result<(String, String)> {
-    let expanded = expand_home(path);
-    let p = Path::new(&expanded);
+pub fn load_image(path: &str, scope: &WorkspaceScope) -> Result<(String, String)> {
+    let resolved = scope.resolve_host_path_for_read(path)?;
+    let p = Path::new(&resolved);
 
     let metadata = std::fs::metadata(p)?;
     if metadata.len() > MAX_INJECTABLE_FILE_SIZE {
@@ -82,7 +83,7 @@ pub fn load_image(path: &str) -> Result<(String, String)> {
         .to_lowercase();
     let Some(mime) = validate_image_magic(&bytes) else {
         tracing::warn!(
-            path = %path,
+            path = %resolved.display(),
             detected = "not an image",
             extension = %ext,
             "image file content does not match extension, skipping injection"
@@ -100,7 +101,7 @@ pub fn load_image(path: &str) -> Result<(String, String)> {
 /// Deduplicates by path — the same image is not injected twice even if the
 /// path appears in multiple content blocks. Already-present `Content::Image`
 /// blocks are counted toward deduplication (idempotency).
-pub fn inject_images_into_message(message: &mut Message) {
+pub fn inject_images_into_message(message: &mut Message, scope: &WorkspaceScope) {
     // Collect base64 data from already-present Image blocks for deduplication.
     let existing_data: HashSet<String> = message
         .content
@@ -128,7 +129,7 @@ pub fn inject_images_into_message(message: &mut Message) {
     }
 
     for path in candidate_paths {
-        match load_image(&path) {
+        match load_image(&path, scope) {
             Ok((data, mime_type)) => {
                 if existing_data.contains(&data) {
                     continue;
@@ -149,7 +150,7 @@ pub fn inject_images_into_message(message: &mut Message) {
 /// Images referenced deep in history are almost certainly gone from disk.
 /// Returns the modified messages. The original session messages are not
 /// mutated.
-pub fn inject_images_for_provider(messages: &[Message]) -> Vec<Message> {
+pub fn inject_images_for_provider(messages: &[Message], scope: &WorkspaceScope) -> Vec<Message> {
     let mut cloned: Vec<Message> = messages.to_vec();
 
     let user_indices: Vec<usize> = cloned
@@ -169,7 +170,7 @@ pub fn inject_images_for_provider(messages: &[Message]) -> Vec<Message> {
 
     for msg in cloned.iter_mut().skip(start_from) {
         if matches!(msg.role, crate::Role::User) {
-            inject_images_into_message_dedup(msg, &mut failed_paths);
+            inject_images_into_message_dedup(msg, scope, &mut failed_paths);
         }
     }
     cloned
@@ -178,7 +179,11 @@ pub fn inject_images_for_provider(messages: &[Message]) -> Vec<Message> {
 /// Like `inject_images_into_message` but skips paths already known to have
 /// failed, preventing repeated I/O for stale paths within a single injection
 /// pass.
-fn inject_images_into_message_dedup(message: &mut Message, failed_paths: &mut HashSet<String>) {
+fn inject_images_into_message_dedup(
+    message: &mut Message,
+    scope: &WorkspaceScope,
+    failed_paths: &mut HashSet<String>,
+) {
     let existing_data: HashSet<String> = message
         .content
         .iter()
@@ -204,7 +209,7 @@ fn inject_images_into_message_dedup(message: &mut Message, failed_paths: &mut Ha
     }
 
     for path in candidate_paths {
-        if let Ok((data, mime_type)) = load_image(&path) {
+        if let Ok((data, mime_type)) = load_image(&path, scope) {
             if existing_data.contains(&data) {
                 continue;
             }
@@ -281,20 +286,26 @@ fn try_image_path(word: &str) -> Option<String> {
     Some(word.to_owned())
 }
 
-fn expand_home(path: &str) -> String {
-    if let Some(rest) = path.strip_prefix("~/")
-        && let Ok(home) = std::env::var("HOME")
-    {
-        return format!("{home}/{rest}");
-    }
-    path.to_owned()
-}
-
 #[allow(clippy::unwrap_used)]
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{SessionKind, TrustLevel};
     use std::io::Write;
+    use std::path::Path;
+
+    fn global_scope(root: &Path) -> WorkspaceScope {
+        WorkspaceScope::for_turn(root, &SessionKind::Main, TrustLevel::Full, Some("alice"))
+    }
+
+    fn user_scope(root: &Path, user: &str) -> WorkspaceScope {
+        WorkspaceScope::for_turn(
+            root,
+            &SessionKind::Dm(format!("signal:{user}-uuid")),
+            TrustLevel::Inner,
+            Some(user),
+        )
+    }
 
     // ---- detect_image_paths ----
 
@@ -439,8 +450,9 @@ mod tests {
     fn loads_real_file() {
         let mut f = tempfile::NamedTempFile::with_suffix(".png").unwrap();
         write_png_file(&mut f);
+        let scope = global_scope(f.path().parent().unwrap());
 
-        let (b64, mime) = load_image(f.path().to_str().unwrap()).unwrap();
+        let (b64, mime) = load_image(f.path().to_str().unwrap(), &scope).unwrap();
         assert_eq!(mime, "image/png");
 
         let decoded = base64::engine::general_purpose::STANDARD
@@ -453,8 +465,9 @@ mod tests {
     fn returns_correct_mime_for_jpg() {
         let mut f = tempfile::NamedTempFile::with_suffix(".jpg").unwrap();
         write_jpeg_file(&mut f);
+        let scope = global_scope(f.path().parent().unwrap());
 
-        let (_, mime) = load_image(f.path().to_str().unwrap()).unwrap();
+        let (_, mime) = load_image(f.path().to_str().unwrap(), &scope).unwrap();
         assert_eq!(mime, "image/jpeg");
     }
 
@@ -462,8 +475,9 @@ mod tests {
     fn returns_correct_mime_for_webp() {
         let mut f = tempfile::NamedTempFile::with_suffix(".webp").unwrap();
         write_webp_file(&mut f);
+        let scope = global_scope(f.path().parent().unwrap());
 
-        let (_, mime) = load_image(f.path().to_str().unwrap()).unwrap();
+        let (_, mime) = load_image(f.path().to_str().unwrap(), &scope).unwrap();
         assert_eq!(mime, "image/webp");
     }
 
@@ -473,8 +487,9 @@ mod tests {
         f.write_all(b"<!DOCTYPE html><html><body>bot protection</body></html>")
             .unwrap();
         f.flush().unwrap();
+        let scope = global_scope(f.path().parent().unwrap());
 
-        let err = load_image(f.path().to_str().unwrap()).unwrap_err();
+        let err = load_image(f.path().to_str().unwrap(), &scope).unwrap_err();
         assert!(err.to_string().contains("not a recognized image format"));
     }
 
@@ -483,14 +498,17 @@ mod tests {
         // Write JPEG magic bytes into a .png file — should detect as jpeg
         let mut f = tempfile::NamedTempFile::with_suffix(".png").unwrap();
         write_jpeg_file(&mut f);
+        let scope = global_scope(f.path().parent().unwrap());
 
-        let (_, mime) = load_image(f.path().to_str().unwrap()).unwrap();
+        let (_, mime) = load_image(f.path().to_str().unwrap(), &scope).unwrap();
         assert_eq!(mime, "image/jpeg");
     }
 
     #[test]
     fn error_on_missing_file() {
-        assert!(load_image("/nonexistent/path/photo.png").is_err());
+        let dir = tempfile::tempdir().unwrap();
+        let scope = global_scope(dir.path());
+        assert!(load_image("/nonexistent/path/photo.png", &scope).is_err());
     }
 
     #[test]
@@ -502,8 +520,9 @@ mod tests {
         buf.resize(6 * 1024 * 1024, 0x00);
         f.write_all(&buf).unwrap();
         f.flush().unwrap();
+        let scope = global_scope(f.path().parent().unwrap());
 
-        let (b64, mime) = load_image(f.path().to_str().unwrap()).unwrap();
+        let (b64, mime) = load_image(f.path().to_str().unwrap(), &scope).unwrap();
         assert_eq!(mime, "image/png");
 
         let decoded = base64::engine::general_purpose::STANDARD
@@ -520,8 +539,9 @@ mod tests {
         buf.resize(21 * 1024 * 1024, 0x00);
         f.write_all(&buf).unwrap();
         f.flush().unwrap();
+        let scope = global_scope(f.path().parent().unwrap());
 
-        let err = load_image(f.path().to_str().unwrap()).unwrap_err();
+        let err = load_image(f.path().to_str().unwrap(), &scope).unwrap_err();
         assert!(err.to_string().contains("too large"));
     }
 
@@ -533,9 +553,10 @@ mod tests {
         write_png_file(&mut f);
 
         let path = f.path().to_str().unwrap();
+        let scope = global_scope(f.path().parent().unwrap());
         let mut msg = Message::user().with_text(format!("Look at {path}"));
 
-        inject_images_into_message(&mut msg);
+        inject_images_into_message(&mut msg, &scope);
 
         assert_eq!(msg.content.len(), 2);
         assert!(matches!(&msg.content[0], Content::Text { .. }));
@@ -551,10 +572,11 @@ mod tests {
         write_jpeg_file(&mut f);
 
         let path = f.path().to_str().unwrap();
+        let scope = global_scope(f.path().parent().unwrap());
         let original_text = format!("Check {path}");
         let mut msg = Message::user().with_text(original_text.clone());
 
-        inject_images_into_message(&mut msg);
+        inject_images_into_message(&mut msg, &scope);
 
         assert_eq!(msg.content[0].as_text().unwrap(), original_text);
     }
@@ -565,12 +587,13 @@ mod tests {
         write_png_file(&mut f);
 
         let path = f.path().to_str().unwrap();
+        let scope = global_scope(f.path().parent().unwrap());
         let mut msg = Message::user().with_text(format!("Look at {path}"));
 
-        inject_images_into_message(&mut msg);
+        inject_images_into_message(&mut msg, &scope);
         let count_after_first = msg.content.len();
 
-        inject_images_into_message(&mut msg);
+        inject_images_into_message(&mut msg, &scope);
         assert_eq!(msg.content.len(), count_after_first);
     }
 
@@ -580,10 +603,11 @@ mod tests {
         write_jpeg_file(&mut f);
 
         let path = f.path().to_str().unwrap();
+        let scope = global_scope(f.path().parent().unwrap());
         let mut msg =
             Message::user().with_tool_result("t1", format!("[file saved: {path}]"), false);
 
-        inject_images_into_message(&mut msg);
+        inject_images_into_message(&mut msg, &scope);
 
         assert_eq!(msg.content.len(), 2);
         assert!(matches!(&msg.content[1], Content::Image { .. }));
@@ -591,9 +615,74 @@ mod tests {
 
     #[test]
     fn skips_missing_files_gracefully() {
+        let dir = tempfile::tempdir().unwrap();
+        let scope = global_scope(dir.path());
         let mut msg = Message::user().with_text("/nonexistent/photo.png");
-        inject_images_into_message(&mut msg);
+        inject_images_into_message(&mut msg, &scope);
         assert_eq!(msg.content.len(), 1); // only the text block
+    }
+
+    #[test]
+    fn injects_scope_relative_attachment_for_user_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let attachment_dir = dir.path().join("users/bob/attachments");
+        std::fs::create_dir_all(&attachment_dir).unwrap();
+        let file_path = attachment_dir.join("photo.png");
+        std::fs::write(
+            &file_path,
+            [
+                0x89u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0, 0, 0, 0, 0,
+            ],
+        )
+        .unwrap();
+
+        let scope = user_scope(dir.path(), "bob");
+        let mut msg = Message::user().with_text("[file saved: ./attachments/photo.png]");
+        inject_images_into_message(&mut msg, &scope);
+
+        assert_eq!(msg.content.len(), 2);
+        assert!(matches!(&msg.content[1], Content::Image { .. }));
+    }
+
+    #[test]
+    fn skips_out_of_scope_relative_path_for_user_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let attachment_dir = dir.path().join("users/alice/attachments");
+        std::fs::create_dir_all(&attachment_dir).unwrap();
+        std::fs::write(
+            attachment_dir.join("secret.png"),
+            [
+                0x89u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0, 0, 0, 0, 0,
+            ],
+        )
+        .unwrap();
+
+        let scope = user_scope(dir.path(), "bob");
+        let mut msg = Message::user().with_text("../alice/attachments/secret.png");
+        inject_images_into_message(&mut msg, &scope);
+
+        assert_eq!(msg.content.len(), 1);
+    }
+
+    #[test]
+    fn skips_absolute_host_path_for_user_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let attachment_dir = dir.path().join("users/bob/attachments");
+        std::fs::create_dir_all(&attachment_dir).unwrap();
+        let file_path = attachment_dir.join("photo.png");
+        std::fs::write(
+            &file_path,
+            [
+                0x89u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0, 0, 0, 0, 0,
+            ],
+        )
+        .unwrap();
+
+        let scope = user_scope(dir.path(), "bob");
+        let mut msg = Message::user().with_text(file_path.display().to_string());
+        inject_images_into_message(&mut msg, &scope);
+
+        assert_eq!(msg.content.len(), 1);
     }
 
     // ---- inject_images_for_provider window tests ----
@@ -603,6 +692,7 @@ mod tests {
         // Build 10 user messages; only messages 7-10 reference a real image file.
         let mut f = tempfile::NamedTempFile::with_suffix(".png").unwrap();
         write_png_file(&mut f);
+        let scope = global_scope(f.path().parent().unwrap());
         let real_path = f.path().to_str().unwrap().to_owned();
 
         let mut messages = Vec::new();
@@ -615,7 +705,7 @@ mod tests {
             messages.push(Message::user().with_text(text));
         }
 
-        let result = inject_images_for_provider(&messages);
+        let result = inject_images_for_provider(&messages, &scope);
 
         // Early messages (0-5) referencing nonexistent files should NOT be processed
         for msg in &result[0..6] {
@@ -640,6 +730,7 @@ mod tests {
     fn provider_inject_skips_stale_missing_files() {
         let mut f = tempfile::NamedTempFile::with_suffix(".png").unwrap();
         write_png_file(&mut f);
+        let scope = global_scope(f.path().parent().unwrap());
         let real_path = f.path().to_str().unwrap().to_owned();
 
         // 5 user messages: first references missing file, last references real file
@@ -653,7 +744,7 @@ mod tests {
             messages.push(Message::user().with_text(text));
         }
 
-        let result = inject_images_for_provider(&messages);
+        let result = inject_images_for_provider(&messages, &scope);
 
         // Last message should have injected image
         assert_eq!(result[4].content.len(), 2);
@@ -670,7 +761,9 @@ mod tests {
         }
 
         // This should complete without repeated I/O on the same path.
-        let result = inject_images_for_provider(&messages);
+        let dir = tempfile::tempdir().unwrap();
+        let scope = global_scope(dir.path());
+        let result = inject_images_for_provider(&messages, &scope);
         for msg in &result {
             assert_eq!(msg.content.len(), 1);
         }

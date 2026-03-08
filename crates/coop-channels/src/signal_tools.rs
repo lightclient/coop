@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use anyhow::Result;
 use async_trait::async_trait;
 use coop_core::{Tool, ToolContext, ToolDef, ToolExecutor, ToolOutput};
@@ -434,7 +432,7 @@ impl Tool for SignalSendImageTool {
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Absolute path to the image file to send"
+                        "description": "Path to the image file relative to the current workspace scope"
                     },
                     "caption": {
                         "type": "string",
@@ -450,26 +448,28 @@ impl Tool for SignalSendImageTool {
         let span = info_span!("signal_tool_send_image");
         async {
             let args: SendImageArgs = serde_json::from_value(arguments)?;
-            let file_path = PathBuf::from(&args.path);
+            let target = extract_signal_target_from_session(&ctx.session_id).ok_or_else(|| {
+                anyhow::anyhow!("signal_send_image is only available in Signal chat sessions")
+            })?;
 
-            if !file_path.exists() {
-                return Ok(ToolOutput::error(format!(
-                    "file not found: {}",
-                    file_path.display()
-                )));
-            }
+            let file_path = match ctx.workspace_scope.resolve_user_path_for_write(&args.path) {
+                Ok(path) => path,
+                Err(error) => return Ok(ToolOutput::error(error.to_string())),
+            };
 
-            let file_bytes = std::fs::read(&file_path)?;
+            let file_bytes = match std::fs::read(&file_path) {
+                Ok(bytes) => bytes,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return Ok(ToolOutput::error(format!("file not found: {}", args.path)));
+                }
+                Err(error) => return Err(error.into()),
+            };
             let Some(mime_type) = coop_core::validate_image_magic(&file_bytes) else {
                 return Ok(ToolOutput::error(format!(
                     "file content is not a recognized image format: {}",
                     file_path.display()
                 )));
             };
-
-            let target = extract_signal_target_from_session(&ctx.session_id).ok_or_else(|| {
-                anyhow::anyhow!("signal_send_image is only available in Signal chat sessions")
-            })?;
 
             debug!(
                 tool.name = "signal_send_image",
@@ -543,18 +543,19 @@ impl ToolExecutor for SignalToolExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use coop_core::TrustLevel;
-    use std::path::PathBuf;
+    use coop_core::{SessionKind, TrustLevel};
+    use std::path::{Path, PathBuf};
 
     const GROUP_HEX: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
 
     fn context() -> ToolContext {
-        ToolContext {
-            session_id: "session".to_owned(),
-            trust: TrustLevel::Full,
-            workspace: PathBuf::from("."),
-            user_name: None,
-        }
+        ToolContext::new(
+            "session",
+            SessionKind::Main,
+            TrustLevel::Full,
+            PathBuf::from("."),
+            None,
+        )
     }
 
     fn react_args(chat_id: &str) -> serde_json::Value {
@@ -759,37 +760,42 @@ mod tests {
         assert_eq!(extract_signal_target_from_session("coop:main"), None);
     }
 
-    fn signal_session_context() -> ToolContext {
-        ToolContext {
-            session_id: "coop:dm:signal:alice-uuid".to_owned(),
-            trust: TrustLevel::Full,
-            workspace: PathBuf::from("."),
-            user_name: None,
-        }
+    fn signal_session_context(workspace: &Path) -> ToolContext {
+        ToolContext::new(
+            "coop:dm:signal:alice-uuid",
+            SessionKind::Dm("signal:alice-uuid".to_owned()),
+            TrustLevel::Full,
+            workspace,
+            Some("alice"),
+        )
     }
 
-    fn write_png_tempfile() -> tempfile::NamedTempFile {
+    fn write_png_file(path: &Path) {
         use std::io::Write;
-        let mut f = tempfile::NamedTempFile::with_suffix(".png").unwrap();
+        let mut f = std::fs::File::create(path).unwrap();
         let mut data = vec![0x89u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
         data.extend_from_slice(&[0x00; 20]);
         f.write_all(&data).unwrap();
         f.flush().unwrap();
-        f
     }
 
     #[tokio::test]
     async fn send_image_tool_dispatches_attachment_action() {
         let (tx, mut rx) = mpsc::channel(1);
         let tool = SignalSendImageTool::new(tx);
-        let f = write_png_tempfile();
+        let dir = tempfile::tempdir().unwrap();
+        let image_path = dir.path().join("photo.png");
+        write_png_file(&image_path);
 
         let args = serde_json::json!({
-            "path": f.path().to_str().unwrap(),
+            "path": "photo.png",
             "caption": "a meme"
         });
 
-        let result = tool.execute(args, &signal_session_context()).await.unwrap();
+        let result = tool
+            .execute(args, &signal_session_context(dir.path()))
+            .await
+            .unwrap();
         assert_eq!(result.content, "image sent");
 
         let action = rx.recv().await.unwrap();
@@ -801,7 +807,7 @@ mod tests {
                 caption,
             } => {
                 assert_eq!(target, SignalTarget::Direct("alice-uuid".to_owned()));
-                assert_eq!(path, f.path());
+                assert_eq!(path, image_path);
                 assert_eq!(mime_type, "image/png");
                 assert_eq!(caption.as_deref(), Some("a meme"));
             }
@@ -814,13 +820,18 @@ mod tests {
         use std::io::Write;
         let (tx, _rx) = mpsc::channel(1);
         let tool = SignalSendImageTool::new(tx);
+        let dir = tempfile::tempdir().unwrap();
+        let image_path = dir.path().join("photo.jpg");
 
-        let mut f = tempfile::NamedTempFile::with_suffix(".jpg").unwrap();
+        let mut f = std::fs::File::create(&image_path).unwrap();
         f.write_all(b"<!DOCTYPE html><html></html>").unwrap();
         f.flush().unwrap();
 
-        let args = serde_json::json!({ "path": f.path().to_str().unwrap() });
-        let result = tool.execute(args, &signal_session_context()).await.unwrap();
+        let args = serde_json::json!({ "path": "photo.jpg" });
+        let result = tool
+            .execute(args, &signal_session_context(dir.path()))
+            .await
+            .unwrap();
         assert!(result.content.contains("not a recognized image format"));
     }
 
@@ -828,19 +839,41 @@ mod tests {
     async fn send_image_tool_rejects_missing_file() {
         let (tx, _rx) = mpsc::channel(1);
         let tool = SignalSendImageTool::new(tx);
+        let dir = tempfile::tempdir().unwrap();
 
-        let args = serde_json::json!({ "path": "/nonexistent/meme.png" });
-        let result = tool.execute(args, &signal_session_context()).await.unwrap();
+        let args = serde_json::json!({ "path": "missing.png" });
+        let result = tool
+            .execute(args, &signal_session_context(dir.path()))
+            .await
+            .unwrap();
         assert!(result.content.contains("file not found"));
+    }
+
+    #[tokio::test]
+    async fn send_image_tool_rejects_absolute_path() {
+        let (tx, _rx) = mpsc::channel(1);
+        let tool = SignalSendImageTool::new(tx);
+        let dir = tempfile::tempdir().unwrap();
+        let image_path = dir.path().join("photo.png");
+        write_png_file(&image_path);
+
+        let args = serde_json::json!({ "path": image_path.display().to_string() });
+        let result = tool
+            .execute(args, &signal_session_context(dir.path()))
+            .await
+            .unwrap();
+        assert!(result.content.contains("absolute"));
     }
 
     #[tokio::test]
     async fn send_image_tool_rejects_non_signal_session() {
         let (tx, _rx) = mpsc::channel(1);
         let tool = SignalSendImageTool::new(tx);
-        let f = write_png_tempfile();
+        let dir = tempfile::tempdir().unwrap();
+        let image_path = dir.path().join("photo.png");
+        write_png_file(&image_path);
 
-        let args = serde_json::json!({ "path": f.path().to_str().unwrap() });
+        let args = serde_json::json!({ "path": "photo.png" });
         let error = tool.execute(args, &context()).await.unwrap_err();
         assert!(
             error

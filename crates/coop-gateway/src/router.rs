@@ -165,17 +165,17 @@ impl MessageRouter {
         let decision = self.route(msg);
 
         // Intercept slash commands before other authorization.
-        // Slash commands require the same trust authorization as regular messages.
+        // Slash commands stay restricted to higher-trust users.
         if msg.kind == InboundKind::Command {
             let cfg = self.config.load();
-            if !is_trust_authorized(&decision, msg, &cfg) {
+            if !is_command_authorized(&decision, msg, &cfg) {
                 info!(
                     session = %decision.session_key,
                     trust = ?decision.trust,
                     sender = %msg.sender,
                     channel = %msg.channel,
                     command = %msg.content.trim(),
-                    "slash command rejected: sender lacks full trust"
+                    "slash command rejected: sender lacks command trust"
                 );
                 let _ = event_tx.send(TurnEvent::TextDelta(String::new())).await;
                 let _ = event_tx
@@ -209,13 +209,13 @@ impl MessageRouter {
         }
 
         let cfg = self.config.load();
-        if !is_trust_authorized(&decision, msg, &cfg) {
+        if !is_message_authorized(&decision, msg, &cfg) {
             info!(
                 session = %decision.session_key,
                 trust = ?decision.trust,
                 sender = %msg.sender,
                 channel = %msg.channel,
-                "message rejected: sender lacks full trust"
+                "message rejected: sender is not authorized for this channel"
             );
             let _ = event_tx.send(TurnEvent::TextDelta(String::new())).await;
             let _ = event_tx
@@ -617,13 +617,23 @@ pub(crate) fn route_message(msg: &InboundMessage, config: &Config) -> RouteDecis
 /// Trust gate: only owner/full-trust users may trigger agent turns.
 /// Terminal sessions are always allowed (local physical access).
 /// Configured groups are explicitly opted-in via `[[groups]]`.
-fn is_trust_authorized(decision: &RouteDecision, msg: &InboundMessage, config: &Config) -> bool {
+fn is_command_authorized(decision: &RouteDecision, msg: &InboundMessage, config: &Config) -> bool {
     if msg.channel.starts_with("terminal") {
         return true;
     }
     match &decision.session_key.kind {
         SessionKind::Group(_) => find_group_config(msg, config).is_some(),
         _ => decision.trust <= TrustLevel::Full,
+    }
+}
+
+fn is_message_authorized(decision: &RouteDecision, msg: &InboundMessage, config: &Config) -> bool {
+    if msg.channel.starts_with("terminal") {
+        return true;
+    }
+    match &decision.session_key.kind {
+        SessionKind::Group(_) => find_group_config(msg, config).is_some(),
+        _ => true,
     }
 }
 
@@ -747,7 +757,7 @@ match = ["signal:bob-uuid"]
     }
 
     #[test]
-    fn trust_gate_allows_full_trust() {
+    fn command_auth_allows_full_trust() {
         let cfg = test_config();
         let decision = RouteDecision {
             session_key: SessionKey {
@@ -758,11 +768,11 @@ match = ["signal:bob-uuid"]
             user_name: Some("alice".into()),
         };
         let msg = inbound("signal", "alice-uuid", None, false, None);
-        assert!(is_trust_authorized(&decision, &msg, &cfg));
+        assert!(is_command_authorized(&decision, &msg, &cfg));
     }
 
     #[test]
-    fn trust_gate_rejects_inner_trust() {
+    fn command_auth_rejects_inner_trust() {
         let cfg = test_config();
         let decision = RouteDecision {
             session_key: SessionKey {
@@ -773,11 +783,11 @@ match = ["signal:bob-uuid"]
             user_name: Some("bob".into()),
         };
         let msg = inbound("signal", "bob-uuid", None, false, None);
-        assert!(!is_trust_authorized(&decision, &msg, &cfg));
+        assert!(!is_command_authorized(&decision, &msg, &cfg));
     }
 
     #[test]
-    fn trust_gate_rejects_public_trust() {
+    fn message_auth_allows_public_dm() {
         let cfg = test_config();
         let decision = RouteDecision {
             session_key: SessionKey {
@@ -788,11 +798,11 @@ match = ["signal:bob-uuid"]
             user_name: None,
         };
         let msg = inbound("signal", "mallory-uuid", None, false, None);
-        assert!(!is_trust_authorized(&decision, &msg, &cfg));
+        assert!(is_message_authorized(&decision, &msg, &cfg));
     }
 
     #[test]
-    fn trust_gate_always_allows_terminal() {
+    fn auth_always_allows_terminal() {
         let cfg = test_config();
         let decision = RouteDecision {
             session_key: SessionKey {
@@ -803,7 +813,8 @@ match = ["signal:bob-uuid"]
             user_name: Some("alice".into()),
         };
         let msg = inbound("terminal:default", "alice", None, false, None);
-        assert!(is_trust_authorized(&decision, &msg, &cfg));
+        assert!(is_command_authorized(&decision, &msg, &cfg));
+        assert!(is_message_authorized(&decision, &msg, &cfg));
     }
 
     #[test]
@@ -910,7 +921,8 @@ match = ["signal:bob-uuid"]
             user_name: None,
         };
         let msg = inbound("signal", "alice-uuid", Some("group:deadbeef"), true, None);
-        assert!(!is_trust_authorized(&decision, &msg, &cfg));
+        assert!(!is_command_authorized(&decision, &msg, &cfg));
+        assert!(!is_message_authorized(&decision, &msg, &cfg));
     }
 
     #[test]
@@ -936,7 +948,8 @@ match = ["signal:bob-uuid"]
             user_name: None,
         };
         let msg = inbound("signal", "alice-uuid", Some("group:deadbeef"), true, None);
-        assert!(is_trust_authorized(&decision, &msg, &cfg));
+        assert!(is_command_authorized(&decision, &msg, &cfg));
+        assert!(is_message_authorized(&decision, &msg, &cfg));
     }
 
     #[test]
@@ -1239,11 +1252,10 @@ match = ["signal:bob-uuid"]
     }
 
     #[tokio::test]
-    async fn dispatch_rejects_public_user_silently() {
+    async fn dispatch_allows_public_user_with_limited_trust() {
         let workspace = test_workspace();
         let config = test_config();
-        let provider: Arc<dyn Provider> =
-            Arc::new(FakeProvider::new("should not reach LLM for public user"));
+        let provider: Arc<dyn Provider> = Arc::new(FakeProvider::new("public reply"));
         let executor = Arc::new(DefaultExecutor::new());
         let shared = shared_config(config);
         let gateway = Arc::new(
@@ -1259,37 +1271,32 @@ match = ["signal:bob-uuid"]
         );
         let router = MessageRouter::new(shared, Arc::clone(&gateway));
 
-        // mallory is unknown → public trust, should be silently rejected
         let msg = inbound("signal", "mallory-uuid", None, false, None);
         let (decision, response) = router.dispatch_collect_text(&msg).await.unwrap();
 
         assert_eq!(decision.trust, TrustLevel::Public);
-        assert!(
-            response.is_empty(),
-            "public user should get no response: {response}"
-        );
+        assert_eq!(response, "public reply");
         assert_eq!(
             gateway.session_message_count(&decision.session_key),
-            0,
-            "no session should be created for rejected user"
+            2,
+            "public users should still get a normal session turn"
         );
     }
 
     #[tokio::test]
-    async fn dispatch_rejects_inner_trust_user_on_signal() {
+    async fn dispatch_allows_inner_trust_user_on_signal() {
         let config = test_config();
         let (router, gateway) = make_router_and_gateway(&config);
 
-        // bob has inner trust — should be rejected on signal
         let msg = inbound_with_content("signal", "bob-uuid", "hello");
         let (decision, text) = dispatch_and_collect_text(&router, &msg).await;
 
         assert_eq!(decision.trust, TrustLevel::Inner);
-        assert!(text.is_empty(), "inner-trust user should get no response");
+        assert!(!text.is_empty(), "inner-trust user should get a response");
         assert_eq!(
             gateway.session_message_count(&decision.session_key),
-            0,
-            "no session should be created for rejected user"
+            2,
+            "inner-trust user should get a normal session turn"
         );
     }
 

@@ -42,27 +42,18 @@ pub(crate) fn parse_content(
                 group_revision: None,
             })
         }
-        ContentBody::ReceiptMessage(receipt_message) => {
-            let content_text = prepend_sender_context(
-                &format_receipt_message(receipt_message),
-                &sender,
-                None,
-                timestamp,
-                resolver,
-            );
-            Some(InboundMessage {
-                channel: "signal".to_owned(),
-                sender: sender.clone(),
-                content: content_text,
-                chat_id: None,
-                is_group: false,
-                timestamp: from_epoch_millis(timestamp),
-                reply_to: Some(sender),
-                kind: InboundKind::Receipt,
-                message_timestamp: Some(timestamp),
-                group_revision: None,
-            })
-        }
+        ContentBody::ReceiptMessage(receipt_message) => Some(InboundMessage {
+            channel: "signal".to_owned(),
+            sender: sender.clone(),
+            content: format_receipt_message(receipt_message),
+            chat_id: None,
+            is_group: false,
+            timestamp: from_epoch_millis(timestamp),
+            reply_to: Some(sender),
+            kind: InboundKind::Receipt,
+            message_timestamp: Some(timestamp),
+            group_revision: None,
+        }),
         ContentBody::SynchronizeMessage(sync_message) => {
             inbound_from_sync_message(sync_message, &sender, timestamp, resolver)
         }
@@ -199,10 +190,16 @@ fn inbound_from_data_message(
         });
     }
 
+    let content = if is_group {
+        prepend_sender_context(&body, sender, chat_id.as_deref(), timestamp, resolver)
+    } else {
+        body
+    };
+
     Some(InboundMessage {
         channel: "signal".to_owned(),
         sender: sender.to_owned(),
-        content: prepend_sender_context(&body, sender, chat_id.as_deref(), timestamp, resolver),
+        content,
         chat_id,
         is_group,
         timestamp: from_epoch_millis(timestamp),
@@ -228,16 +225,22 @@ fn inbound_from_edit_message(
     let edited_body = format!("[edited message at {target_timestamp}]\n{body}");
     let (chat_id, is_group, reply_to) = chat_context_from_data_message(data_message, sender);
 
-    Some(InboundMessage {
-        channel: "signal".to_owned(),
-        sender: sender.to_owned(),
-        content: prepend_sender_context(
+    let content = if is_group {
+        prepend_sender_context(
             &edited_body,
             sender,
             chat_id.as_deref(),
             timestamp,
             resolver,
-        ),
+        )
+    } else {
+        edited_body
+    };
+
+    Some(InboundMessage {
+        channel: "signal".to_owned(),
+        sender: sender.to_owned(),
+        content,
         chat_id,
         is_group,
         timestamp: from_epoch_millis(timestamp),
@@ -634,11 +637,7 @@ mod tests {
         assert_eq!(inbound.kind, InboundKind::Reaction);
         assert_eq!(inbound.message_timestamp, Some(1000));
         assert!(inbound.content.contains("[reacted 😀 to message at 55]"));
-        assert!(
-            inbound
-                .content
-                .contains("[from aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa at 1000]")
-        );
+        assert!(!inbound.content.contains("[from "));
     }
 
     #[test]
@@ -837,7 +836,7 @@ mod tests {
         let inbound = inbound_from_content(&content, None).unwrap();
 
         assert_eq!(inbound.kind, InboundKind::Text);
-        assert!(inbound.content.contains("[from"));
+        assert_eq!(inbound.content, "hello there");
     }
 
     // -----------------------------------------------------------------------
@@ -959,8 +958,7 @@ mod tests {
         );
 
         let inbound = inbound_from_content(&content, Some(&resolver)).unwrap();
-        assert!(inbound.content.contains("hey @reid"));
-        assert!(inbound.content.contains("[from Alice Walker (user:alice)"));
+        assert_eq!(inbound.content, "hey @reid");
     }
 
     // -----------------------------------------------------------------------

@@ -53,7 +53,7 @@ impl Tool for WriteFileTool {
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| anyhow::anyhow!("missing required parameter: content"))?;
 
-        let resolved = match super::read_file::resolve_workspace_path(&ctx.workspace, path_str) {
+        let resolved = match super::read_file::resolve_workspace_path(ctx, path_str) {
             Ok(p) => p,
             Err(e) => return Ok(e),
         };
@@ -86,15 +86,11 @@ mod tests {
     use super::*;
     use crate::traits::ToolContext;
     use crate::types::TrustLevel;
+    use crate::{SessionKind, group_workspace_dir_name};
     use std::path::PathBuf;
 
     fn test_ctx(dir: &std::path::Path) -> ToolContext {
-        ToolContext {
-            session_id: "test".into(),
-            trust: TrustLevel::Full,
-            workspace: dir.to_path_buf(),
-            user_name: None,
-        }
+        ToolContext::new("test", SessionKind::Main, TrustLevel::Full, dir, None)
     }
 
     #[tokio::test]
@@ -138,12 +134,13 @@ mod tests {
 
     #[tokio::test]
     async fn trust_gate() {
-        let ctx = ToolContext {
-            session_id: "test".into(),
-            trust: TrustLevel::Familiar,
-            workspace: PathBuf::from("/tmp"),
-            user_name: None,
-        };
+        let ctx = ToolContext::new(
+            "test",
+            SessionKind::Main,
+            TrustLevel::Familiar,
+            PathBuf::from("/tmp"),
+            None,
+        );
         let tool = WriteFileTool;
 
         let output = tool
@@ -174,5 +171,61 @@ mod tests {
 
         assert!(output.is_error);
         assert!(output.content.contains("absolute"));
+    }
+
+    #[tokio::test]
+    async fn inner_trust_user_writes_inside_own_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ToolContext::new(
+            "test",
+            SessionKind::Dm("signal:bob-uuid".to_owned()),
+            TrustLevel::Inner,
+            dir.path(),
+            Some("bob"),
+        );
+        let tool = WriteFileTool;
+
+        let output = tool
+            .execute(
+                serde_json::json!({"path": "note.txt", "content": "bob note"}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert!(!output.is_error);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("users/bob/note.txt")).unwrap(),
+            "bob note"
+        );
+    }
+
+    #[tokio::test]
+    async fn group_session_writes_inside_group_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let group_dir = group_workspace_dir_name("signal:group:deadbeef");
+        let ctx = ToolContext::new(
+            "test",
+            SessionKind::Group("signal:group:deadbeef".to_owned()),
+            TrustLevel::Full,
+            dir.path(),
+            Some("alice"),
+        );
+        let tool = WriteFileTool;
+
+        let output = tool
+            .execute(
+                serde_json::json!({"path": "note.txt", "content": "group note"}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert!(!output.is_error);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("groups").join(group_dir).join("note.txt"))
+                .unwrap(),
+            "group note"
+        );
     }
 }

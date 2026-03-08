@@ -32,35 +32,10 @@ impl ReadFileTool {
     }
 }
 
-fn resolve_path(workspace: &std::path::Path, path_str: &str) -> Result<PathBuf, ToolOutput> {
-    let path = PathBuf::from(path_str);
-
-    if path.is_absolute() {
-        return Err(ToolOutput::error(
-            "absolute paths are not allowed; use paths relative to workspace",
-        ));
-    }
-
-    let resolved = workspace.join(&path);
-
-    // Canonicalize both to check for traversal
-    // The workspace must exist, the target may not yet
-    let canon_workspace = workspace
-        .canonicalize()
-        .map_err(|e| ToolOutput::error(format!("workspace path error: {e}")))?;
-
-    // For existence checks, canonicalize the resolved path
-    let canon_resolved = resolved
-        .canonicalize()
-        .map_err(|e| ToolOutput::error(format!("path error: {e}")))?;
-
-    if !canon_resolved.starts_with(&canon_workspace) {
-        return Err(ToolOutput::error(
-            "path traversal outside workspace is not allowed",
-        ));
-    }
-
-    Ok(canon_resolved)
+fn resolve_path(ctx: &ToolContext, path_str: &str) -> Result<PathBuf, ToolOutput> {
+    ctx.workspace_scope
+        .resolve_user_path_for_read(path_str)
+        .map_err(|error| ToolOutput::error(error.to_string()))
 }
 
 #[async_trait]
@@ -79,7 +54,7 @@ impl Tool for ReadFileTool {
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| anyhow::anyhow!("missing required parameter: path"))?;
 
-        let resolved = match resolve_path(&ctx.workspace, path_str) {
+        let resolved = match resolve_path(ctx, path_str) {
             Ok(p) => p,
             Err(e) => return Ok(e),
         };
@@ -143,42 +118,12 @@ impl Tool for ReadFileTool {
 
 // Re-export resolve_path for write_file to use
 pub(crate) fn resolve_workspace_path(
-    workspace: &std::path::Path,
+    ctx: &ToolContext,
     path_str: &str,
 ) -> Result<PathBuf, ToolOutput> {
-    let path = PathBuf::from(path_str);
-
-    if path.is_absolute() {
-        return Err(ToolOutput::error(
-            "absolute paths are not allowed; use paths relative to workspace",
-        ));
-    }
-
-    let resolved = workspace.join(&path);
-
-    let canon_workspace = workspace
-        .canonicalize()
-        .map_err(|e| ToolOutput::error(format!("workspace path error: {e}")))?;
-
-    // For write, the file may not exist yet — check the parent
-    let parent = resolved
-        .parent()
-        .ok_or_else(|| ToolOutput::error("invalid path"))?;
-
-    // If parent doesn't exist yet, that's OK — we'll create it.
-    // But if it does exist, verify it's inside workspace.
-    if parent.exists() {
-        let canon_parent = parent
-            .canonicalize()
-            .map_err(|e| ToolOutput::error(format!("path error: {e}")))?;
-        if !canon_parent.starts_with(&canon_workspace) {
-            return Err(ToolOutput::error(
-                "path traversal outside workspace is not allowed",
-            ));
-        }
-    }
-
-    Ok(resolved)
+    ctx.workspace_scope
+        .resolve_user_path_for_write(path_str)
+        .map_err(|error| ToolOutput::error(error.to_string()))
 }
 
 #[allow(clippy::unwrap_used)]
@@ -187,14 +132,10 @@ mod tests {
     use super::*;
     use crate::traits::ToolContext;
     use crate::types::TrustLevel;
+    use crate::{SessionKind, group_workspace_dir_name};
 
     fn test_ctx(dir: &std::path::Path) -> ToolContext {
-        ToolContext {
-            session_id: "test".into(),
-            trust: TrustLevel::Full,
-            workspace: dir.to_path_buf(),
-            user_name: None,
-        }
+        ToolContext::new("test", SessionKind::Main, TrustLevel::Full, dir, None)
     }
 
     #[tokio::test]
@@ -280,5 +221,142 @@ mod tests {
             .unwrap();
 
         assert!(output.is_error);
+    }
+
+    #[tokio::test]
+    async fn full_trust_non_group_can_read_other_user_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("users/bob")).unwrap();
+        std::fs::write(dir.path().join("users/bob/note.txt"), "hello bob").unwrap();
+
+        let ctx = ToolContext::new(
+            "test",
+            SessionKind::Dm("signal:alice-uuid".to_owned()),
+            TrustLevel::Full,
+            dir.path(),
+            Some("alice"),
+        );
+        let tool = ReadFileTool;
+
+        let output = tool
+            .execute(serde_json::json!({"path": "users/bob/note.txt"}), &ctx)
+            .await
+            .unwrap();
+
+        assert!(!output.is_error);
+        assert_eq!(output.content, "hello bob");
+    }
+
+    #[tokio::test]
+    async fn inner_trust_user_reads_from_own_workspace_root() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("users/bob")).unwrap();
+        std::fs::write(dir.path().join("users/bob/note.txt"), "hello bob").unwrap();
+
+        let ctx = ToolContext::new(
+            "test",
+            SessionKind::Dm("signal:bob-uuid".to_owned()),
+            TrustLevel::Inner,
+            dir.path(),
+            Some("bob"),
+        );
+        let tool = ReadFileTool;
+
+        let output = tool
+            .execute(serde_json::json!({"path": "note.txt"}), &ctx)
+            .await
+            .unwrap();
+
+        assert!(!output.is_error);
+        assert_eq!(output.content, "hello bob");
+    }
+
+    #[tokio::test]
+    async fn group_session_cannot_escape_to_user_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("users/alice")).unwrap();
+        std::fs::write(dir.path().join("users/alice/secret.txt"), "secret").unwrap();
+
+        let ctx = ToolContext::new(
+            "test",
+            SessionKind::Group("signal:group:deadbeef".to_owned()),
+            TrustLevel::Owner,
+            dir.path(),
+            Some("alice"),
+        );
+        let tool = ReadFileTool;
+
+        let output = tool
+            .execute(
+                serde_json::json!({"path": "../users/alice/secret.txt"}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert!(output.is_error);
+        assert!(output.content.contains("path traversal"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_file_blocks_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("users/bob")).unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "secret").unwrap();
+        symlink(outside.path(), dir.path().join("users/bob/link")).unwrap();
+
+        let ctx = ToolContext::new(
+            "test",
+            SessionKind::Dm("signal:bob-uuid".to_owned()),
+            TrustLevel::Inner,
+            dir.path(),
+            Some("bob"),
+        );
+        let tool = ReadFileTool;
+
+        let output = tool
+            .execute(serde_json::json!({"path": "link/secret.txt"}), &ctx)
+            .await
+            .unwrap();
+
+        assert!(output.is_error);
+        assert!(
+            output
+                .content
+                .contains("outside the current workspace scope")
+        );
+    }
+
+    #[tokio::test]
+    async fn group_session_reads_from_group_workspace_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let group_dir = group_workspace_dir_name("signal:group:deadbeef");
+        std::fs::create_dir_all(dir.path().join("groups").join(&group_dir)).unwrap();
+        std::fs::write(
+            dir.path().join("groups").join(&group_dir).join("note.txt"),
+            "group note",
+        )
+        .unwrap();
+
+        let ctx = ToolContext::new(
+            "test",
+            SessionKind::Group("signal:group:deadbeef".to_owned()),
+            TrustLevel::Full,
+            dir.path(),
+            Some("alice"),
+        );
+        let tool = ReadFileTool;
+
+        let output = tool
+            .execute(serde_json::json!({"path": "note.txt"}), &ctx)
+            .await
+            .unwrap();
+
+        assert!(!output.is_error);
+        assert_eq!(output.content, "group note");
     }
 }

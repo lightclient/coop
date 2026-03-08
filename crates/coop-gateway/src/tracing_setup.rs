@@ -209,6 +209,13 @@ impl Write for RotatingAppender {
 /// TUI commands (`chat`, `attach`) pass `console: false` to avoid polluting the terminal.
 /// Returns a guard that must be held in `main()` to ensure buffered writes flush.
 pub(crate) fn init(console: bool) -> TracingGuard {
+    init_with_trace_file(
+        console,
+        std::env::var("COOP_TRACE_FILE").ok().map(PathBuf::from),
+    )
+}
+
+pub(crate) fn init_with_trace_file(console: bool, trace_file: Option<PathBuf>) -> TracingGuard {
     let mut guards = Vec::new();
 
     let console_layer = console.then(|| {
@@ -222,9 +229,7 @@ pub(crate) fn init(console: bool) -> TracingGuard {
             .with_filter(filter)
     });
 
-    let jsonl_layer = if let Ok(trace_file) = std::env::var("COOP_TRACE_FILE") {
-        let path = PathBuf::from(&trace_file);
-
+    let jsonl_layer = if let Some(path) = trace_file {
         let max_bytes = std::env::var("COOP_TRACE_MAX_SIZE")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())

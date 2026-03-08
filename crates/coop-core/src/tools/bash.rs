@@ -49,6 +49,14 @@ impl Tool for BashTool {
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| anyhow::anyhow!("missing required parameter: command"))?;
 
+        if let Err(error) = ctx
+            .workspace_scope
+            .ensure_scope_root_exists()
+            .and_then(|()| ctx.workspace_scope.scope_root().map(|_| ()))
+        {
+            return Ok(ToolOutput::error(error.to_string()));
+        }
+
         let result = tokio::time::timeout(
             TIMEOUT,
             Command::new("sh")
@@ -120,15 +128,11 @@ impl Tool for BashTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::SessionKind;
     use std::path::PathBuf;
 
     fn test_ctx(dir: &std::path::Path) -> ToolContext {
-        ToolContext {
-            session_id: "test".into(),
-            trust: TrustLevel::Full,
-            workspace: dir.to_path_buf(),
-            user_name: None,
-        }
+        ToolContext::new("test", SessionKind::Main, TrustLevel::Full, dir, None)
     }
 
     #[tokio::test]
@@ -163,12 +167,13 @@ mod tests {
 
     #[tokio::test]
     async fn trust_gate() {
-        let ctx = ToolContext {
-            session_id: "test".into(),
-            trust: TrustLevel::Public,
-            workspace: PathBuf::from("/tmp"),
-            user_name: None,
-        };
+        let ctx = ToolContext::new(
+            "test",
+            SessionKind::Main,
+            TrustLevel::Public,
+            PathBuf::from("/tmp"),
+            None,
+        );
         let tool = BashTool;
 
         let output = tool

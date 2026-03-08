@@ -346,15 +346,17 @@ impl ToolExecutor for ConfigToolExecutor {
 mod tests {
     use super::*;
     use crate::config::{CronConfig, SandboxConfig};
+    use coop_core::SessionKind;
     use std::path::Path;
 
     fn tool_context(trust: TrustLevel) -> ToolContext {
-        ToolContext {
-            session_id: "test-session".to_owned(),
+        ToolContext::new(
+            "test-session",
+            SessionKind::Main,
             trust,
-            workspace: PathBuf::from("."),
-            user_name: None,
-        }
+            PathBuf::from("."),
+            None,
+        )
     }
 
     fn base_config() -> Config {

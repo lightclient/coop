@@ -2,7 +2,7 @@
 use std::io::BufRead;
 
 use coop_core::tools::DefaultExecutor;
-use coop_core::{ToolContext, ToolExecutor, TrustLevel};
+use coop_core::{SessionKind, ToolContext, ToolExecutor, TrustLevel};
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::prelude::*;
 
@@ -33,12 +33,13 @@ async fn tool_execution_produces_expected_spans() {
     let workspace = dir.path().to_path_buf();
     std::fs::write(workspace.join("test.txt"), "hello world").unwrap();
 
-    let ctx = ToolContext {
-        session_id: "test-session".to_owned(),
-        trust: TrustLevel::Full,
-        workspace,
-        user_name: None,
-    };
+    let ctx = ToolContext::new(
+        "test-session",
+        SessionKind::Main,
+        TrustLevel::Full,
+        &workspace,
+        None,
+    );
 
     let _result = executor
         .execute("read_file", serde_json::json!({"path": "test.txt"}), &ctx)

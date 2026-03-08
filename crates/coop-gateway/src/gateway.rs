@@ -191,6 +191,7 @@ impl Gateway {
     /// avoid full cache misses when only the volatile part changes.
     async fn build_prompt(
         &self,
+        session_key: &SessionKey,
         trust: TrustLevel,
         user_name: Option<&str>,
         channel: Option<&str>,
@@ -242,6 +243,7 @@ impl Gateway {
 
             let mut builder = PromptBuilder::new(self.workspace.clone(), cfg.agent.id.clone())
                 .trust(trust)
+                .session_kind(&session_key.kind)
                 .model(&cfg.agent.model)
                 .file_configs(shared_configs)
                 .user_file_configs(user_configs)
@@ -320,18 +322,29 @@ impl Gateway {
         parse_session_key(session, &self.config.load().agent.id)
     }
 
-    fn tool_context(
+    fn turn_workspace_scope(
         &self,
         session_key: &SessionKey,
         trust: TrustLevel,
         user_name: Option<&str>,
+    ) -> coop_core::WorkspaceScope {
+        coop_core::WorkspaceScope::for_turn(&self.workspace, &session_key.kind, trust, user_name)
+    }
+
+    fn tool_context(
+        session_key: &SessionKey,
+        trust: TrustLevel,
+        user_name: Option<&str>,
+        scope: &coop_core::WorkspaceScope,
     ) -> ToolContext {
-        ToolContext {
-            session_id: session_key.to_string(),
+        let _ = scope.ensure_scope_root_exists();
+        ToolContext::new(
+            session_key.to_string(),
+            session_key.kind.clone(),
             trust,
-            workspace: self.workspace.clone(),
-            user_name: user_name.map(str::to_owned),
-        }
+            scope.workspace_root(),
+            user_name,
+        )
     }
 
     #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
@@ -400,8 +413,10 @@ impl Gateway {
                 debug!(session = %session_key, "cleared cron session for fresh execution");
             }
 
-            let mut system_prompt =
-                self.build_prompt(trust, user_name, channel, user_input).await?;
+            let workspace_scope = self.turn_workspace_scope(session_key, trust, user_name);
+            let mut system_prompt = self
+                .build_prompt(session_key, trust, user_name, channel, user_input)
+                .await?;
 
             // Inject group-specific intro when this is a group session.
             // Append to the last block to avoid exceeding the cache_control block limit.
@@ -446,7 +461,7 @@ impl Gateway {
             } else {
                 tool_defs
             };
-            let ctx = self.tool_context(session_key, trust, user_name);
+            let ctx = Self::tool_context(session_key, trust, user_name, &workspace_scope);
             let turn_config = TurnConfig::default();
 
             let mut total_usage = Usage::default();
@@ -481,7 +496,8 @@ impl Gateway {
                         ),
                         None => all_messages,
                     };
-                    let messages = coop_core::images::inject_images_for_provider(&messages);
+                    let messages =
+                        coop_core::images::inject_images_for_provider(&messages, &workspace_scope);
                     let (response, usage) = self
                         .assistant_response(&system_prompt, &messages, &tool_defs, &event_tx)
                         .await?;
@@ -661,7 +677,8 @@ impl Gateway {
                         ),
                         None => all_messages,
                     };
-                    let messages = coop_core::images::inject_images_for_provider(&messages);
+                    let messages =
+                        coop_core::images::inject_images_for_provider(&messages, &workspace_scope);
 
                     let (response, usage) = self
                         .assistant_response(&system_prompt, &messages, &[], &event_tx)
@@ -1316,7 +1333,7 @@ impl Gateway {
         let provider = self.providers.get(trigger_model);
 
         let system_prompt = match self
-            .build_prompt(trust, user_name, channel, user_input)
+            .build_prompt(session_key, trust, user_name, channel, user_input)
             .await
         {
             Ok(blocks) => blocks,

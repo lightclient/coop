@@ -140,6 +140,14 @@ impl SandboxExecutor {
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| anyhow::anyhow!("missing required parameter: command"))?;
 
+        if let Err(error) = ctx
+            .workspace_scope
+            .ensure_scope_root_exists()
+            .and_then(|()| ctx.workspace_scope.scope_root().map(|_| ()))
+        {
+            return Ok(ToolOutput::error(error.to_string()));
+        }
+
         let policy = self.resolve_policy(ctx);
 
         debug!(
@@ -199,7 +207,7 @@ mod tests {
     use super::*;
     use crate::config::{self, shared_config};
     use coop_core::fakes::SimpleExecutor;
-    use coop_core::types::TrustLevel;
+    use coop_core::{SessionKind, types::TrustLevel};
     use std::path::PathBuf;
 
     fn test_config() -> config::Config {
@@ -267,21 +275,23 @@ sandbox = { allow_network = true, memory = "4g", pids_limit = 1024, long_lived =
     }
 
     fn tool_context(trust: TrustLevel) -> ToolContext {
-        ToolContext {
-            session_id: "test-session".to_owned(),
+        ToolContext::new(
+            "test-session",
+            SessionKind::Main,
             trust,
-            workspace: PathBuf::from("/tmp"),
-            user_name: None,
-        }
+            PathBuf::from("/tmp"),
+            None,
+        )
     }
 
     fn tool_context_with_user(trust: TrustLevel, user: &str) -> ToolContext {
-        ToolContext {
-            session_id: "test-session".to_owned(),
+        ToolContext::new(
+            "test-session",
+            SessionKind::Dm(format!("signal:{user}-uuid")),
             trust,
-            workspace: PathBuf::from("/tmp"),
-            user_name: Some(user.to_owned()),
-        }
+            PathBuf::from("/tmp"),
+            Some(user),
+        )
     }
 
     #[tokio::test]

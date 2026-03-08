@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use coop_core::SessionKind;
 use coop_core::TrustLevel;
 use coop_core::traits::{ToolContext, ToolExecutor};
 use coop_memory::{Memory, NewObservation, SqliteMemory, WriteOutcome, min_trust_for_store};
@@ -39,12 +40,7 @@ impl Harness {
     }
 
     fn ctx(&self, trust: TrustLevel) -> ToolContext {
-        ToolContext {
-            session_id: "coop:main".to_owned(),
-            trust,
-            workspace: self.workspace.clone(),
-            user_name: None,
-        }
+        ToolContext::new("coop:main", SessionKind::Main, trust, &self.workspace, None)
     }
 
     async fn write_observation(&self, store: &str, title: &str, related_files: Vec<&str>) -> i64 {
@@ -123,7 +119,7 @@ async fn memory_files_tool_check_exists() {
                 "path": "present.rs",
                 "check_exists": true
             }),
-            &harness.ctx(TrustLevel::Inner),
+            &harness.ctx(TrustLevel::Full),
         )
         .await
         .unwrap();
@@ -143,6 +139,48 @@ async fn memory_files_tool_check_exists() {
 
     assert_eq!(present["exists"], true);
     assert_eq!(missing["exists"], false);
+}
+
+#[tokio::test]
+async fn memory_files_check_exists_respects_workspace_scope() {
+    let harness = Harness::new();
+    std::fs::create_dir_all(harness.workspace.join("users/alice")).unwrap();
+    std::fs::create_dir_all(harness.workspace.join("users/bob")).unwrap();
+    std::fs::write(
+        harness.workspace.join("users/alice/secret.rs"),
+        "fn secret() {}\n",
+    )
+    .unwrap();
+
+    harness
+        .write_observation("shared", "sibling file note", vec!["../alice/secret.rs"])
+        .await;
+
+    let ctx = ToolContext::new(
+        "coop:dm:signal:bob-uuid",
+        SessionKind::Dm("signal:bob-uuid".to_owned()),
+        TrustLevel::Inner,
+        &harness.workspace,
+        Some("bob"),
+    );
+
+    let output = harness
+        .executor
+        .execute(
+            "memory_files",
+            serde_json::json!({
+                "path": "../alice/secret.rs",
+                "check_exists": true
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+
+    assert!(!output.is_error);
+    let payload: serde_json::Value = serde_json::from_str(&output.content).unwrap();
+    let files = payload["results"][0]["files"].as_array().unwrap();
+    assert_eq!(files[0]["exists"], false);
 }
 
 #[tokio::test]

@@ -402,6 +402,7 @@ impl ToolExecutor for ReminderToolExecutor {
 mod tests {
     use super::*;
     use crate::config::Config;
+    use coop_core::SessionKind;
     use std::path::PathBuf;
     use std::sync::Arc;
 
@@ -740,21 +741,23 @@ match = ["terminal:default"]
     }
 
     fn tool_context_with_user(user: &str) -> ToolContext {
-        ToolContext {
-            session_id: "test:dm:signal:alice-uuid".to_owned(),
-            trust: TrustLevel::Full,
-            workspace: PathBuf::from("."),
-            user_name: Some(user.to_owned()),
-        }
+        ToolContext::new(
+            "test:dm:signal:alice-uuid",
+            SessionKind::Dm("signal:alice-uuid".to_owned()),
+            TrustLevel::Full,
+            PathBuf::from("."),
+            Some(user),
+        )
     }
 
     fn tool_context_with_trust(trust: TrustLevel) -> ToolContext {
-        ToolContext {
-            session_id: "test:dm:signal:alice-uuid".to_owned(),
+        ToolContext::new(
+            "test:dm:signal:alice-uuid",
+            SessionKind::Dm("signal:alice-uuid".to_owned()),
             trust,
-            workspace: PathBuf::from("."),
-            user_name: Some("alice".to_owned()),
-        }
+            PathBuf::from("."),
+            Some("alice"),
+        )
     }
 
     fn make_tool_with_config(config: Config) -> (ReminderTool, ReminderStore, tempfile::TempDir) {
@@ -858,12 +861,13 @@ match = ["terminal:default"]
                     "time": future_time,
                     "message": "no channel"
                 }),
-                &ToolContext {
-                    session_id: "test:main".to_owned(),
-                    trust: TrustLevel::Full,
-                    workspace: PathBuf::from("."),
-                    user_name: Some("alice".to_owned()),
-                },
+                &ToolContext::new(
+                    "test:main",
+                    SessionKind::Main,
+                    TrustLevel::Full,
+                    PathBuf::from("."),
+                    Some("alice"),
+                ),
             )
             .await
             .unwrap();

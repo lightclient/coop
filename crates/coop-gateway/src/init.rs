@@ -5,6 +5,7 @@ use crate::init_templates::{
     AGENTS_MD_INIT, BOOTSTRAP_MD, HEARTBEAT_MD, IDENTITY_MD, SIGNAL_MD, SOUL_MD, TOOLS_MD_INIT,
     USER_MD,
 };
+use coop_core::user_workspace_dir_name;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -140,7 +141,9 @@ db_path = "./db/memory.db"
 
 fn scaffold_workspace(dir: &Path, user_name: &str) -> anyhow::Result<Vec<String>> {
     let workspace = dir.join("workspace");
-    let users_dir = workspace.join("users").join(user_name);
+    let users_dir = workspace
+        .join("users")
+        .join(user_workspace_dir_name(user_name));
     let channels_dir = workspace.join("channels");
     let sessions_dir = workspace.join("sessions");
     let db_dir = dir.join("db");

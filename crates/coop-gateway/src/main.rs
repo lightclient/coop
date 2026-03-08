@@ -216,6 +216,21 @@ fn trusted_signal_senders(config: &Config) -> std::collections::HashSet<String> 
         .collect()
 }
 
+/// Extract `(signal_aci, trust)` pairs for attachment/workspace scoping.
+#[cfg(feature = "signal")]
+fn signal_user_trusts(config: &Config) -> HashMap<String, coop_core::TrustLevel> {
+    config
+        .users
+        .iter()
+        .flat_map(|u| {
+            u.r#match
+                .iter()
+                .filter_map(|pattern| pattern.strip_prefix("signal:"))
+                .map(|aci| (aci.to_owned(), u.trust))
+        })
+        .collect()
+}
+
 /// Extract `(signal_aci, coop_user_name)` pairs for identity resolution.
 #[cfg(feature = "signal")]
 fn signal_user_mappings(config: &Config) -> Vec<(String, String)> {
@@ -491,14 +506,15 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
             let db_path = tui_helpers::resolve_config_path(&config_dir, &signal.db_path);
             info!(db_path = %db_path.display(), "signal channel configured");
 
-            let attachments_dir = workspace.join("attachments");
             let trusted_senders = trusted_signal_senders(&config);
+            let user_trusts = signal_user_trusts(&config);
             let agent_name = config.agent.id.clone();
             let user_mappings = signal_user_mappings(&config);
             match SignalChannel::connect(
                 &db_path,
-                attachments_dir,
+                workspace.clone(),
                 trusted_senders,
+                user_trusts,
                 agent_name,
                 user_mappings,
             )

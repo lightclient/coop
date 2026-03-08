@@ -102,17 +102,19 @@ impl ToolExecutor for CompositeExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::SessionKind;
     use crate::fakes::{FakeTool, SimpleExecutor};
     use crate::types::TrustLevel;
     use std::path::PathBuf;
 
     fn tool_context() -> ToolContext {
-        ToolContext {
-            session_id: "session".to_owned(),
-            trust: TrustLevel::Full,
-            workspace: PathBuf::from("."),
-            user_name: None,
-        }
+        ToolContext::new(
+            "session",
+            SessionKind::Main,
+            TrustLevel::Full,
+            PathBuf::from("."),
+            None,
+        )
     }
 
     #[tokio::test]

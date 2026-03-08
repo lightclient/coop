@@ -3,7 +3,7 @@
 //! Every piece of context has a known token cost. Trust level gates visibility.
 //! Files that don't fit the budget overflow to a "priced menu" the agent can fetch on demand.
 
-use crate::TrustLevel;
+use crate::{SessionKind, TrustLevel, WorkspaceScope, user_workspace_dir_name};
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -705,7 +705,7 @@ pub struct PromptBuilder {
     workspace: PathBuf,
     agent_id: String,
     trust: TrustLevel,
-    session_kind: Option<String>,
+    session_kind: SessionKind,
     model: Option<String>,
     channel: Option<String>,
     user: Option<String>,
@@ -724,7 +724,7 @@ impl PromptBuilder {
             workspace,
             agent_id,
             trust: TrustLevel::Public,
-            session_kind: None,
+            session_kind: SessionKind::Main,
             model: None,
             channel: None,
             user: None,
@@ -742,8 +742,8 @@ impl PromptBuilder {
     }
 
     #[must_use]
-    pub fn session_kind(mut self, kind: &str) -> Self {
-        self.session_kind = Some(kind.to_owned());
+    pub fn session_kind(mut self, kind: &SessionKind) -> Self {
+        self.session_kind = kind.clone();
         self
     }
 
@@ -790,6 +790,7 @@ impl PromptBuilder {
     }
 
     /// Build the prompt, using a pre-scanned workspace index.
+    #[allow(clippy::too_many_lines)]
     pub fn build(&self, index: &WorkspaceIndex) -> Result<BuiltPrompt> {
         let _span = info_span!(
             "prompt_build",
@@ -808,9 +809,13 @@ impl PromptBuilder {
         // Per-user file layers (after shared files, before runtime).
         if let Some(user) = &self.user
             && !self.user_file_configs.is_empty()
+            && !matches!(self.session_kind, SessionKind::Group(_))
         {
             let remaining = file_budget.saturating_sub(used_tokens);
-            let user_dir = self.workspace.join(format!("users/{user}"));
+            let user_dir = self
+                .workspace
+                .join("users")
+                .join(user_workspace_dir_name(user));
             let (extra_layers, extra_tokens, extra_overflow) =
                 self.build_scoped_file_layers(&user_dir, &self.user_file_configs, remaining)?;
             used_tokens += extra_tokens;
@@ -836,9 +841,12 @@ impl PromptBuilder {
 
         // Skills index: workspace skills + per-user skills (deduplicated).
         let mut all_skills = self.skills.clone();
-        if let Some(user) = &self.user {
-            let user_dir = self.workspace.join(format!("users/{user}"));
-            let prefix = format!("users/{user}/");
+        if let Some(user) = &self.user
+            && !matches!(self.session_kind, SessionKind::Group(_))
+        {
+            let user_dir_name = user_workspace_dir_name(user);
+            let user_dir = self.workspace.join("users").join(&user_dir_name);
+            let prefix = format!("users/{user_dir_name}/");
             let user_skills = scan_skills_with_prefix(&user_dir, &prefix);
             // User skills override workspace skills with the same name.
             for us in user_skills {
@@ -1199,6 +1207,12 @@ impl PromptBuilder {
 
     fn build_runtime_context(&self) -> Counted {
         let mut parts = vec!["## Runtime".to_owned()];
+        let scope = WorkspaceScope::for_turn(
+            &self.workspace,
+            &self.session_kind,
+            self.trust,
+            self.user.as_deref(),
+        );
 
         let now = chrono::Local::now();
         parts.push(format!("- Date/time: {}", now.format("%Y-%m-%d %H:%M %Z")));
@@ -1210,14 +1224,15 @@ impl PromptBuilder {
         if let Some(channel) = &self.channel {
             parts.push(format!("- Channel: {channel}"));
         }
-        if let Some(kind) = &self.session_kind {
-            parts.push(format!("- Session: {kind}"));
-        }
+        parts.push(format!(
+            "- Session: {}",
+            describe_session_kind(&self.session_kind)
+        ));
         if let Some(user) = &self.user {
             parts.push(format!("- User: {user}"));
-            parts.push(format!("- User home: users/{user}/"));
         }
         parts.push(format!("- Trust: {:?}", self.trust));
+        parts.push(format!("- Effective workspace: {}", scope.scope_display()));
 
         Counted::new(parts.join("\n"))
     }
@@ -1280,6 +1295,16 @@ impl PromptBuilder {
             "HEARTBEAT.md" => "heartbeat",
             _ => "workspace_file",
         }
+    }
+}
+
+fn describe_session_kind(kind: &SessionKind) -> String {
+    match kind {
+        SessionKind::Main => "main".to_owned(),
+        SessionKind::Dm(identity) => format!("dm ({identity})"),
+        SessionKind::Group(group) => format!("group ({group})"),
+        SessionKind::Isolated(id) => format!("isolated ({id})"),
+        SessionKind::Cron(name) => format!("cron ({name})"),
     }
 }
 
@@ -1716,7 +1741,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_layer_includes_user_and_home() {
+    fn runtime_layer_includes_user_and_effective_workspace() {
         let dir = setup_workspace(&[]);
 
         let index = WorkspaceIndex::scan(dir.path(), &default_file_configs()).unwrap();
@@ -1729,8 +1754,8 @@ mod tests {
         let flat = prompt.to_flat_string();
         assert!(flat.contains("User: alice"), "should contain user name");
         assert!(
-            flat.contains("User home: users/alice/"),
-            "should contain user home dir"
+            flat.contains("Effective workspace: ./"),
+            "full-trust non-group turns should use the global workspace"
         );
     }
 
@@ -1747,9 +1772,24 @@ mod tests {
         let flat = prompt.to_flat_string();
         assert!(!flat.contains("User:"), "should not contain user line");
         assert!(
-            !flat.contains("User home:"),
-            "should not contain user home line"
+            flat.contains("Effective workspace: ./"),
+            "global sessions should still report the effective workspace"
         );
+    }
+
+    #[test]
+    fn runtime_layer_uses_user_workspace_for_low_trust_turns() {
+        let dir = setup_workspace(&[]);
+
+        let index = WorkspaceIndex::scan(dir.path(), &default_file_configs()).unwrap();
+        let prompt = PromptBuilder::new(dir.path().to_path_buf(), "reid".into())
+            .trust(TrustLevel::Inner)
+            .user("alice")
+            .build(&index)
+            .unwrap();
+
+        let flat = prompt.to_flat_string();
+        assert!(flat.contains("Effective workspace: users/alice/"));
     }
 
     #[test]
@@ -1817,6 +1857,34 @@ mod tests {
             !flat.contains("Alice likes rust."),
             "should not include per-user file without user set"
         );
+    }
+
+    #[test]
+    fn group_sessions_do_not_include_user_files() {
+        let dir = setup_workspace(&[("SOUL.md", "I am an agent.")]);
+        fs::create_dir_all(dir.path().join("users/alice")).unwrap();
+        fs::write(dir.path().join("users/alice/USER.md"), "Alice likes rust.").unwrap();
+
+        let user_configs = vec![PromptFileConfig {
+            path: "USER.md".into(),
+            min_trust: TrustLevel::Full,
+            cache: CacheHint::Session,
+            description: "Per-user info".into(),
+            default_content: None,
+        }];
+
+        let index = WorkspaceIndex::scan(dir.path(), &default_file_configs()).unwrap();
+        let prompt = PromptBuilder::new(dir.path().to_path_buf(), "reid".into())
+            .trust(TrustLevel::Full)
+            .session_kind(&SessionKind::Group("signal:group:deadbeef".to_owned()))
+            .user("alice")
+            .user_file_configs(user_configs)
+            .build(&index)
+            .unwrap();
+
+        let flat = prompt.to_flat_string();
+        assert!(!flat.contains("Alice likes rust."));
+        assert!(flat.contains("Effective workspace: groups/"));
     }
 
     #[test]
@@ -2107,6 +2175,29 @@ mod tests {
             flat.contains("users/alice/skills/tmux/SKILL.md"),
             "path should point to user skill"
         );
+    }
+
+    #[test]
+    fn group_sessions_do_not_include_user_skills() {
+        let dir = setup_workspace(&[("SOUL.md", "I am an agent.")]);
+        fs::create_dir_all(dir.path().join("users/alice/skills/my-tool")).unwrap();
+        fs::write(
+            dir.path().join("users/alice/skills/my-tool/SKILL.md"),
+            "---\nname: my-tool\ndescription: \"Alice's custom tool\"\n---\n# my-tool",
+        )
+        .unwrap();
+
+        let index = WorkspaceIndex::scan(dir.path(), &default_file_configs()).unwrap();
+        let prompt = PromptBuilder::new(dir.path().to_path_buf(), "reid".into())
+            .trust(TrustLevel::Full)
+            .session_kind(&SessionKind::Group("signal:group:deadbeef".to_owned()))
+            .user("alice")
+            .build(&index)
+            .unwrap();
+
+        let flat = prompt.to_flat_string();
+        assert!(!flat.contains("Alice's custom tool"));
+        assert!(!flat.contains("users/alice/skills/my-tool/SKILL.md"));
     }
 
     #[test]

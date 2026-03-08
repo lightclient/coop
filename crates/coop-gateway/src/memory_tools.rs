@@ -339,7 +339,7 @@ impl MemoryToolExecutor {
                 .into_iter()
                 .map(|file| {
                     if check_exists {
-                        let exists = file_exists_in_workspace(&ctx.workspace, &file);
+                        let exists = file_exists_in_workspace(&ctx.workspace_scope, &file);
                         if !exists {
                             stale_file_count = stale_file_count.saturating_add(1);
                         }
@@ -655,21 +655,15 @@ fn normalize_file_list(files: Vec<String>) -> Vec<String> {
     normalized
 }
 
-fn file_exists_in_workspace(workspace: &Path, file: &str) -> bool {
-    let path = Path::new(file);
-    let resolved = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        workspace.join(path)
-    };
-    resolved.exists()
+fn file_exists_in_workspace(scope: &coop_core::WorkspaceScope, file: &str) -> bool {
+    scope.contains_host_path(Path::new(file))
 }
 
 #[allow(clippy::unwrap_used)]
 #[cfg(test)]
 mod tests {
     use super::*;
-    use coop_core::{SessionKey, SessionKind, TrustLevel};
+    use coop_core::{SessionKey, SessionKind, ToolContext, TrustLevel};
     use coop_memory::SqliteMemory;
     use std::path::Path;
 
@@ -678,12 +672,7 @@ mod tests {
     }
 
     fn ctx_in(trust: TrustLevel, workspace: &Path) -> ToolContext {
-        ToolContext {
-            session_id: "coop:main".to_owned(),
-            trust,
-            workspace: workspace.to_path_buf(),
-            user_name: None,
-        }
+        ToolContext::new("coop:main", SessionKind::Main, trust, workspace, None)
     }
 
     fn executor_with_memory() -> (MemoryToolExecutor, Arc<SqliteMemory>) {
@@ -949,7 +938,7 @@ mod tests {
                     "path": "existing.rs",
                     "check_exists": true
                 }),
-                &ctx_in(TrustLevel::Inner, dir.path()),
+                &ctx_in(TrustLevel::Full, dir.path()),
             )
             .await
             .unwrap();

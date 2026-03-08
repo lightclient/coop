@@ -18,8 +18,8 @@ pub use testkit::MockSignalChannel;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use coop_core::{
-    Channel, ChannelHealth, InboundMessage, OutboundMessage, SessionKey, SessionKind,
-    TypingNotifier,
+    Channel, ChannelHealth, InboundMessage, OutboundMessage, SessionKey, SessionKind, TrustLevel,
+    TypingNotifier, WorkspaceScope,
 };
 use futures::StreamExt;
 use inbound::{format_attachment_metadata, inbound_from_content};
@@ -34,7 +34,7 @@ use presage::proto::data_message::{Quote, Reaction};
 use presage::proto::{AttachmentPointer, TypingMessage, typing_message};
 use presage::{Manager, store::StateStore};
 use presage_store_sqlite::{SqliteConnectOptions, SqliteStore};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, UNIX_EPOCH};
@@ -171,8 +171,9 @@ impl SignalChannel {
     /// `user_mappings` maps Signal ACIs to coop user names from `[[users]]` config.
     pub async fn connect(
         db_path: impl AsRef<Path>,
-        attachments_dir: impl Into<PathBuf>,
+        workspace_root: impl Into<PathBuf>,
         trusted_senders: HashSet<String>,
+        user_trusts: HashMap<String, TrustLevel>,
         agent_name: String,
         user_mappings: Vec<(String, String)>,
     ) -> Result<Self> {
@@ -201,8 +202,9 @@ impl SignalChannel {
             action_rx,
             query_rx,
             Arc::clone(&health),
-            attachments_dir.into(),
+            workspace_root.into(),
             trusted_senders,
+            user_trusts,
             Arc::clone(&resolver),
         );
 
@@ -314,8 +316,9 @@ fn start_signal_runtime(
     action_rx: mpsc::Receiver<SignalAction>,
     query_rx: mpsc::Receiver<SignalQuery>,
     health: HealthState,
-    attachments_dir: PathBuf,
+    workspace_root: PathBuf,
     trusted_senders: HashSet<String>,
+    user_trusts: HashMap<String, TrustLevel>,
     resolver: Arc<name_resolver::SignalNameResolver>,
 ) {
     std::thread::Builder::new()
@@ -354,8 +357,9 @@ fn start_signal_runtime(
                     inbound_tx,
                     action_tx,
                     receive_health,
-                    attachments_dir,
+                    workspace_root,
                     trusted_senders,
+                    user_trusts,
                     receive_resolver,
                 )));
                 let send_task =
@@ -403,8 +407,9 @@ async fn receive_task(
     inbound_tx: mpsc::Sender<InboundMessage>,
     action_tx: mpsc::Sender<SignalAction>,
     health: HealthState,
-    attachments_dir: PathBuf,
+    workspace_root: PathBuf,
     trusted_senders: HashSet<String>,
+    user_trusts: HashMap<String, TrustLevel>,
     resolver: Arc<name_resolver::SignalNameResolver>,
 ) {
     // Separate manager clone for downloading attachments. The receive stream
@@ -471,7 +476,10 @@ async fn receive_task(
                             download_and_rewrite_attachments(
                                 &attachment_manager,
                                 &pointers,
-                                &attachments_dir,
+                                &workspace_root,
+                                &sender,
+                                &resolver,
+                                &user_trusts,
                                 timestamp,
                                 &mut inbound,
                             )
@@ -931,18 +939,76 @@ fn extract_attachment_pointers(
 }
 
 /// Download each attachment, save to disk, and rewrite the inbound message
-/// content to include the saved file paths so the agent can access them.
+/// content to include scope-relative file paths so the agent can access them.
 /// Maximum attachment size we'll save to disk (100 MB).
 const MAX_ATTACHMENT_BYTES: usize = 100 * 1024 * 1024;
 
+fn attachment_scope_for_inbound(
+    workspace_root: &Path,
+    sender_aci: &str,
+    inbound: &InboundMessage,
+    resolver: &name_resolver::SignalNameResolver,
+    user_trusts: &HashMap<String, TrustLevel>,
+) -> Option<WorkspaceScope> {
+    if inbound.is_group {
+        let chat_id = inbound.chat_id.as_deref()?;
+        let namespaced_group = if chat_id.starts_with("signal:") {
+            chat_id.to_owned()
+        } else {
+            format!("signal:{chat_id}")
+        };
+        return Some(WorkspaceScope::for_group_principal(
+            workspace_root,
+            &namespaced_group,
+        ));
+    }
+
+    let coop_name = resolver.resolve(sender_aci)?.coop_name.as_deref()?;
+    let trust = user_trusts
+        .get(sender_aci)
+        .copied()
+        .unwrap_or(TrustLevel::Inner);
+    let session_kind = SessionKind::Dm(format!("signal:{sender_aci}"));
+    Some(WorkspaceScope::for_turn(
+        workspace_root,
+        &session_kind,
+        trust,
+        Some(coop_name),
+    ))
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn download_and_rewrite_attachments(
     manager: &SignalManager,
     pointers: &[&AttachmentPointer],
-    attachments_dir: &Path,
+    workspace_root: &Path,
+    sender_aci: &str,
+    resolver: &name_resolver::SignalNameResolver,
+    user_trusts: &HashMap<String, TrustLevel>,
     timestamp: u64,
     inbound: &mut InboundMessage,
 ) {
-    if let Err(e) = std::fs::create_dir_all(attachments_dir) {
+    let Some(scope) =
+        attachment_scope_for_inbound(workspace_root, sender_aci, inbound, resolver, user_trusts)
+    else {
+        warn!(
+            sender = %sender_aci,
+            chat_id = ?inbound.chat_id,
+            is_group = inbound.is_group,
+            "skipping attachment save: no scoped workspace available"
+        );
+        return;
+    };
+
+    let attachments_dir = match scope.attachments_dir() {
+        Ok(dir) => dir,
+        Err(error) => {
+            warn!(error = %error, "failed to resolve attachment scope directory");
+            return;
+        }
+    };
+
+    if let Err(e) = std::fs::create_dir_all(&attachments_dir) {
         warn!(error = %e, dir = %attachments_dir.display(), "failed to create attachments directory");
         return;
     }
@@ -994,14 +1060,19 @@ async fn download_and_rewrite_attachments(
                     } else {
                         match std::fs::write(&save_path, &data) {
                             Ok(()) => {
+                                let relative_ref = scope
+                                    .scope_relative_path(&save_path)
+                                    .unwrap_or_else(|_| format!("./attachments/{save_name}"));
                                 info!(
                                     attachment_index,
                                     path = %save_path.display(),
+                                    relative_path = %relative_ref,
                                     size = data.len(),
                                     file_name,
+                                    scoped_root = %scope.scope_display(),
                                     "saved signal attachment"
                                 );
-                                format!("{original_meta}\n[file saved: {}]", save_path.display())
+                                format!("{original_meta}\n[file saved: {relative_ref}]")
                             }
                             Err(e) => {
                                 warn!(

@@ -4,12 +4,13 @@
 //! other crates (coop-agent for providers, coop-channels for channels, etc.).
 
 use crate::types::{
-    ChannelHealth, InboundMessage, Message, ModelInfo, OutboundMessage, SessionKey, ToolDef,
-    ToolOutput, TrustLevel, Usage,
+    ChannelHealth, InboundMessage, Message, ModelInfo, OutboundMessage, SessionKey, SessionKind,
+    ToolDef, ToolOutput, TrustLevel, Usage,
 };
+use crate::workspace_scope::WorkspaceScope;
 use anyhow::Result;
 use async_trait::async_trait;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
 /// A communication channel (terminal, Discord, Signal, etc.).
@@ -110,12 +111,39 @@ pub trait Provider: Send + Sync {
 // ---------------------------------------------------------------------------
 
 /// Context available to a tool during execution.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ToolContext {
     pub session_id: String,
+    pub session_kind: SessionKind,
     pub trust: TrustLevel,
+    pub workspace_root: PathBuf,
     pub workspace: PathBuf,
+    pub workspace_scope: WorkspaceScope,
     pub user_name: Option<String>,
+}
+
+impl ToolContext {
+    pub fn new(
+        session_id: impl Into<String>,
+        session_kind: SessionKind,
+        trust: TrustLevel,
+        workspace_root: impl AsRef<Path>,
+        user_name: Option<&str>,
+    ) -> Self {
+        let workspace_scope =
+            WorkspaceScope::for_turn(workspace_root.as_ref(), &session_kind, trust, user_name);
+        let workspace = workspace_scope.tool_workspace_root();
+
+        Self {
+            session_id: session_id.into(),
+            session_kind,
+            trust,
+            workspace_root: workspace_scope.workspace_root().to_path_buf(),
+            workspace,
+            workspace_scope,
+            user_name: user_name.map(str::to_owned),
+        }
+    }
 }
 
 /// A tool that Coop can execute (native or MCP).
