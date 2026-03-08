@@ -1257,3 +1257,64 @@ async fn previously_dropped_messages_are_now_preserved() {
          Session user texts: {all_text}"
     );
 }
+
+/// Regression test: when the provider emits text alongside tool requests
+/// across multiple iterations, and the final iteration has empty text,
+/// quiet mode must send only the last non-empty text — not a concatenation
+/// of all intermediate fragments (which produces missing spaces like
+/// "options.Good" instead of separate messages).
+#[tokio::test]
+async fn quiet_mode_uses_last_text_not_concatenation_of_all_iterations() {
+    // Simulates a multi-iteration turn:
+    //   iter 0: text "Status update one." + tool_request   (thinking aloud)
+    //   iter 1: text "The final detailed answer." + tool_request  (memory_write)
+    //   iter 2: empty text, no tool requests   (end_turn)
+    //
+    // Bug: quiet mode accumulated TextDeltas from all iterations, producing
+    //   "Status update one.The final detailed answer."
+    // Fix: quiet mode replaces `text` with each non-empty AssistantMessage,
+    //   so only "The final detailed answer." survives.
+    let provider: Arc<dyn Provider> = Arc::new(ScriptedProvider::new(vec![
+        Message::assistant()
+            .with_text("Status update one.")
+            .with_tool_request("t1", "fake_tool", serde_json::json!({})),
+        Message::assistant()
+            .with_text("The final detailed answer.")
+            .with_tool_request("t2", "fake_tool", serde_json::json!({})),
+        Message::assistant().with_text(""),
+    ]));
+    let router = build_router(
+        provider,
+        Arc::new(DefaultExecutor::new()) as Arc<dyn ToolExecutor>,
+        None,
+    );
+
+    let mut channel = MockSignalChannel::new();
+    channel
+        .inject_inbound(inbound_message(
+            InboundKind::Text,
+            "alice-uuid",
+            None,
+            false,
+            Some("alice-uuid"),
+        ))
+        .await
+        .unwrap();
+
+    handle_signal_inbound_once(&mut channel, router.as_ref())
+        .await
+        .unwrap();
+
+    let outbound = channel.take_outbound();
+    assert_eq!(
+        outbound.len(),
+        1,
+        "expected exactly 1 outbound message, got {}: {:?}",
+        outbound.len(),
+        outbound.iter().map(|m| &m.content).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        outbound[0].content, "The final detailed answer.",
+        "quiet mode should send only the last non-empty text, not concatenate all iterations"
+    );
+}
