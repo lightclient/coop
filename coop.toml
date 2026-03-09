@@ -17,3 +17,22 @@ name = "anthropic"
 
 [memory]
 db_path = "./db/memory.db"
+
+# Scheduled tasks
+# delivery = "as_needed": if the cron replies with only NO_ACTION_NEEDED,
+# delivery is suppressed. Otherwise the response is delivered.
+# delivery = "always": every response is delivered literally.
+#
+# [[cron]]
+# name = "heartbeat"
+# cron = "*/30 * * * *"
+# user = "alice"
+# delivery = "as_needed"
+# message = "check HEARTBEAT.md"
+#
+# [[cron]]
+# name = "morning-briefing"
+# cron = "0 8 * * *"
+# user = "alice"
+# delivery = "always"
+# message = "Morning briefing"

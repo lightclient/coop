@@ -187,22 +187,25 @@ dimensions = 1024
 # api_key_env = "YOUR_API_KEY_ENV_VAR"
 
 # Scheduled tasks
-# Heartbeat: auto-delivers to all channels the user is bound to.
-# If user has signal match patterns, response goes to Signal.
-# If the agent responds with HEARTBEAT_OK (nothing to report),
-# delivery is suppressed. Empty HEARTBEAT.md skips the LLM call entirely.
+# delivery = "as_needed": if nothing needs attention, the agent replies
+# with NO_ACTION_NEEDED and delivery is suppressed. If something needs
+# attention, the response is delivered. Empty HEARTBEAT.md still skips the
+# LLM call entirely for heartbeat-style checks.
 [[cron]]
 name = "heartbeat"
 cron = "*/30 * * * *"              # standard cron expression
 user = "alice"                     # run as this user (optional, must exist in users)
+delivery = "as_needed"
 message = "check HEARTBEAT.md"     # message sent to the agent
 
 # Explicit delivery override: sends response to a specific target
 # instead of auto-resolving from user match patterns.
+# delivery = "always": every response is delivered literally.
 [[cron]]
 name = "morning-briefing"
 cron = "0 8 * * *"
 user = "alice"
+delivery = "always"
 message = "Morning briefing"
 
 [cron.deliver]
@@ -234,7 +237,8 @@ message = "run cleanup"
 - Embedding dimensions: 1..=8192
 - Cron users must exist in the users list
 - Cron delivery channel must be `signal`
-- Cron with user but no `deliver`: warns if user has no non-terminal match patterns (heartbeat will have no delivery targets)
+- Cron `delivery` must be `always` or `as_needed`
+- Cron with user but no `deliver`: warns if user has no non-terminal match patterns (cron will have no delivery targets)
 - API keys: if `provider.api_keys` is set, each entry must use `env:` prefix and the referenced env var must be set. Otherwise, `ANTHROPIC_API_KEY` must be set. Plus embedding provider key if configured
 - Sandbox: memory must be a valid size (e.g. `2g`, `512m`), pids_limit > 0
 - Sandbox: at most one user with `trust = "owner"`; warns if sandbox enabled but no owner configured

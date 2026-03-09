@@ -11,8 +11,11 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, error, info, info_span, warn};
 
-use crate::config::{Config, CronConfig, SharedConfig};
-use crate::heartbeat::{HeartbeatResult, is_heartbeat_content_empty, strip_heartbeat_token};
+use crate::config::{Config, CronConfig, CronDeliveryMode, SharedConfig};
+use crate::heartbeat::{
+    NO_ACTION_NEEDED_TOKEN, SuppressionTokenResult, contains_legacy_heartbeat_token,
+    is_heartbeat_content_empty, strip_suppression_token,
+};
 use crate::reminder::{Reminder, ReminderStore};
 use crate::router::MessageRouter;
 
@@ -347,9 +350,12 @@ async fn fire_cron(
     deliver_tx: Option<&DeliverySender>,
     shared_config: &SharedConfig,
 ) {
+    let delivery_mode = cfg.effective_delivery_mode();
     let span = info_span!(
         "cron_fired",
         cron.name = %cfg.name,
+        cron.delivery_mode = %delivery_mode,
+        cron.legacy_delivery_mode = cfg.uses_legacy_delivery_mode(),
         user = ?cfg.user,
     );
 
@@ -358,6 +364,8 @@ async fn fire_cron(
             cron = %cfg.cron,
             message = %cfg.message,
             user = ?cfg.user,
+            cron.delivery_mode = %delivery_mode,
+            cron.legacy_delivery_mode = cfg.uses_legacy_delivery_mode(),
             "cron firing"
         );
 
@@ -392,12 +400,6 @@ async fn fire_cron(
 
         let content = if delivery_targets.is_empty() {
             cfg.message.clone()
-        } else if cfg.message.contains("HEARTBEAT.md") {
-            format!(
-                "[Your response will be delivered to the user via {}. Reply HEARTBEAT_OK if nothing needs attention. Your response is delivered automatically.]\n\n{}",
-                prompt_channel.as_deref().unwrap_or("messaging"),
-                cfg.message
-            )
         } else {
             format!(
                 "[Your response will be delivered to the user via {}. Your response is delivered automatically.]\n\n{}",
@@ -419,8 +421,14 @@ async fn fire_cron(
             group_revision: None,
         };
 
+        let prompt_delivery_mode = (!delivery_targets.is_empty()).then_some(delivery_mode);
+
         match router
-            .dispatch_collect_text_with_channel(&inbound, prompt_channel)
+            .dispatch_collect_text_with_channel_and_cron_delivery(
+                &inbound,
+                prompt_channel,
+                prompt_delivery_mode,
+            )
             .await
         {
             Ok((decision, response)) => {
@@ -464,17 +472,44 @@ async fn deliver_cron_response(
         return;
     }
 
-    // Only heartbeat crons support HEARTBEAT_OK suppression.
-    let content_to_deliver = if cfg.message.contains("HEARTBEAT.md") {
-        match strip_heartbeat_token(&response) {
-            HeartbeatResult::Suppress => {
-                debug!(cron.name = %cfg.name, "heartbeat suppressed: HEARTBEAT_OK token detected");
+    let delivery_mode = cfg.effective_delivery_mode();
+    let content_to_deliver = match delivery_mode {
+        CronDeliveryMode::AsNeeded => match strip_suppression_token(&response) {
+            SuppressionTokenResult::Suppress => {
+                if contains_legacy_heartbeat_token(&response) {
+                    debug!(
+                        cron.name = %cfg.name,
+                        cron.delivery_mode = %delivery_mode,
+                        token = %NO_ACTION_NEEDED_TOKEN,
+                        legacy_token = true,
+                        "cron suppressed: legacy HEARTBEAT_OK token detected"
+                    );
+                } else {
+                    debug!(
+                        cron.name = %cfg.name,
+                        cron.delivery_mode = %delivery_mode,
+                        token = %NO_ACTION_NEEDED_TOKEN,
+                        "cron suppressed: NO_ACTION_NEEDED token detected"
+                    );
+                }
                 return;
             }
-            HeartbeatResult::Deliver(cleaned) => cleaned,
+            SuppressionTokenResult::Deliver(cleaned) => cleaned,
+        },
+        CronDeliveryMode::Always => {
+            if matches!(
+                strip_suppression_token(&response),
+                SuppressionTokenResult::Suppress
+            ) {
+                warn!(
+                    cron.name = %cfg.name,
+                    cron.delivery_mode = %delivery_mode,
+                    token = %NO_ACTION_NEEDED_TOKEN,
+                    "cron configured for always delivery emitted suppression token; delivering literal content"
+                );
+            }
+            response
         }
-    } else {
-        response
     };
 
     for (channel, target) in delivery_targets {
@@ -826,6 +861,7 @@ mod tests {
             cron: "*/30 * * * *".to_owned(),
             message: "check tasks".to_owned(),
             user: Some("alice".to_owned()),
+            delivery: None,
             deliver: None,
             sandbox: None,
         };
@@ -843,6 +879,7 @@ mod tests {
             cron: "0 3 * * *".to_owned(),
             message: "run cleanup".to_owned(),
             user: None,
+            delivery: None,
             deliver: None,
             sandbox: None,
         };
@@ -881,6 +918,7 @@ mod tests {
             cron: "0 0 1 1 *".to_owned(),
             message: "test".to_owned(),
             user: None,
+            delivery: None,
             deliver: None,
             sandbox: None,
         }];
@@ -918,6 +956,7 @@ mod tests {
             cron: "* * * * * * *".to_owned(), // every second
             message: "heartbeat check".to_owned(),
             user: Some("alice".to_owned()),
+            delivery: None,
             deliver: None,
             sandbox: None,
         }];
@@ -959,6 +998,7 @@ mod tests {
             cron: "* * * * * * *".to_owned(),
             message: "run cleanup".to_owned(),
             user: None,
+            delivery: None,
             deliver: None,
             sandbox: None,
         }];
@@ -1002,6 +1042,7 @@ mod tests {
             cron: "*/30 * * * *".to_owned(),
             message: "check tasks".to_owned(),
             user: Some("alice".to_owned()),
+            delivery: None,
             deliver: None,
             sandbox: None,
         };
@@ -1028,6 +1069,7 @@ mod tests {
             cron: "0 3 * * *".to_owned(),
             message: "run cleanup".to_owned(),
             user: None,
+            delivery: None,
             deliver: None,
             sandbox: None,
         };
@@ -1054,6 +1096,7 @@ mod tests {
             cron: "*/30 * * * *".to_owned(),
             message: "check tasks".to_owned(),
             user: None,
+            delivery: None,
             deliver: None,
             sandbox: None,
         };
@@ -1160,6 +1203,7 @@ mod tests {
             cron: "0 8 * * *".to_owned(),
             message: "Morning briefing".to_owned(),
             user: None,
+            delivery: None,
             deliver: Some(CronDelivery {
                 channel: "signal".to_owned(),
                 target: "alice-uuid".to_owned(),
@@ -1187,6 +1231,7 @@ mod tests {
             cron: "0 8 * * *".to_owned(),
             message: "Morning briefing".to_owned(),
             user: None,
+            delivery: None,
             deliver: Some(CronDelivery {
                 channel: "signal".to_owned(),
                 target: "alice-uuid".to_owned(),
@@ -1224,6 +1269,7 @@ mod tests {
             cron: "*/30 * * * *".to_owned(),
             message: "check tasks".to_owned(),
             user: None,
+            delivery: None,
             deliver: Some(CronDelivery {
                 channel: "signal".to_owned(),
                 target: "alice-uuid".to_owned(),
@@ -1275,6 +1321,7 @@ mod tests {
             cron: "0 8 * * *".to_owned(),
             message: "Morning briefing".to_owned(),
             user: None,
+            delivery: None,
             deliver: Some(CronDelivery {
                 channel: "signal".to_owned(),
                 target: "alice-uuid".to_owned(),
@@ -1302,6 +1349,7 @@ mod tests {
             cron: "*/30 * * * *".to_owned(),
             message: "check tasks".to_owned(),
             user: None,
+            delivery: None,
             deliver: None,
             sandbox: None,
         };
@@ -1322,6 +1370,7 @@ mod tests {
             cron: "0 8 * * *".to_owned(),
             message: "Morning briefing".to_owned(),
             user: None,
+            delivery: None,
             deliver: Some(CronDelivery {
                 channel: "signal".to_owned(),
                 target: "alice-uuid".to_owned(),
@@ -1344,6 +1393,7 @@ mod tests {
             cron: "0 8 * * *".to_owned(),
             message: "Morning briefing".to_owned(),
             user: None,
+            delivery: None,
             deliver: Some(CronDelivery {
                 channel: "signal".to_owned(),
                 target: "alice-uuid".to_owned(),
@@ -1371,6 +1421,7 @@ mod tests {
             cron: "0 7 * * *".to_owned(),
             message: "Read WEATHER.md for the current temperature.".to_owned(),
             user: None,
+            delivery: None,
             deliver: Some(CronDelivery {
                 channel: "signal".to_owned(),
                 target: "alice-uuid".to_owned(),
@@ -1410,6 +1461,7 @@ mod tests {
             cron: "0 7 * * *".to_owned(),
             message: "Read WEATHER.md".to_owned(),
             user: None,
+            delivery: None,
             deliver: Some(CronDelivery {
                 channel: "signal".to_owned(),
                 target: "alice-uuid".to_owned(),
@@ -1440,6 +1492,7 @@ mod tests {
             cron: "0 7 * * *".to_owned(),
             message: "Read HEARTBEAT.md".to_owned(),
             user: None,
+            delivery: None,
             deliver: Some(CronDelivery {
                 channel: "signal".to_owned(),
                 target: "alice-uuid".to_owned(),
@@ -1475,6 +1528,7 @@ mod tests {
             cron: "0 8 * * *".to_owned(),
             message: "Morning briefing".to_owned(),
             user: None,
+            delivery: None,
             deliver: Some(CronDelivery {
                 channel: "signal".to_owned(),
                 target: "alice-uuid".to_owned(),
@@ -1511,6 +1565,7 @@ mod tests {
             cron: "0 8 * * *".to_owned(),
             message: "Morning briefing".to_owned(),
             user: None,
+            delivery: None,
             deliver: Some(CronDelivery {
                 channel: "signal".to_owned(),
                 target: "alice-uuid".to_owned(),
@@ -1537,6 +1592,7 @@ mod tests {
             cron: "*/30 * * * *".to_owned(),
             message: "check tasks".to_owned(),
             user: None,
+            delivery: None,
             deliver: None,
             sandbox: None,
         };
@@ -1551,6 +1607,7 @@ mod tests {
             cron: "* * * * * * *".to_owned(),
             message: "Morning briefing".to_owned(),
             user: None,
+            delivery: None,
             deliver: Some(CronDelivery {
                 channel: "signal".to_owned(),
                 target: "alice-uuid".to_owned(),
@@ -1624,6 +1681,7 @@ mod tests {
             cron: "* * * * * * *".to_owned(),
             message: "hot reload test".to_owned(),
             user: None,
+            delivery: None,
             deliver: None,
             sandbox: None,
         }];
@@ -1656,6 +1714,7 @@ mod tests {
             cron: "0 0 1 1 *".to_owned(), // once a year
             message: "yearly".to_owned(),
             user: None,
+            delivery: None,
             deliver: None,
             sandbox: None,
         }];
@@ -1689,6 +1748,7 @@ mod tests {
             cron: "* * * * * * *".to_owned(),
             message: "tick".to_owned(),
             user: None,
+            delivery: None,
             deliver: None,
             sandbox: None,
         }];
@@ -1758,6 +1818,7 @@ mod tests {
             cron: "*/30 * * * *".to_owned(),
             message: "check HEARTBEAT.md".to_owned(),
             user: Some("alice".to_owned()),
+            delivery: None,
             deliver: None,
             sandbox: None,
         };
@@ -1791,6 +1852,7 @@ mod tests {
             cron: "*/30 * * * *".to_owned(),
             message: "check HEARTBEAT.md".to_owned(),
             user: Some("alice".to_owned()),
+            delivery: None,
             deliver: None,
             sandbox: None,
         };
@@ -1828,6 +1890,7 @@ mod tests {
             cron: "*/30 * * * *".to_owned(),
             message: "check HEARTBEAT.md".to_owned(),
             user: Some("alice".to_owned()),
+            delivery: None,
             deliver: None,
             sandbox: None,
         };
@@ -1859,6 +1922,7 @@ mod tests {
             cron: "*/30 * * * *".to_owned(),
             message: "check HEARTBEAT.md".to_owned(),
             user: Some("alice".to_owned()),
+            delivery: None,
             deliver: None,
             sandbox: None,
         };
@@ -1897,6 +1961,7 @@ mod tests {
             cron: "*/30 * * * *".to_owned(),
             message: "check HEARTBEAT.md".to_owned(),
             user: Some("alice".to_owned()),
+            delivery: None,
             deliver: None,
             sandbox: None,
         };
@@ -1930,6 +1995,7 @@ mod tests {
             cron: "*/30 * * * *".to_owned(),
             message: "check HEARTBEAT.md".to_owned(),
             user: Some("alice".to_owned()),
+            delivery: None,
             deliver: Some(CronDelivery {
                 channel: "signal".to_owned(),
                 target: "override-target".to_owned(),
@@ -1959,6 +2025,7 @@ mod tests {
             cron: "0 3 * * *".to_owned(),
             message: "run cleanup".to_owned(),
             user: None,
+            delivery: None,
             deliver: None,
             sandbox: None,
         };
@@ -1989,6 +2056,7 @@ match = ["signal:alice-uuid", "terminal:default", "signal:group:team-chat"]
             cron: "*/30 * * * *".to_owned(),
             message: "check HEARTBEAT.md".to_owned(),
             user: Some("alice".to_owned()),
+            delivery: None,
             deliver: None,
             sandbox: None,
         };
@@ -2020,6 +2088,7 @@ match = ["signal:alice-uuid"]
             cron: "*/30 * * * *".to_owned(),
             message: "check".to_owned(),
             user: Some("alice".to_owned()),
+            delivery: None,
             deliver: Some(CronDelivery {
                 channel: "signal".to_owned(),
                 target: "override-uuid".to_owned(),
@@ -2050,6 +2119,7 @@ model = "test"
             cron: "0 3 * * *".to_owned(),
             message: "cleanup".to_owned(),
             user: None,
+            delivery: None,
             deliver: None,
             sandbox: None,
         };
@@ -2079,6 +2149,7 @@ match = ["signal:alice-uuid"]
             cron: "*/30 * * * *".to_owned(),
             message: "check".to_owned(),
             user: Some("mallory".to_owned()),
+            delivery: None,
             deliver: None,
             sandbox: None,
         };
@@ -2160,6 +2231,7 @@ match = ["signal:alice-uuid"]
             cron: "* * * * * * *".to_owned(), // every second
             message: "tick".to_owned(),
             user: None,
+            delivery: None,
             deliver: None,
             sandbox: None,
         }];
@@ -2201,6 +2273,7 @@ match = ["signal:alice-uuid"]
             cron: "*/30 * * * *".to_owned(),
             message: "check HEARTBEAT.md".to_owned(),
             user: None,
+            delivery: None,
             deliver: Some(CronDelivery {
                 channel: "signal".to_owned(),
                 target: "alice-uuid".to_owned(),
@@ -2229,6 +2302,7 @@ match = ["signal:alice-uuid"]
             cron: "*/30 * * * *".to_owned(),
             message: "check HEARTBEAT.md".to_owned(),
             user: None,
+            delivery: None,
             deliver: Some(CronDelivery {
                 channel: "signal".to_owned(),
                 target: "alice-uuid".to_owned(),
@@ -2245,6 +2319,34 @@ match = ["signal:alice-uuid"]
     }
 
     #[tokio::test]
+    async fn fire_cron_as_needed_suppresses_no_action_needed() {
+        let (shared, router, _gateway) =
+            make_shared_config_and_router(None, &[], "NO_ACTION_NEEDED");
+        let (tx, mut rx) = mpsc::channel::<OutboundMessage>(8);
+        let deliver_tx = DeliverySender::new(tx);
+
+        let cfg = CronConfig {
+            name: "todo-maintenance".to_owned(),
+            cron: "0 3 * * *".to_owned(),
+            message: "Run daily todo maintenance".to_owned(),
+            user: None,
+            delivery: Some(CronDeliveryMode::AsNeeded),
+            deliver: Some(CronDelivery {
+                channel: "signal".to_owned(),
+                target: "alice-uuid".to_owned(),
+            }),
+            sandbox: None,
+        };
+
+        fire_cron(&cfg, &router, Some(&deliver_tx), &shared).await;
+
+        assert!(
+            rx.try_recv().is_err(),
+            "NO_ACTION_NEEDED should suppress delivery for as_needed crons"
+        );
+    }
+
+    #[tokio::test]
     async fn fire_cron_non_heartbeat_always_delivers() {
         let (shared, router, _gateway) = make_shared_config_and_router(None, &[], "HEARTBEAT_OK");
         let (tx, mut rx) = mpsc::channel::<OutboundMessage>(8);
@@ -2255,6 +2357,7 @@ match = ["signal:alice-uuid"]
             cron: "0 20 * * *".to_owned(),
             message: "Send Alice an 8pm mood check-in".to_owned(),
             user: None,
+            delivery: None,
             deliver: Some(CronDelivery {
                 channel: "signal".to_owned(),
                 target: "alice-uuid".to_owned(),
@@ -2264,7 +2367,7 @@ match = ["signal:alice-uuid"]
 
         fire_cron(&cfg, &router, Some(&deliver_tx), &shared).await;
 
-        // Non-heartbeat crons should deliver even if response is HEARTBEAT_OK
+        // delivery=always crons should deliver literal sentinel content.
         let msg = rx.try_recv().unwrap();
         assert_eq!(msg.channel, "signal");
         assert_eq!(msg.target, "alice-uuid");
@@ -2272,6 +2375,32 @@ match = ["signal:alice-uuid"]
             msg.content, "HEARTBEAT_OK",
             "non-heartbeat crons should deliver HEARTBEAT_OK as content"
         );
+    }
+
+    #[tokio::test]
+    async fn fire_cron_always_delivers_no_action_needed_literal() {
+        let (shared, router, _gateway) =
+            make_shared_config_and_router(None, &[], "NO_ACTION_NEEDED");
+        let (tx, mut rx) = mpsc::channel::<OutboundMessage>(8);
+        let deliver_tx = DeliverySender::new(tx);
+
+        let cfg = CronConfig {
+            name: "morning-briefing".to_owned(),
+            cron: "0 8 * * *".to_owned(),
+            message: "Morning briefing".to_owned(),
+            user: None,
+            delivery: Some(CronDeliveryMode::Always),
+            deliver: Some(CronDelivery {
+                channel: "signal".to_owned(),
+                target: "alice-uuid".to_owned(),
+            }),
+            sandbox: None,
+        };
+
+        fire_cron(&cfg, &router, Some(&deliver_tx), &shared).await;
+
+        let msg = rx.try_recv().unwrap();
+        assert_eq!(msg.content, "NO_ACTION_NEEDED");
     }
 
     #[tokio::test]
@@ -2285,6 +2414,7 @@ match = ["signal:alice-uuid"]
             cron: "*/30 * * * *".to_owned(),
             message: "check HEARTBEAT.md".to_owned(),
             user: None,
+            delivery: None,
             deliver: Some(CronDelivery {
                 channel: "signal".to_owned(),
                 target: "alice-uuid".to_owned(),
@@ -2477,6 +2607,7 @@ match = ["signal:alice-uuid"]
             cron: "* * * * * * *".to_owned(),
             message: "tick".to_owned(),
             user: None,
+            delivery: None,
             deliver: None,
             sandbox: None,
         }];
@@ -2527,6 +2658,7 @@ match = ["signal:alice-uuid"]
             cron: "*/30 * * * *".to_owned(),
             message: "check tasks".to_owned(),
             user: None,
+            delivery: None,
             deliver: Some(CronDelivery {
                 channel: "signal".to_owned(),
                 target: "alice-uuid".to_owned(),
@@ -2590,6 +2722,7 @@ match = ["signal:alice-uuid"]
             cron: "*/30 * * * *".to_owned(),
             message: "check tasks".to_owned(),
             user: None,
+            delivery: None,
             deliver: Some(CronDelivery {
                 channel: "signal".to_owned(),
                 target: "alice-uuid".to_owned(),
@@ -2617,6 +2750,7 @@ match = ["signal:alice-uuid"]
             cron: "0 3 * * *".to_owned(),
             message: "run cleanup".to_owned(),
             user: None,
+            delivery: None,
             deliver: None,
             sandbox: None,
         };
@@ -2656,6 +2790,7 @@ match = ["signal:alice-uuid"]
             cron: "0 8 * * *".to_owned(),
             message: "Morning briefing".to_owned(),
             user: None,
+            delivery: None,
             deliver: Some(CronDelivery {
                 channel: "signal".to_owned(),
                 target: "group:deadbeef".to_owned(),

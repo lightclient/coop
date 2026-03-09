@@ -17,7 +17,7 @@ use uuid::Uuid;
 
 use crate::compaction::{self, CompactionState};
 use crate::compaction_store::CompactionStore;
-use crate::config::{SharedConfig, find_group_config_by_session};
+use crate::config::{CronDeliveryMode, SharedConfig, find_group_config_by_session};
 use crate::group_history::{GroupHistoryBuffer, GroupHistoryEntry};
 use crate::group_trigger::{self, SILENT_REPLY_TOKEN};
 use crate::memory_auto_capture;
@@ -189,6 +189,7 @@ impl Gateway {
     /// identity, tools) is separated from the volatile suffix (runtime
     /// context, memory index). This lets providers with prefix caching
     /// avoid full cache misses when only the volatile part changes.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     async fn build_prompt(
         &self,
         session_key: &SessionKey,
@@ -196,6 +197,7 @@ impl Gateway {
         user_name: Option<&str>,
         channel: Option<&str>,
         user_input: &str,
+        cron_delivery_mode: Option<CronDeliveryMode>,
     ) -> Result<Vec<String>> {
         let cfg = self.config.load();
         let shared_configs = cfg.prompt.shared_core_configs();
@@ -258,6 +260,18 @@ impl Gateway {
             drop(index);
             prompt.to_cache_blocks()
         };
+
+        if matches!(session_key.kind, SessionKind::Cron(_))
+            && let Some(delivery_mode) = cron_delivery_mode
+        {
+            let block = build_cron_delivery_prompt_block(delivery_mode, channel);
+            if let Some(first) = system_blocks.first_mut() {
+                first.push_str("\n\n");
+                first.push_str(&block);
+            } else {
+                system_blocks.push(block);
+            }
+        }
 
         if let Some(memory) = &self.memory {
             let cfg = self.config.load();
@@ -347,7 +361,7 @@ impl Gateway {
         )
     }
 
-    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn run_turn_with_trust(
         &self,
         session_key: &SessionKey,
@@ -355,6 +369,29 @@ impl Gateway {
         trust: TrustLevel,
         user_name: Option<&str>,
         channel: Option<&str>,
+        event_tx: mpsc::Sender<TurnEvent>,
+    ) -> Result<()> {
+        self.run_turn_with_trust_and_cron_delivery(
+            session_key,
+            user_input,
+            trust,
+            user_name,
+            channel,
+            None,
+            event_tx,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+    pub(crate) async fn run_turn_with_trust_and_cron_delivery(
+        &self,
+        session_key: &SessionKey,
+        user_input: &str,
+        trust: TrustLevel,
+        user_name: Option<&str>,
+        channel: Option<&str>,
+        cron_delivery_mode: Option<CronDeliveryMode>,
         event_tx: mpsc::Sender<TurnEvent>,
     ) -> Result<()> {
         let span = info_span!(
@@ -365,6 +402,7 @@ impl Gateway {
             trust = ?trust,
             user = ?user_name,
             channel = ?channel,
+            cron.delivery_mode = ?cron_delivery_mode,
         );
 
         // Acquire per-session turn lock to prevent concurrent turns from
@@ -415,7 +453,14 @@ impl Gateway {
 
             let workspace_scope = self.turn_workspace_scope(session_key, trust, user_name);
             let mut system_prompt = self
-                .build_prompt(session_key, trust, user_name, channel, user_input)
+                .build_prompt(
+                    session_key,
+                    trust,
+                    user_name,
+                    channel,
+                    user_input,
+                    cron_delivery_mode,
+                )
                 .await?;
 
             // Inject group-specific intro when this is a group session.
@@ -1333,7 +1378,7 @@ impl Gateway {
         let provider = self.providers.get(trigger_model);
 
         let system_prompt = match self
-            .build_prompt(session_key, trust, user_name, channel, user_input)
+            .build_prompt(session_key, trust, user_name, channel, user_input, None)
             .await
         {
             Ok(blocks) => blocks,
@@ -1479,6 +1524,21 @@ impl Gateway {
         );
 
         Ok((response, usage))
+    }
+}
+
+fn build_cron_delivery_prompt_block(
+    delivery_mode: CronDeliveryMode,
+    channel: Option<&str>,
+) -> String {
+    let channel = channel.unwrap_or("messaging");
+    match delivery_mode {
+        CronDeliveryMode::Always => format!(
+            "## Scheduled Delivery\n- This scheduled response will be delivered to the user via {channel}.\n- This cron uses delivery = \"always\". Always reply with the content to deliver.\n- Do not reply with NO_ACTION_NEEDED."
+        ),
+        CronDeliveryMode::AsNeeded => format!(
+            "## Scheduled Delivery\n- This scheduled response will be delivered to the user via {channel}.\n- This cron uses delivery = \"as_needed\". If nothing needs attention, reply with exactly NO_ACTION_NEEDED.\n- If something needs attention, reply with only the content to deliver.\n- Never include NO_ACTION_NEEDED alongside real content."
+        ),
     }
 }
 
@@ -1732,6 +1792,78 @@ model = "test-model"
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("SOUL.md"), "You are a test agent.").unwrap();
         dir
+    }
+
+    #[tokio::test]
+    async fn build_prompt_includes_as_needed_cron_delivery_block() {
+        let workspace = test_workspace();
+        let provider: Arc<dyn Provider> = Arc::new(FakeProvider::new("ok"));
+        let gateway = Gateway::new(
+            shared_config(test_config()),
+            workspace.path().to_path_buf(),
+            registry(provider),
+            Arc::new(DefaultExecutor::new()),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let session_key = SessionKey {
+            agent_id: "coop".to_owned(),
+            kind: SessionKind::Cron("heartbeat".to_owned()),
+        };
+
+        let prompt = gateway
+            .build_prompt(
+                &session_key,
+                TrustLevel::Full,
+                Some("alice"),
+                Some("signal"),
+                "check HEARTBEAT.md",
+                Some(CronDeliveryMode::AsNeeded),
+            )
+            .await
+            .unwrap()
+            .join("\n\n");
+
+        assert!(prompt.contains("delivery = \"as_needed\""));
+        assert!(prompt.contains("NO_ACTION_NEEDED"));
+    }
+
+    #[tokio::test]
+    async fn build_prompt_includes_always_cron_delivery_block() {
+        let workspace = test_workspace();
+        let provider: Arc<dyn Provider> = Arc::new(FakeProvider::new("ok"));
+        let gateway = Gateway::new(
+            shared_config(test_config()),
+            workspace.path().to_path_buf(),
+            registry(provider),
+            Arc::new(DefaultExecutor::new()),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let session_key = SessionKey {
+            agent_id: "coop".to_owned(),
+            kind: SessionKind::Cron("morning-briefing".to_owned()),
+        };
+
+        let prompt = gateway
+            .build_prompt(
+                &session_key,
+                TrustLevel::Full,
+                Some("alice"),
+                Some("signal"),
+                "Morning briefing",
+                Some(CronDeliveryMode::Always),
+            )
+            .await
+            .unwrap()
+            .join("\n\n");
+
+        assert!(prompt.contains("delivery = \"always\""));
+        assert!(prompt.contains("Do not reply with NO_ACTION_NEEDED"));
     }
 
     /// Provider that always fails with the given error message.

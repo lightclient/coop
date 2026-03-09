@@ -497,6 +497,7 @@ mod tests {
             cron: "*/30 * * * *".to_owned(),
             message: "check".to_owned(),
             user: None,
+            delivery: None,
             deliver: None,
             sandbox: None,
         }];
@@ -560,6 +561,7 @@ mod tests {
             cron: "*/30 * * * *".to_owned(),
             message: "check".to_owned(),
             user: None,
+            delivery: None,
             deliver: None,
             sandbox: None,
         }];

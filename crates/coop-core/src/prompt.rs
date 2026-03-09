@@ -203,12 +203,13 @@ Help the user with their tasks. Be concise, direct, and useful.
 
 When using tools, explain what you're doing briefly.
 
-## Heartbeat Protocol
+## Scheduled Tasks
 
-Cron heartbeat messages ask you to check HEARTBEAT.md for pending tasks.
-If nothing needs attention, reply with exactly **HEARTBEAT_OK**.
-If there is something to report, reply with the actual content.
-Keep heartbeat responses concise — these are push notifications, not conversations.
+Some cron sessions are auto-delivered to the user's channels.
+Follow any runtime scheduled-delivery instructions exactly.
+If the runtime instructions say to reply with **NO_ACTION_NEEDED**, do so only when
+nothing needs attention. Never include NO_ACTION_NEEDED alongside real content.
+Keep scheduled-task responses concise when they are destined for messaging channels.
 ";
 
 /// Configuration for a single workspace file that may be included in the prompt.

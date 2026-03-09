@@ -1017,11 +1017,41 @@ fn check_cron(report: &mut CheckReport, config: &Config) {
                     message: format!(
                         "cron '{}' has user '{}' but no deliver override, \
                          and user has no non-terminal match patterns — \
-                         heartbeat will have no delivery targets",
+                         cron will have no delivery targets",
                         entry.name, user_name,
                     ),
                 });
             }
+        }
+    }
+
+    // 14. cron_delivery_mode_legacy_heuristic
+    for entry in &config.cron {
+        if entry.uses_legacy_delivery_mode() && entry.message.contains("HEARTBEAT.md") {
+            report.push(CheckResult {
+                name: "cron_delivery_mode",
+                severity: Severity::Warning,
+                passed: false,
+                message: format!(
+                    "cron '{}' relies on the legacy HEARTBEAT.md heuristic for delivery mode; set delivery = \"as_needed\" explicitly",
+                    entry.name
+                ),
+            });
+        }
+    }
+
+    // 15. cron_message_contains_internal_delivery_tokens
+    for entry in &config.cron {
+        if entry.message.contains("HEARTBEAT_OK") || entry.message.contains("NO_ACTION_NEEDED") {
+            report.push(CheckResult {
+                name: "cron_message_tokens",
+                severity: Severity::Warning,
+                passed: false,
+                message: format!(
+                    "cron '{}' message embeds an internal delivery token; move that behavior to cron.delivery instead",
+                    entry.name
+                ),
+            });
         }
     }
 }

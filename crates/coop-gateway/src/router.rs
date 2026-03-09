@@ -7,7 +7,9 @@ use tracing::{Instrument, debug, info, info_span};
 
 use std::sync::Arc;
 
-use crate::config::{Config, GroupConfig, GroupTrigger, SharedConfig, TrustCeiling};
+use crate::config::{
+    Config, CronDeliveryMode, GroupConfig, GroupTrigger, SharedConfig, TrustCeiling,
+};
 use crate::gateway::Gateway;
 use crate::group_trigger::{self, TriggerDecision};
 #[cfg(test)]
@@ -106,7 +108,7 @@ impl MessageRouter {
         msg: &InboundMessage,
         event_tx: mpsc::Sender<TurnEvent>,
     ) -> Result<RouteDecision> {
-        self.dispatch_inner(msg, event_tx, None).await
+        self.dispatch_inner(msg, event_tx, None, None).await
     }
 
     #[cfg(test)]
@@ -161,6 +163,7 @@ impl MessageRouter {
         msg: &InboundMessage,
         event_tx: mpsc::Sender<TurnEvent>,
         prompt_channel: Option<&str>,
+        cron_delivery_mode: Option<CronDeliveryMode>,
     ) -> Result<RouteDecision> {
         let decision = self.route(msg);
 
@@ -252,12 +255,13 @@ impl MessageRouter {
         debug!(parent: &span, sender = %msg.sender, "routing message");
         let channel = prompt_channel.unwrap_or(&msg.channel);
         self.gateway
-            .run_turn_with_trust(
+            .run_turn_with_trust_and_cron_delivery(
                 &decision.session_key,
                 &user_input,
                 decision.trust,
                 decision.user_name.as_deref(),
                 Some(channel),
+                cron_delivery_mode,
                 event_tx,
             )
             .instrument(span)
@@ -413,13 +417,28 @@ impl MessageRouter {
         msg: &InboundMessage,
         prompt_channel: Option<String>,
     ) -> Result<(RouteDecision, String)> {
+        self.dispatch_collect_text_with_channel_and_cron_delivery(msg, prompt_channel, None)
+            .await
+    }
+
+    pub(crate) async fn dispatch_collect_text_with_channel_and_cron_delivery(
+        &self,
+        msg: &InboundMessage,
+        prompt_channel: Option<String>,
+        cron_delivery_mode: Option<CronDeliveryMode>,
+    ) -> Result<(RouteDecision, String)> {
         let (event_tx, mut event_rx) = mpsc::channel(64);
         let router = self.clone();
         let message = msg.clone();
 
         let dispatch_task = tokio::spawn(async move {
             router
-                .dispatch_inner(&message, event_tx, prompt_channel.as_deref())
+                .dispatch_inner(
+                    &message,
+                    event_tx,
+                    prompt_channel.as_deref(),
+                    cron_delivery_mode,
+                )
                 .await
         });
 

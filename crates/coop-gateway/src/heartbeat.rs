@@ -1,19 +1,22 @@
-/// Token-based heartbeat suppression for cron delivery.
+/// Token-based suppression for cron delivery.
 ///
-/// When the agent responds with only `HEARTBEAT_OK` (possibly wrapped in
-/// markdown or whitespace), the response is suppressed and not delivered.
-pub(crate) const HEARTBEAT_OK_TOKEN: &str = "HEARTBEAT_OK";
+/// When an `as_needed` cron responds with only `NO_ACTION_NEEDED` (or the
+/// legacy `HEARTBEAT_OK`) — possibly wrapped in markdown or whitespace — the
+/// response is suppressed and not delivered.
+pub(crate) const NO_ACTION_NEEDED_TOKEN: &str = "NO_ACTION_NEEDED";
+pub(crate) const LEGACY_HEARTBEAT_OK_TOKEN: &str = "HEARTBEAT_OK";
+const SUPPRESSION_TOKENS: [&str; 2] = [NO_ACTION_NEEDED_TOKEN, LEGACY_HEARTBEAT_OK_TOKEN];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum HeartbeatResult {
-    /// The response was only HEARTBEAT_OK (possibly wrapped in
+pub(crate) enum SuppressionTokenResult {
+    /// The response was only a suppression token (possibly wrapped in
     /// markdown/whitespace). Suppress delivery.
     Suppress,
     /// There is real content to deliver.
     Deliver(String),
 }
 
-/// Strip the `HEARTBEAT_OK` token from the edges of a response and decide
+/// Strip the suppression token from the edges of a response and decide
 /// whether to suppress or deliver.
 ///
 /// Rules:
@@ -22,34 +25,39 @@ pub(crate) enum HeartbeatResult {
 /// - Token at start/end with real content → Deliver (token removed)
 /// - Token mid-sentence → NOT stripped (only edges)
 /// - No token, real content → Deliver as-is
-pub(crate) fn strip_heartbeat_token(text: &str) -> HeartbeatResult {
+pub(crate) fn strip_suppression_token(text: &str) -> SuppressionTokenResult {
     let trimmed = text.trim();
     if trimmed.is_empty() {
-        return HeartbeatResult::Suppress;
+        return SuppressionTokenResult::Suppress;
     }
 
-    // Unwrap markdown bold/italic then check for bare token.
     let unwrapped = unwrap_markdown(trimmed);
-    if unwrapped == HEARTBEAT_OK_TOKEN {
-        return HeartbeatResult::Suppress;
+    if SUPPRESSION_TOKENS.contains(&unwrapped) {
+        return SuppressionTokenResult::Suppress;
     }
 
-    // Try stripping from start/end.
     let mut remainder = trimmed.to_owned();
-    remainder = strip_token_from_start(&remainder);
-    remainder = strip_token_from_end(&remainder);
+    for token in SUPPRESSION_TOKENS {
+        remainder = strip_token_from_start(&remainder, token);
+    }
+    for token in SUPPRESSION_TOKENS {
+        remainder = strip_token_from_end(&remainder, token);
+    }
 
     let cleaned = remainder.trim();
     if cleaned.is_empty() {
-        HeartbeatResult::Suppress
+        SuppressionTokenResult::Suppress
     } else {
-        HeartbeatResult::Deliver(cleaned.to_owned())
+        SuppressionTokenResult::Deliver(cleaned.to_owned())
     }
+}
+
+pub(crate) fn contains_legacy_heartbeat_token(text: &str) -> bool {
+    text.contains(LEGACY_HEARTBEAT_OK_TOKEN)
 }
 
 /// Strip leading markdown (**, *, `) wrappers to expose the inner text.
 fn unwrap_markdown(s: &str) -> &str {
-    // Try ** first, then *, then `
     if let Some(inner) = s
         .strip_prefix("**")
         .and_then(|rest| rest.strip_suffix("**"))
@@ -65,28 +73,25 @@ fn unwrap_markdown(s: &str) -> &str {
     s
 }
 
-/// Strip `HEARTBEAT_OK` from the beginning of the text, including any
-/// immediately following punctuation and whitespace.
-fn strip_token_from_start(text: &str) -> String {
+fn strip_token_from_start(text: &str, token: &str) -> String {
     let trimmed = text.trim_start();
-    if let Some(rest) = trimmed.strip_prefix(HEARTBEAT_OK_TOKEN) {
-        // Also strip markdown-wrapped forms at start
+    if let Some(rest) = trimmed.strip_prefix(token) {
         strip_leading_punctuation(rest).to_owned()
     } else if let Some(rest) = trimmed
         .strip_prefix("**")
-        .and_then(|r| r.strip_prefix(HEARTBEAT_OK_TOKEN))
+        .and_then(|r| r.strip_prefix(token))
         .and_then(|r| r.strip_prefix("**"))
     {
         strip_leading_punctuation(rest).to_owned()
     } else if let Some(rest) = trimmed
         .strip_prefix('*')
-        .and_then(|r| r.strip_prefix(HEARTBEAT_OK_TOKEN))
+        .and_then(|r| r.strip_prefix(token))
         .and_then(|r| r.strip_prefix('*'))
     {
         strip_leading_punctuation(rest).to_owned()
     } else if let Some(rest) = trimmed
         .strip_prefix('`')
-        .and_then(|r| r.strip_prefix(HEARTBEAT_OK_TOKEN))
+        .and_then(|r| r.strip_prefix(token))
         .and_then(|r| r.strip_prefix('`'))
     {
         strip_leading_punctuation(rest).to_owned()
@@ -95,27 +100,25 @@ fn strip_token_from_start(text: &str) -> String {
     }
 }
 
-/// Strip `HEARTBEAT_OK` from the end of the text, trimming only
-/// whitespace between the content and the token.
-fn strip_token_from_end(text: &str) -> String {
+fn strip_token_from_end(text: &str, token: &str) -> String {
     let trimmed = text.trim_end();
-    if let Some(rest) = trimmed.strip_suffix(HEARTBEAT_OK_TOKEN) {
+    if let Some(rest) = trimmed.strip_suffix(token) {
         rest.trim_end().to_owned()
     } else if let Some(rest) = trimmed
         .strip_suffix("**")
-        .and_then(|r| r.strip_suffix(HEARTBEAT_OK_TOKEN))
+        .and_then(|r| r.strip_suffix(token))
         .and_then(|r| r.strip_suffix("**"))
     {
         rest.trim_end().to_owned()
     } else if let Some(rest) = trimmed
         .strip_suffix('*')
-        .and_then(|r| r.strip_suffix(HEARTBEAT_OK_TOKEN))
+        .and_then(|r| r.strip_suffix(token))
         .and_then(|r| r.strip_suffix('*'))
     {
         rest.trim_end().to_owned()
     } else if let Some(rest) = trimmed
         .strip_suffix('`')
-        .and_then(|r| r.strip_suffix(HEARTBEAT_OK_TOKEN))
+        .and_then(|r| r.strip_suffix(token))
         .and_then(|r| r.strip_suffix('`'))
     {
         rest.trim_end().to_owned()
@@ -137,15 +140,12 @@ pub(crate) fn is_heartbeat_content_empty(content: &str) -> bool {
         if trimmed.is_empty() {
             continue;
         }
-        // Markdown header / comment lines
         if trimmed.starts_with('#') {
             continue;
         }
-        // Empty list items: "- [ ]", "- [x]", "- "
         if trimmed == "-" || trimmed == "- [ ]" || trimmed == "- [x]" || trimmed == "- [X]" {
             continue;
         }
-        // Line has real content
         return false;
     }
     true
@@ -156,148 +156,172 @@ pub(crate) fn is_heartbeat_content_empty(content: &str) -> bool {
 mod tests {
     use super::*;
 
-    // -- strip_heartbeat_token tests --
-
     #[test]
     fn exact_match_suppresses() {
         assert_eq!(
-            strip_heartbeat_token("HEARTBEAT_OK"),
-            HeartbeatResult::Suppress,
+            strip_suppression_token("NO_ACTION_NEEDED"),
+            SuppressionTokenResult::Suppress,
+        );
+    }
+
+    #[test]
+    fn legacy_exact_match_suppresses() {
+        assert_eq!(
+            strip_suppression_token("HEARTBEAT_OK"),
+            SuppressionTokenResult::Suppress,
         );
     }
 
     #[test]
     fn with_whitespace_suppresses() {
         assert_eq!(
-            strip_heartbeat_token("  HEARTBEAT_OK  "),
-            HeartbeatResult::Suppress,
+            strip_suppression_token("  NO_ACTION_NEEDED  "),
+            SuppressionTokenResult::Suppress,
         );
     }
 
     #[test]
     fn markdown_bold_suppresses() {
         assert_eq!(
-            strip_heartbeat_token("**HEARTBEAT_OK**"),
-            HeartbeatResult::Suppress,
+            strip_suppression_token("**NO_ACTION_NEEDED**"),
+            SuppressionTokenResult::Suppress,
         );
     }
 
     #[test]
     fn markdown_italic_suppresses() {
         assert_eq!(
-            strip_heartbeat_token("*HEARTBEAT_OK*"),
-            HeartbeatResult::Suppress,
+            strip_suppression_token("*NO_ACTION_NEEDED*"),
+            SuppressionTokenResult::Suppress,
         );
     }
 
     #[test]
     fn markdown_backtick_suppresses() {
         assert_eq!(
-            strip_heartbeat_token("`HEARTBEAT_OK`"),
-            HeartbeatResult::Suppress,
+            strip_suppression_token("`NO_ACTION_NEEDED`"),
+            SuppressionTokenResult::Suppress,
         );
     }
 
     #[test]
     fn backtick_token_at_start_with_content() {
         assert_eq!(
-            strip_heartbeat_token("`HEARTBEAT_OK` Your server is down"),
-            HeartbeatResult::Deliver("Your server is down".to_owned()),
+            strip_suppression_token("`NO_ACTION_NEEDED` Your server is down"),
+            SuppressionTokenResult::Deliver("Your server is down".to_owned()),
         );
     }
 
     #[test]
     fn backtick_token_at_end_with_content() {
         assert_eq!(
-            strip_heartbeat_token("Your server is down `HEARTBEAT_OK`"),
-            HeartbeatResult::Deliver("Your server is down".to_owned()),
+            strip_suppression_token("Your server is down `NO_ACTION_NEEDED`"),
+            SuppressionTokenResult::Deliver("Your server is down".to_owned()),
         );
     }
 
     #[test]
     fn empty_string_suppresses() {
-        assert_eq!(strip_heartbeat_token(""), HeartbeatResult::Suppress);
+        assert_eq!(
+            strip_suppression_token(""),
+            SuppressionTokenResult::Suppress,
+        );
     }
 
     #[test]
     fn whitespace_only_suppresses() {
-        assert_eq!(strip_heartbeat_token("   "), HeartbeatResult::Suppress);
+        assert_eq!(
+            strip_suppression_token("   "),
+            SuppressionTokenResult::Suppress,
+        );
     }
 
     #[test]
     fn token_at_start_with_real_content() {
         assert_eq!(
-            strip_heartbeat_token("HEARTBEAT_OK. Also, you have a meeting at 3pm"),
-            HeartbeatResult::Deliver("Also, you have a meeting at 3pm".to_owned()),
+            strip_suppression_token("NO_ACTION_NEEDED. Also, you have a meeting at 3pm"),
+            SuppressionTokenResult::Deliver("Also, you have a meeting at 3pm".to_owned()),
         );
     }
 
     #[test]
     fn token_at_end_with_real_content() {
         assert_eq!(
-            strip_heartbeat_token("Your server is down. HEARTBEAT_OK"),
-            HeartbeatResult::Deliver("Your server is down.".to_owned()),
+            strip_suppression_token("Your server is down. NO_ACTION_NEEDED"),
+            SuppressionTokenResult::Deliver("Your server is down.".to_owned()),
         );
     }
 
     #[test]
     fn no_token_real_content() {
         assert_eq!(
-            strip_heartbeat_token("Your server is down"),
-            HeartbeatResult::Deliver("Your server is down".to_owned()),
+            strip_suppression_token("Your server is down"),
+            SuppressionTokenResult::Deliver("Your server is down".to_owned()),
         );
     }
 
     #[test]
     fn token_mid_sentence_not_stripped() {
-        let text = "The status is HEARTBEAT_OK and everything is fine";
+        let text = "The status is NO_ACTION_NEEDED and everything is fine";
         assert_eq!(
-            strip_heartbeat_token(text),
-            HeartbeatResult::Deliver(text.to_owned()),
+            strip_suppression_token(text),
+            SuppressionTokenResult::Deliver(text.to_owned()),
         );
     }
 
     #[test]
     fn token_at_both_edges_delivers_empty_suppresses() {
         assert_eq!(
-            strip_heartbeat_token("HEARTBEAT_OK HEARTBEAT_OK"),
-            HeartbeatResult::Suppress,
+            strip_suppression_token("NO_ACTION_NEEDED NO_ACTION_NEEDED"),
+            SuppressionTokenResult::Suppress,
+        );
+    }
+
+    #[test]
+    fn legacy_and_new_tokens_at_edges_suppress() {
+        assert_eq!(
+            strip_suppression_token("HEARTBEAT_OK NO_ACTION_NEEDED"),
+            SuppressionTokenResult::Suppress,
         );
     }
 
     #[test]
     fn bold_token_at_start_with_content() {
         assert_eq!(
-            strip_heartbeat_token("**HEARTBEAT_OK** Your server is down"),
-            HeartbeatResult::Deliver("Your server is down".to_owned()),
+            strip_suppression_token("**NO_ACTION_NEEDED** Your server is down"),
+            SuppressionTokenResult::Deliver("Your server is down".to_owned()),
         );
     }
 
     #[test]
     fn token_with_newlines() {
         assert_eq!(
-            strip_heartbeat_token("\n  HEARTBEAT_OK\n  "),
-            HeartbeatResult::Suppress,
+            strip_suppression_token("\n  NO_ACTION_NEEDED\n  "),
+            SuppressionTokenResult::Suppress,
         );
     }
 
     #[test]
     fn token_at_end_with_trailing_period() {
         assert_eq!(
-            strip_heartbeat_token("All clear. HEARTBEAT_OK"),
-            HeartbeatResult::Deliver("All clear.".to_owned()),
+            strip_suppression_token("All clear. NO_ACTION_NEEDED"),
+            SuppressionTokenResult::Deliver("All clear.".to_owned()),
         );
     }
 
     #[test]
     fn real_content_with_period_at_end() {
         assert_eq!(
-            strip_heartbeat_token("Your server is down."),
-            HeartbeatResult::Deliver("Your server is down.".to_owned()),
+            strip_suppression_token("Your server is down."),
+            SuppressionTokenResult::Deliver("Your server is down.".to_owned()),
         );
     }
 
-    // -- is_heartbeat_content_empty tests --
+    #[test]
+    fn detects_legacy_token() {
+        assert!(contains_legacy_heartbeat_token("HEARTBEAT_OK"));
+        assert!(!contains_legacy_heartbeat_token("NO_ACTION_NEEDED"));
+    }
 
     #[test]
     fn empty_file_is_empty() {

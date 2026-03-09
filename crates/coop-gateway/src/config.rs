@@ -493,6 +493,22 @@ pub(crate) struct CronDelivery {
     pub target: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CronDeliveryMode {
+    Always,
+    AsNeeded,
+}
+
+impl fmt::Display for CronDeliveryMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Always => write!(f, "always"),
+            Self::AsNeeded => write!(f, "as_needed"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct CronConfig {
     pub name: String,
@@ -501,9 +517,27 @@ pub(crate) struct CronConfig {
     #[serde(default)]
     pub user: Option<String>,
     #[serde(default)]
+    pub delivery: Option<CronDeliveryMode>,
+    #[serde(default)]
     pub deliver: Option<CronDelivery>,
     #[serde(default)]
     pub sandbox: Option<SandboxOverrides>,
+}
+
+impl CronConfig {
+    pub(crate) fn effective_delivery_mode(&self) -> CronDeliveryMode {
+        self.delivery.unwrap_or_else(|| {
+            if self.message.contains("HEARTBEAT.md") {
+                CronDeliveryMode::AsNeeded
+            } else {
+                CronDeliveryMode::Always
+            }
+        })
+    }
+
+    pub(crate) fn uses_legacy_delivery_mode(&self) -> bool {
+        self.delivery.is_none()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -886,10 +920,31 @@ message = "run cleanup"
         assert_eq!(config.cron[0].cron, "*/30 * * * *");
         assert_eq!(config.cron[0].user.as_deref(), Some("alice"));
         assert_eq!(config.cron[0].message, "check HEARTBEAT.md");
+        assert!(config.cron[0].delivery.is_none());
         assert!(config.cron[0].deliver.is_none());
         assert_eq!(config.cron[1].name, "cleanup");
         assert!(config.cron[1].user.is_none());
+        assert!(config.cron[1].delivery.is_none());
         assert!(config.cron[1].deliver.is_none());
+    }
+
+    #[test]
+    fn parse_config_with_cron_delivery_mode() {
+        let toml_str = r#"
+[agent]
+id = "coop"
+model = "test"
+
+[[cron]]
+name = "heartbeat"
+cron = "*/30 * * * *"
+user = "alice"
+delivery = "as_needed"
+message = "check HEARTBEAT.md"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.cron.len(), 1);
+        assert_eq!(config.cron[0].delivery, Some(CronDeliveryMode::AsNeeded));
     }
 
     #[test]

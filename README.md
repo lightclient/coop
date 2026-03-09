@@ -252,19 +252,23 @@ max_rows_per_run = 200             # Max rows processed per maintenance run (def
 # to all non-terminal channels that user is bound to (from their match patterns).
 # An explicit "deliver" field overrides this with a specific target.
 #
-# If the agent responds with only "HEARTBEAT_OK", delivery is suppressed
-# (nothing to report). An empty HEARTBEAT.md skips the LLM call entirely.
+# delivery = "always"    → every response is delivered literally
+# delivery = "as_needed" → if the agent replies with only "NO_ACTION_NEEDED",
+#                           delivery is suppressed. Otherwise the response is delivered.
+# An empty HEARTBEAT.md skips the LLM call entirely.
 
 # [[cron]]
 # name = "heartbeat"
 # cron = "*/30 * * * *"              # Standard cron expression
 # user = "alice"                     # Run as this user (optional)
+# delivery = "as_needed"
 # message = "check HEARTBEAT.md"     # Message sent to the agent
 #
 # [[cron]]
 # name = "morning-briefing"
 # cron = "0 8 * * *"
 # user = "alice"
+# delivery = "always"
 # message = "Morning briefing"
 # [cron.deliver]                     # Explicit delivery target
 # channel = "signal"
