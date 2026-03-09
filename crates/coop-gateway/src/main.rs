@@ -21,6 +21,7 @@ mod memory_embedding;
 mod memory_prompt_index;
 mod memory_reconcile;
 mod memory_tools;
+mod overflow_recovery;
 mod provider_registry;
 mod reminder;
 mod router;

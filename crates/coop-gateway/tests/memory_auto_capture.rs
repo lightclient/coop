@@ -32,6 +32,8 @@ mod group_trigger;
 mod memory_auto_capture;
 #[path = "../src/memory_prompt_index.rs"]
 mod memory_prompt_index;
+#[path = "../src/overflow_recovery.rs"]
+mod overflow_recovery;
 #[allow(dead_code)]
 #[path = "../src/provider_registry.rs"]
 mod provider_registry;

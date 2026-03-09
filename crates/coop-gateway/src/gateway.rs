@@ -22,6 +22,7 @@ use crate::group_history::{GroupHistoryBuffer, GroupHistoryEntry};
 use crate::group_trigger::{self, SILENT_REPLY_TOKEN};
 use crate::memory_auto_capture;
 use crate::memory_prompt_index;
+use crate::overflow_recovery;
 use crate::provider_registry::ProviderRegistry;
 use crate::session_store::DiskSessionStore;
 
@@ -487,7 +488,7 @@ impl Gateway {
 
             // Compact before appending the new message if the session is
             // already over the threshold from a previous turn.
-            self.maybe_compact(session_key, &system_prompt, &event_tx)
+            self.maybe_compact(session_key, &system_prompt, &event_tx, "threshold", false)
                 .await?;
 
             let session_len_before = self.messages(session_key).len();
@@ -531,39 +532,78 @@ impl Gateway {
                     // tool_result and before the next provider call.
                     self.drain_pending_inbound(session_key);
 
-                    let all_messages = self.messages(session_key);
-                    let compaction_state = self.get_compaction(session_key);
-                    let messages = match &compaction_state {
-                        Some((state, msg_count_before)) => compaction::build_provider_context(
-                            &all_messages,
-                            Some(state),
-                            *msg_count_before,
-                        ),
-                        None => all_messages,
-                    };
-                    let messages =
-                        coop_core::images::inject_images_for_provider(&messages, &workspace_scope);
-                    let (response, usage) = self
-                        .assistant_response(&system_prompt, &messages, &tool_defs, &event_tx)
-                        .await?;
+                    let mut retried_after_compaction = false;
 
-                    self.update_last_input_tokens(session_key, &usage);
-                    total_usage += usage;
-                    self.append_message(session_key, response.clone());
-                    new_messages.push(response.clone());
+                    loop {
+                        let all_messages = self.messages(session_key);
+                        let compaction_state = self.get_compaction(session_key);
+                        let messages = match &compaction_state {
+                            Some((state, msg_count_before)) => compaction::build_provider_context(
+                                &all_messages,
+                                Some(state),
+                                *msg_count_before,
+                            ),
+                            None => all_messages,
+                        };
+                        let messages = coop_core::images::inject_images_for_provider(
+                            &messages,
+                            &workspace_scope,
+                        );
 
-                    let _ = event_tx
-                        .send(TurnEvent::AssistantMessage(response.clone()))
-                        .await;
+                        match self
+                            .assistant_response(&system_prompt, &messages, &tool_defs, &event_tx)
+                            .await
+                        {
+                            Ok((response, usage)) => {
+                                if retried_after_compaction {
+                                    info!(iteration, "overflow compaction retry succeeded");
+                                }
 
-                    debug!(
-                        has_tool_requests = response.has_tool_requests(),
-                        response_text_len = response.text().len(),
-                        "iteration complete"
-                    );
+                                self.update_last_input_tokens(session_key, &usage);
+                                total_usage += usage;
+                                self.append_message(session_key, response.clone());
+                                new_messages.push(response.clone());
 
-                    let has_tool_requests = response.has_tool_requests();
-                    Ok((response, !has_tool_requests))
+                                let _ = event_tx
+                                    .send(TurnEvent::AssistantMessage(response.clone()))
+                                    .await;
+
+                                debug!(
+                                    has_tool_requests = response.has_tool_requests(),
+                                    response_text_len = response.text().len(),
+                                    "iteration complete"
+                                );
+
+                                let has_tool_requests = response.has_tool_requests();
+                                break Ok((response, !has_tool_requests));
+                            }
+                            Err(err)
+                                if !retried_after_compaction
+                                    && overflow_recovery::should_force_compact_after_error(&err) =>
+                            {
+                                warn!(
+                                    error = %err,
+                                    iteration,
+                                    "provider failed with overflow-like error; compacting and retrying iteration"
+                                );
+
+                                let compacted = self
+                                    .maybe_compact(
+                                        session_key,
+                                        &system_prompt,
+                                        &event_tx,
+                                        "overflow",
+                                        true,
+                                    )
+                                    .await?;
+                                if !compacted {
+                                    break Err(err);
+                                }
+                                retried_after_compaction = true;
+                            }
+                            Err(err) => break Err(err),
+                        }
+                    }
                 }
                 .instrument(iter_span)
                 .await;
@@ -677,7 +717,7 @@ impl Gateway {
                 // Compact mid-turn if the context grew past the threshold
                 // during this iteration. The next iteration will use the
                 // compacted context automatically via build_provider_context.
-                self.maybe_compact(session_key, &system_prompt, &event_tx)
+                self.maybe_compact(session_key, &system_prompt, &event_tx, "threshold", false)
                     .await?;
 
                 if iteration + 1 >= turn_config.max_iterations {
@@ -1014,12 +1054,16 @@ impl Gateway {
     /// the input token count the provider reported on the most recent call,
     /// reflecting how large the context actually was.
     ///
-    /// Returns `Ok(true)` if compaction was performed.
+    /// When `force` is true, compaction runs even if the threshold has not
+    /// been reached yet. This mirrors pi's overflow recovery path: compact the
+    /// current branch state, then retry the same prompt once.
     async fn maybe_compact(
         &self,
         session_key: &SessionKey,
         system_prompt: &[String],
         event_tx: &mpsc::Sender<TurnEvent>,
+        reason: &'static str,
+        force: bool,
     ) -> Result<bool> {
         let input_tokens = self
             .session_usage
@@ -1027,8 +1071,10 @@ impl Gateway {
             .expect("session_usage mutex poisoned")
             .get(session_key)
             .map_or(0, |u| u.last_input_tokens);
+        let context_limit = self.context_limit();
+        let reserve_tokens = compaction::reserve_tokens(context_limit);
 
-        if !compaction::should_compact(input_tokens) {
+        if !force && !compaction::should_compact(input_tokens, context_limit) {
             return Ok(false);
         }
 
@@ -1051,7 +1097,11 @@ impl Gateway {
 
         info!(
             session = %session_key,
+            reason,
+            force,
             input_tokens,
+            context_limit,
+            reserve_tokens,
             message_count = msg_count,
             is_iterative = previous_state.is_some(),
             "compaction triggered"
@@ -1069,6 +1119,8 @@ impl Gateway {
                 let cut_point = state.messages_at_compaction.unwrap_or(msg_count);
                 info!(
                     session = %session_key,
+                    reason,
+                    force,
                     summary_len = state.summary.len(),
                     compaction_count = state.compaction_count,
                     files_tracked = state.files_touched.len(),
@@ -1081,6 +1133,8 @@ impl Gateway {
             Err(e) => {
                 warn!(
                     session = %session_key,
+                    reason,
+                    force,
                     error = %e,
                     "compaction failed, continuing with full context"
                 );
@@ -1866,6 +1920,13 @@ model = "test-model"
         assert!(prompt.contains("Do not reply with NO_ACTION_NEEDED"));
     }
 
+    async fn trace_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await
+    }
+
     /// Provider that always fails with the given error message.
     #[derive(Debug)]
     struct FailingProvider {
@@ -1983,6 +2044,123 @@ model = "test-model"
         }
     }
 
+    #[derive(Debug)]
+    struct RetryAfterCompactionProvider {
+        model: ModelInfo,
+        stream_calls: Arc<Mutex<u32>>,
+        compaction_calls: Arc<Mutex<u32>>,
+        saw_summary_on_retry: Arc<Mutex<bool>>,
+    }
+
+    impl RetryAfterCompactionProvider {
+        fn new(
+            stream_calls: Arc<Mutex<u32>>,
+            compaction_calls: Arc<Mutex<u32>>,
+            saw_summary_on_retry: Arc<Mutex<bool>>,
+        ) -> Self {
+            Self {
+                model: ModelInfo {
+                    name: "retry-after-compaction".into(),
+                    context_limit: 128_000,
+                },
+                stream_calls,
+                compaction_calls,
+                saw_summary_on_retry,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Provider for RetryAfterCompactionProvider {
+        fn name(&self) -> &'static str {
+            "retry-after-compaction"
+        }
+
+        fn model_info(&self) -> ModelInfo {
+            self.model.clone()
+        }
+
+        async fn complete(
+            &self,
+            _system: &[String],
+            _messages: &[Message],
+            _tools: &[ToolDef],
+        ) -> Result<(Message, Usage)> {
+            anyhow::bail!("not supported")
+        }
+
+        async fn stream(
+            &self,
+            _system: &[String],
+            messages: &[Message],
+            _tools: &[ToolDef],
+        ) -> Result<ProviderStream> {
+            let first_call = {
+                let mut calls = self.stream_calls.lock().unwrap();
+                *calls += 1;
+                *calls == 1
+            };
+
+            if first_call {
+                let stream = futures::stream::once(async {
+                    Err(anyhow::anyhow!(
+                        "Anthropic streamed tool_use for `bash` ended with invalid/incomplete input_json after max_tokens"
+                    ))
+                });
+                return Ok(Box::pin(stream));
+            }
+
+            let saw_summary = messages.iter().any(|message| {
+                message
+                    .text()
+                    .contains("<summary>Compacted summary of conversation.</summary>")
+            });
+            *self.saw_summary_on_retry.lock().unwrap() = saw_summary;
+
+            let message = Message::assistant().with_text("Recovered after compaction");
+            let usage = Usage {
+                input_tokens: Some(120),
+                output_tokens: Some(24),
+                stop_reason: Some("end_turn".into()),
+                ..Default::default()
+            };
+            let stream = futures::stream::once(async { Ok((Some(message), Some(usage))) });
+            Ok(Box::pin(stream))
+        }
+
+        fn supports_streaming(&self) -> bool {
+            true
+        }
+
+        async fn complete_fast(
+            &self,
+            _system: &[String],
+            messages: &[Message],
+            _tools: &[ToolDef],
+        ) -> Result<(Message, Usage)> {
+            {
+                let mut calls = self.compaction_calls.lock().unwrap();
+                *calls += 1;
+            }
+
+            let is_compaction_call = messages
+                .last()
+                .is_some_and(|message| message.text().contains("continuation summary"));
+            assert!(is_compaction_call, "expected compaction summary request");
+
+            Ok((
+                Message::assistant()
+                    .with_text("<summary>Compacted summary of conversation.</summary>"),
+                Usage {
+                    input_tokens: Some(500),
+                    output_tokens: Some(120),
+                    stop_reason: Some("end_turn".into()),
+                    ..Default::default()
+                },
+            ))
+        }
+    }
+
     #[tokio::test]
     async fn provider_error_mid_turn_rolls_back_all_messages() {
         let workspace = test_workspace();
@@ -2039,6 +2217,182 @@ model = "test-model"
         assert!(
             gateway.messages(&session_key).is_empty(),
             "session should be fully rolled back after mid-turn error"
+        );
+    }
+
+    #[tokio::test]
+    async fn retries_truncated_tool_use_max_tokens_once_after_compaction() {
+        let workspace = test_workspace();
+        let stream_calls = Arc::new(Mutex::new(0));
+        let compaction_calls = Arc::new(Mutex::new(0));
+        let saw_summary_on_retry = Arc::new(Mutex::new(false));
+        let provider: Arc<dyn Provider> = Arc::new(RetryAfterCompactionProvider::new(
+            Arc::clone(&stream_calls),
+            Arc::clone(&compaction_calls),
+            Arc::clone(&saw_summary_on_retry),
+        ));
+        let executor = Arc::new(DefaultExecutor::new());
+        let gateway = Arc::new(
+            Gateway::new(
+                shared_config(test_config()),
+                workspace.path().to_path_buf(),
+                registry(provider),
+                executor,
+                None,
+                None,
+            )
+            .unwrap(),
+        );
+
+        let session_key = gateway.default_session_key();
+        let (event_tx, mut event_rx) = mpsc::channel(32);
+
+        let result = gateway
+            .run_turn_with_trust(
+                &session_key,
+                "hello",
+                TrustLevel::Full,
+                Some("alice"),
+                None,
+                event_tx,
+            )
+            .await;
+
+        assert!(result.is_ok(), "retry should keep the turn alive");
+        assert_eq!(
+            *stream_calls.lock().unwrap(),
+            2,
+            "should retry exactly once"
+        );
+        assert_eq!(*compaction_calls.lock().unwrap(), 1, "should compact once");
+        assert!(
+            *saw_summary_on_retry.lock().unwrap(),
+            "retry request should use the compacted summary"
+        );
+        assert!(
+            gateway.get_compaction(&session_key).is_some(),
+            "compaction state should be persisted for the retry"
+        );
+
+        let mut saw_error = false;
+        let mut saw_done = false;
+        let mut saw_compacting = false;
+        while let Ok(event) = event_rx.try_recv() {
+            match event {
+                TurnEvent::Error(_) => saw_error = true,
+                TurnEvent::Compacting => saw_compacting = true,
+                TurnEvent::Done(done) => {
+                    saw_done = true;
+                    assert!(!done.hit_limit, "retry should finish the turn");
+                }
+                _ => {}
+            }
+        }
+
+        assert!(
+            !saw_error,
+            "successful retry should not emit an error event"
+        );
+        assert!(saw_compacting, "retry path should compact before retrying");
+        assert!(saw_done, "turn should complete after retry");
+
+        let messages = gateway.messages(&session_key);
+        assert_eq!(messages.len(), 2, "session should keep the recovered turn");
+        assert_eq!(messages[0].text(), "hello");
+        assert_eq!(messages[1].text(), "Recovered after compaction");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn trace_records_overflow_compaction_retry() {
+        use std::io::BufRead;
+        use tracing_subscriber::fmt::format::FmtSpan;
+        use tracing_subscriber::prelude::*;
+
+        let _trace_guard = trace_test_guard().await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let trace_file = dir.path().join("traces.jsonl");
+
+        let file_appender = tracing_appender::rolling::never(dir.path(), "traces.jsonl");
+        let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+
+        let jsonl_layer = tracing_subscriber::fmt::layer()
+            .json()
+            .with_writer(non_blocking)
+            .with_span_list(true)
+            .with_file(true)
+            .with_line_number(true)
+            .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
+            .with_filter(tracing_subscriber::EnvFilter::new("debug"));
+
+        let subscriber = tracing_subscriber::Registry::default().with(jsonl_layer);
+        let dispatch = tracing::dispatcher::Dispatch::new(subscriber);
+        let default_guard = tracing::dispatcher::set_default(&dispatch);
+
+        let workspace = test_workspace();
+        let stream_calls = Arc::new(Mutex::new(0));
+        let compaction_calls = Arc::new(Mutex::new(0));
+        let saw_summary_on_retry = Arc::new(Mutex::new(false));
+        let provider: Arc<dyn Provider> = Arc::new(RetryAfterCompactionProvider::new(
+            Arc::clone(&stream_calls),
+            Arc::clone(&compaction_calls),
+            Arc::clone(&saw_summary_on_retry),
+        ));
+        let gateway = Arc::new(
+            Gateway::new(
+                shared_config(test_config()),
+                workspace.path().to_path_buf(),
+                registry(provider),
+                Arc::new(DefaultExecutor::new()),
+                None,
+                None,
+            )
+            .unwrap(),
+        );
+
+        let session_key = gateway.default_session_key();
+        let (event_tx, _event_rx) = mpsc::channel(32);
+
+        let result = gateway
+            .run_turn_with_trust(
+                &session_key,
+                "hello",
+                TrustLevel::Full,
+                Some("alice"),
+                None,
+                event_tx,
+            )
+            .await;
+
+        assert!(result.is_ok());
+        assert_eq!(*stream_calls.lock().unwrap(), 2);
+        assert_eq!(*compaction_calls.lock().unwrap(), 1);
+        assert!(*saw_summary_on_retry.lock().unwrap());
+
+        drop(default_guard);
+        drop(guard);
+
+        let file = std::fs::File::open(&trace_file).unwrap();
+        let lines: Vec<String> = std::io::BufReader::new(file)
+            .lines()
+            .map(|line| line.unwrap())
+            .filter(|line| !line.is_empty())
+            .collect();
+        let trace = lines.join("\n");
+
+        assert!(
+            trace.contains(
+                "provider failed with overflow-like error; compacting and retrying iteration"
+            ),
+            "expected overflow retry trace"
+        );
+        assert!(
+            trace.contains("\"reason\":\"overflow\""),
+            "expected overflow compaction reason in trace"
+        );
+        assert!(
+            trace.contains("overflow compaction retry succeeded"),
+            "expected retry success trace"
         );
     }
 
@@ -3617,6 +3971,8 @@ model = "test-model"
         use std::io::BufRead;
         use tracing_subscriber::fmt::format::FmtSpan;
         use tracing_subscriber::prelude::*;
+
+        let _trace_guard = trace_test_guard().await;
 
         let dir = tempfile::tempdir().unwrap();
         let trace_file = dir.path().join("traces.jsonl");

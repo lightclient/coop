@@ -48,6 +48,8 @@ mod memory_prompt_index;
 mod memory_reconcile;
 #[path = "../src/memory_tools.rs"]
 mod memory_tools;
+#[path = "../src/overflow_recovery.rs"]
+mod overflow_recovery;
 #[allow(dead_code)]
 #[path = "../src/session_store.rs"]
 mod session_store;

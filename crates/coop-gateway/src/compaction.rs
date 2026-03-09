@@ -11,8 +11,8 @@ use coop_core::traits::Provider;
 use coop_core::types::{Content, Message, Role};
 use tracing::{Instrument, debug, info_span};
 
-/// Compact when total tokens exceeds this.
-pub(crate) const COMPACTION_THRESHOLD: u32 = 175_000;
+/// Tokens to reserve for the model's response, matching pi's default.
+pub(crate) const DEFAULT_RESERVE_TOKENS: usize = 16_384;
 
 /// Approximate tokens of recent context to preserve verbatim after compaction.
 const RECENT_CONTEXT_TARGET: u32 = 20_000;
@@ -87,9 +87,13 @@ pub(crate) struct CompactionState {
     pub messages_at_compaction: Option<usize>,
 }
 
+pub(crate) fn reserve_tokens(context_limit: usize) -> usize {
+    DEFAULT_RESERVE_TOKENS.min(context_limit)
+}
+
 /// Returns true if the given input token count exceeds the compaction threshold.
-pub(crate) fn should_compact(input_tokens: u32) -> bool {
-    input_tokens > COMPACTION_THRESHOLD
+pub(crate) fn should_compact(input_tokens: u32, context_limit: usize) -> bool {
+    (input_tokens as usize) > context_limit.saturating_sub(reserve_tokens(context_limit))
 }
 
 /// Find the cut point: index into `messages` such that everything from
@@ -423,7 +427,7 @@ pub(crate) async fn compact(
             "sending compaction request"
         );
 
-        let (response, usage) = provider.complete(system_prompt, &msgs, &[]).await?;
+        let (response, usage) = provider.complete_fast(system_prompt, &msgs, &[]).await?;
 
         let summary = response
             .content
@@ -514,17 +518,18 @@ mod tests {
 
     #[test]
     fn below_threshold_does_not_compact() {
-        assert!(!should_compact(50_000));
+        assert!(!should_compact(50_000, 200_000));
     }
 
     #[test]
     fn above_threshold_triggers_compaction() {
-        assert!(should_compact(200_000));
+        assert!(should_compact(190_000, 200_000));
     }
 
     #[test]
     fn exactly_at_threshold_does_not_compact() {
-        assert!(!should_compact(COMPACTION_THRESHOLD));
+        let threshold = u32::try_from(200_000 - DEFAULT_RESERVE_TOKENS).unwrap();
+        assert!(!should_compact(threshold, 200_000));
     }
 
     #[test]
