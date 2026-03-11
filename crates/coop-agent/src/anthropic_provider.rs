@@ -1019,7 +1019,7 @@ where
 
                     let allows_empty_input = self.empty_input_tool_names.contains(&coop_name);
 
-                    let input = if saw_input_delta {
+                    let input = if saw_input_delta && !json_buf.trim().is_empty() {
                         match parse_streamed_tool_input(&json_buf, allows_empty_input) {
                             Ok(input) => input,
                             Err(error) => {
@@ -1148,6 +1148,7 @@ where
                         saw_input_delta,
                         ..
                     }) = self.blocks.last_mut()
+                        && !partial_json.is_empty()
                     {
                         *saw_input_delta = true;
                         json_buf.push_str(&partial_json);
@@ -1745,6 +1746,21 @@ mod tests {
     #[test]
     fn streamed_tool_use_falls_back_to_empty_object_without_deltas() {
         let action = streamed_tool_use_action("config_read", None, None, Some("tool_use"), false);
+
+        let SseAction::YieldFinal(message, usage) = action else {
+            panic!("expected final message");
+        };
+        let tool_requests = message.tool_requests();
+        assert_eq!(tool_requests.len(), 1);
+        assert_eq!(tool_requests[0].name, "config_read");
+        assert_eq!(tool_requests[0].arguments, json!({}));
+        assert_eq!(usage.stop_reason.as_deref(), Some("tool_use"));
+    }
+
+    #[test]
+    fn streamed_tool_use_ignores_empty_input_json_delta_for_empty_arg_tool() {
+        let action =
+            streamed_tool_use_action("config_read", None, Some(""), Some("tool_use"), false);
 
         let SseAction::YieldFinal(message, usage) = action else {
             panic!("expected final message");
