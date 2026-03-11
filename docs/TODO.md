@@ -7,7 +7,7 @@
   nicely
 - ~~log rotation~~ ✅ **DONE** - Size and date-based rotation implemented
 - Don't save keys to memory!!!
-- handle timezone in cron
+- ~~handle timezone in cron~~ ✅ **DONE** - cron entries now support explicit timezones and user timezone defaults
 - need better per-user tracking of memories
 - let user interject in the middle of a stream with new prompt / info
 - inject user AGENTS.md

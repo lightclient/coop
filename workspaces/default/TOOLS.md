@@ -64,6 +64,7 @@ workspace = "./workspaces/default"             # path to workspace dir (restart-
 [[users]]
 name = "alice"
 trust = "owner"
+timezone = "America/Chicago"       # optional: defaults to the local system timezone when omitted
 match = ["terminal:default", "signal:alice-uuid"]
 
 [[users]]
@@ -204,7 +205,8 @@ message = "check HEARTBEAT.md"     # message sent to the agent
 [[cron]]
 name = "morning-briefing"
 cron = "0 8 * * *"
-user = "alice"
+timezone = "America/Chicago"       # optional: explicit timezone (IANA name)
+user = "alice"                     # if omitted above, falls back to user's timezone, then the local system timezone, then UTC
 delivery = "always"
 message = "Morning briefing"
 
@@ -235,7 +237,9 @@ message = "run cleanup"
 - Memory auto_capture: min_turn_messages >= 1
 - Memory retention: all day values > 0, compression_min_cluster_size > 1, delete_archive_after_days >= archive_after_days
 - Embedding dimensions: 1..=8192
+- User `timezone` must be a valid IANA timezone name if set (for example `America/Chicago`)
 - Cron users must exist in the users list
+- Cron `timezone` must be a valid IANA timezone name if set; otherwise cron falls back to the user's timezone, then the local system timezone, then UTC
 - Cron delivery channel must be `signal`
 - Cron `delivery` must be `always` or `as_needed`
 - Cron with user but no `deliver`: warns if user has no non-terminal match patterns (cron will have no delivery targets)

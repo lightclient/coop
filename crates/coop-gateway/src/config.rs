@@ -74,6 +74,8 @@ pub(crate) struct UserConfig {
     #[serde(default)]
     pub r#match: Vec<String>,
     #[serde(default)]
+    pub timezone: Option<String>,
+    #[serde(default)]
     pub sandbox: Option<SandboxOverrides>,
 }
 
@@ -513,6 +515,8 @@ impl fmt::Display for CronDeliveryMode {
 pub(crate) struct CronConfig {
     pub name: String,
     pub cron: String,
+    #[serde(default)]
+    pub timezone: Option<String>,
     pub message: String,
     #[serde(default)]
     pub user: Option<String>,
@@ -919,6 +923,7 @@ message = "run cleanup"
         assert_eq!(config.cron[0].name, "heartbeat");
         assert_eq!(config.cron[0].cron, "*/30 * * * *");
         assert_eq!(config.cron[0].user.as_deref(), Some("alice"));
+        assert!(config.cron[0].timezone.is_none());
         assert_eq!(config.cron[0].message, "check HEARTBEAT.md");
         assert!(config.cron[0].delivery.is_none());
         assert!(config.cron[0].deliver.is_none());
@@ -926,6 +931,42 @@ message = "run cleanup"
         assert!(config.cron[1].user.is_none());
         assert!(config.cron[1].delivery.is_none());
         assert!(config.cron[1].deliver.is_none());
+    }
+
+    #[test]
+    fn parse_config_with_user_timezone() {
+        let toml_str = r#"
+[agent]
+id = "coop"
+model = "test"
+
+[[users]]
+name = "alice"
+trust = "full"
+timezone = "America/Chicago"
+match = ["signal:alice-uuid"]
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.users.len(), 1);
+        assert_eq!(config.users[0].timezone.as_deref(), Some("America/Chicago"));
+    }
+
+    #[test]
+    fn parse_config_with_cron_timezone() {
+        let toml_str = r#"
+[agent]
+id = "coop"
+model = "test"
+
+[[cron]]
+name = "morning-briefing"
+cron = "0 8 * * *"
+timezone = "Europe/Berlin"
+message = "Morning briefing"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.cron.len(), 1);
+        assert_eq!(config.cron[0].timezone.as_deref(), Some("Europe/Berlin"));
     }
 
     #[test]

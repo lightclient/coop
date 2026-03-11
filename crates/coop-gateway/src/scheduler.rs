@@ -1,5 +1,6 @@
 use anyhow::Result;
 use chrono::Utc;
+use chrono_tz::Tz;
 use coop_core::{InboundKind, InboundMessage, Message, OutboundMessage, SessionKey, SessionKind};
 use cron::Schedule;
 use std::collections::HashMap;
@@ -12,6 +13,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, error, info, info_span, warn};
 
 use crate::config::{Config, CronConfig, CronDeliveryMode, SharedConfig};
+use crate::cron_timezone::{next_cron_fire_after, resolve_cron_timezone};
 use crate::heartbeat::{
     NO_ACTION_NEEDED_TOKEN, SuppressionTokenResult, contains_legacy_heartbeat_token,
     is_heartbeat_content_empty, strip_suppression_token,
@@ -26,6 +28,13 @@ use crate::router::MessageRouter;
 #[derive(Clone, Debug)]
 pub(crate) struct DeliverySender {
     tx: mpsc::Sender<OutboundMessage>,
+}
+
+#[derive(Clone)]
+struct ParsedCron {
+    cfg: CronConfig,
+    schedule: Schedule,
+    timezone: Tz,
 }
 
 impl DeliverySender {
@@ -89,6 +98,7 @@ pub(crate) async fn run_scheduler(
     run_scheduler_with_notify(config, router, deliver_tx, shutdown, None, None).await;
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) async fn run_scheduler_with_notify(
     config: SharedConfig,
     router: Arc<MessageRouter>,
@@ -104,7 +114,7 @@ pub(crate) async fn run_scheduler_with_notify(
     let notify = cron_notify.as_deref().unwrap_or(&default_notify);
 
     let mut last_cron: Vec<CronConfig> = Vec::new();
-    let mut parsed: Vec<(CronConfig, Schedule)> = Vec::new();
+    let mut parsed: Vec<ParsedCron> = Vec::new();
     // Tracks the last *scheduled* fire time per cron. Used as the
     // starting point for the next `schedule.after()` query so we always
     // advance past already-fired ticks.  Without this, `upcoming(Utc)`
@@ -151,9 +161,10 @@ pub(crate) async fn run_scheduler_with_notify(
         // On first iteration, fall back to wall-clock time.
         let all_upcoming: Vec<_> = parsed
             .iter()
-            .filter_map(|(cfg, sched)| {
-                let after = last_fired.get(&cfg.name).copied().unwrap_or_else(Utc::now);
-                sched.after(&after).next().map(|t| (cfg, t))
+            .filter_map(|entry| {
+                let after = last_fired.get(&entry.cfg.name).copied().unwrap_or(now);
+                next_cron_fire_after(&entry.schedule, entry.timezone, after)
+                    .map(|time| (entry, time))
             })
             .collect();
 
@@ -183,9 +194,10 @@ pub(crate) async fn run_scheduler_with_notify(
         let delay = (fire_time - now).to_std().unwrap_or(Duration::ZERO);
 
         // Only log cron waits (reminders are handled at loop top).
-        if let Some((cfg, _)) = all_upcoming.first() {
+        if let Some((entry, _)) = all_upcoming.first() {
             debug!(
-                cron.name = %cfg.name,
+                cron.name = %entry.cfg.name,
+                cron.timezone = %entry.timezone,
                 fire_time = %fire_time,
                 delay_secs = delay.as_secs(),
                 "scheduler waiting for next fire"
@@ -196,21 +208,29 @@ pub(crate) async fn run_scheduler_with_notify(
             () = tokio::time::sleep(delay) => {
                 // Fire ALL crons due at this time.
                 if next_cron_time == Some(fire_time) {
-                    for (cfg, cron_time) in &all_upcoming {
+                    for (entry, cron_time) in &all_upcoming {
                         if *cron_time != fire_time {
                             continue;
                         }
 
                         // Record the scheduled fire time so the next
                         // after() query advances past this tick.
-                        last_fired.insert(cfg.name.clone(), fire_time);
+                        last_fired.insert(entry.cfg.name.clone(), fire_time);
 
-                        let cfg = (*cfg).clone();
+                        let cfg = entry.cfg.clone();
+                        let timezone = entry.timezone;
                         let router = Arc::clone(&router);
                         let deliver_tx = deliver_tx.clone();
                         let sched_config = Arc::clone(&config);
                         tokio::spawn(async move {
-                            fire_cron(&cfg, &router, deliver_tx.as_ref(), &sched_config).await;
+                            fire_cron_with_timezone(
+                                &cfg,
+                                timezone,
+                                &router,
+                                deliver_tx.as_ref(),
+                                &sched_config,
+                            )
+                            .await;
                         });
                     }
                 }
@@ -233,7 +253,7 @@ fn parse_and_validate(
     cron: &[CronConfig],
     users: &[crate::config::UserConfig],
     deliver_tx: Option<&DeliverySender>,
-) -> Vec<(CronConfig, Schedule)> {
+) -> Vec<ParsedCron> {
     let mut parsed = Vec::new();
     for entry in cron {
         if let Some(ref user) = entry.user
@@ -263,14 +283,27 @@ fn parse_and_validate(
             }
         }
 
-        match parse_cron(&entry.cron) {
-            Ok(schedule) => {
-                parsed.push((entry.clone(), schedule));
-            }
+        let schedule = match parse_cron(&entry.cron) {
+            Ok(schedule) => schedule,
             Err(e) => {
                 error!(cron.name = %entry.name, error = %e, "skipping invalid cron entry");
+                continue;
             }
-        }
+        };
+
+        let timezone = match resolve_cron_timezone(entry, users) {
+            Ok(timezone) => timezone,
+            Err(e) => {
+                error!(cron.name = %entry.name, error = %e, "skipping invalid cron entry");
+                continue;
+            }
+        };
+
+        parsed.push(ParsedCron {
+            cfg: entry.clone(),
+            schedule,
+            timezone,
+        });
     }
     parsed
 }
@@ -344,8 +377,22 @@ async fn wait_for_delivery_sessions(
     }
 }
 
+#[cfg(test)]
 async fn fire_cron(
     cfg: &CronConfig,
+    router: &MessageRouter,
+    deliver_tx: Option<&DeliverySender>,
+    shared_config: &SharedConfig,
+) {
+    let config_snapshot = shared_config.load();
+    let timezone = resolve_cron_timezone(cfg, &config_snapshot.users).unwrap_or(chrono_tz::UTC);
+    drop(config_snapshot);
+    fire_cron_with_timezone(cfg, timezone, router, deliver_tx, shared_config).await;
+}
+
+async fn fire_cron_with_timezone(
+    cfg: &CronConfig,
+    timezone: Tz,
     router: &MessageRouter,
     deliver_tx: Option<&DeliverySender>,
     shared_config: &SharedConfig,
@@ -354,14 +401,17 @@ async fn fire_cron(
     let span = info_span!(
         "cron_fired",
         cron.name = %cfg.name,
+        cron.timezone = %timezone,
         cron.delivery_mode = %delivery_mode,
         cron.legacy_delivery_mode = cfg.uses_legacy_delivery_mode(),
         user = ?cfg.user,
     );
 
     async {
+        let config_snapshot = shared_config.load();
         info!(
             cron = %cfg.cron,
+            cron.timezone = %timezone,
             message = %cfg.message,
             user = ?cfg.user,
             cron.delivery_mode = %delivery_mode,
@@ -369,7 +419,6 @@ async fn fire_cron(
             "cron firing"
         );
 
-        let config_snapshot = shared_config.load();
         let delivery_targets = resolve_cron_delivery_targets(&config_snapshot, cfg);
         let agent_id = config_snapshot.agent.id.clone();
 
@@ -859,6 +908,7 @@ mod tests {
         let cfg = CronConfig {
             name: "heartbeat".to_owned(),
             cron: "*/30 * * * *".to_owned(),
+            timezone: None,
             message: "check tasks".to_owned(),
             user: Some("alice".to_owned()),
             delivery: None,
@@ -877,6 +927,7 @@ mod tests {
         let cfg = CronConfig {
             name: "cleanup".to_owned(),
             cron: "0 3 * * *".to_owned(),
+            timezone: None,
             message: "run cleanup".to_owned(),
             user: None,
             delivery: None,
@@ -916,6 +967,7 @@ mod tests {
         let cron = vec![CronConfig {
             name: "test".to_owned(),
             cron: "0 0 1 1 *".to_owned(),
+            timezone: None,
             message: "test".to_owned(),
             user: None,
             delivery: None,
@@ -949,11 +1001,13 @@ mod tests {
             name: "alice".to_owned(),
             trust: TrustLevel::Full,
             r#match: vec!["terminal:default".to_owned()],
+            timezone: None,
             sandbox: None,
         };
         let cron = vec![CronConfig {
             name: "test".to_owned(),
             cron: "* * * * * * *".to_owned(), // every second
+            timezone: None,
             message: "heartbeat check".to_owned(),
             user: Some("alice".to_owned()),
             delivery: None,
@@ -996,6 +1050,7 @@ mod tests {
         let cron = vec![CronConfig {
             name: "cleanup".to_owned(),
             cron: "* * * * * * *".to_owned(),
+            timezone: None,
             message: "run cleanup".to_owned(),
             user: None,
             delivery: None,
@@ -1032,6 +1087,7 @@ mod tests {
             name: "alice".to_owned(),
             trust: TrustLevel::Full,
             r#match: vec![],
+            timezone: None,
             sandbox: None,
         }];
         let (shared, router, gateway) =
@@ -1040,6 +1096,7 @@ mod tests {
         let cfg = CronConfig {
             name: "heartbeat".to_owned(),
             cron: "*/30 * * * *".to_owned(),
+            timezone: None,
             message: "check tasks".to_owned(),
             user: Some("alice".to_owned()),
             delivery: None,
@@ -1067,6 +1124,7 @@ mod tests {
         let cfg = CronConfig {
             name: "cleanup".to_owned(),
             cron: "0 3 * * *".to_owned(),
+            timezone: None,
             message: "run cleanup".to_owned(),
             user: None,
             delivery: None,
@@ -1094,6 +1152,7 @@ mod tests {
         let cfg = CronConfig {
             name: "heartbeat".to_owned(),
             cron: "*/30 * * * *".to_owned(),
+            timezone: None,
             message: "check tasks".to_owned(),
             user: None,
             delivery: None,
@@ -1201,6 +1260,7 @@ mod tests {
         let cfg = CronConfig {
             name: "briefing".to_owned(),
             cron: "0 8 * * *".to_owned(),
+            timezone: None,
             message: "Morning briefing".to_owned(),
             user: None,
             delivery: None,
@@ -1229,6 +1289,7 @@ mod tests {
         let cfg = CronConfig {
             name: "briefing".to_owned(),
             cron: "0 8 * * *".to_owned(),
+            timezone: None,
             message: "Morning briefing".to_owned(),
             user: None,
             delivery: None,
@@ -1267,6 +1328,7 @@ mod tests {
         let cfg = CronConfig {
             name: "heartbeat".to_owned(),
             cron: "*/30 * * * *".to_owned(),
+            timezone: None,
             message: "check tasks".to_owned(),
             user: None,
             delivery: None,
@@ -1319,6 +1381,7 @@ mod tests {
         let cfg = CronConfig {
             name: "briefing".to_owned(),
             cron: "0 8 * * *".to_owned(),
+            timezone: None,
             message: "Morning briefing".to_owned(),
             user: None,
             delivery: None,
@@ -1347,6 +1410,7 @@ mod tests {
         let cfg = CronConfig {
             name: "heartbeat".to_owned(),
             cron: "*/30 * * * *".to_owned(),
+            timezone: None,
             message: "check tasks".to_owned(),
             user: None,
             delivery: None,
@@ -1368,6 +1432,7 @@ mod tests {
         let cfg = CronConfig {
             name: "briefing".to_owned(),
             cron: "0 8 * * *".to_owned(),
+            timezone: None,
             message: "Morning briefing".to_owned(),
             user: None,
             delivery: None,
@@ -1391,6 +1456,7 @@ mod tests {
         let cfg = CronConfig {
             name: "briefing".to_owned(),
             cron: "0 8 * * *".to_owned(),
+            timezone: None,
             message: "Morning briefing".to_owned(),
             user: None,
             delivery: None,
@@ -1419,6 +1485,7 @@ mod tests {
         let cfg = CronConfig {
             name: "humidifier-check".to_owned(),
             cron: "0 7 * * *".to_owned(),
+            timezone: None,
             message: "Read WEATHER.md for the current temperature.".to_owned(),
             user: None,
             delivery: None,
@@ -1459,6 +1526,7 @@ mod tests {
         let cfg = CronConfig {
             name: "humidifier-check".to_owned(),
             cron: "0 7 * * *".to_owned(),
+            timezone: None,
             message: "Read WEATHER.md".to_owned(),
             user: None,
             delivery: None,
@@ -1490,6 +1558,7 @@ mod tests {
         let cfg = CronConfig {
             name: "humidifier-check".to_owned(),
             cron: "0 7 * * *".to_owned(),
+            timezone: None,
             message: "Read HEARTBEAT.md".to_owned(),
             user: None,
             delivery: None,
@@ -1526,6 +1595,7 @@ mod tests {
         let cfg = CronConfig {
             name: "briefing".to_owned(),
             cron: "0 8 * * *".to_owned(),
+            timezone: None,
             message: "Morning briefing".to_owned(),
             user: None,
             delivery: None,
@@ -1563,6 +1633,7 @@ mod tests {
         let cfg = CronConfig {
             name: "briefing".to_owned(),
             cron: "0 8 * * *".to_owned(),
+            timezone: None,
             message: "Morning briefing".to_owned(),
             user: None,
             delivery: None,
@@ -1590,6 +1661,7 @@ mod tests {
         let cfg = CronConfig {
             name: "heartbeat".to_owned(),
             cron: "*/30 * * * *".to_owned(),
+            timezone: None,
             message: "check tasks".to_owned(),
             user: None,
             delivery: None,
@@ -1605,6 +1677,7 @@ mod tests {
         let cron = vec![CronConfig {
             name: "briefing".to_owned(),
             cron: "* * * * * * *".to_owned(),
+            timezone: None,
             message: "Morning briefing".to_owned(),
             user: None,
             delivery: None,
@@ -1679,6 +1752,7 @@ mod tests {
         new_config.cron = vec![CronConfig {
             name: "hotcron".to_owned(),
             cron: "* * * * * * *".to_owned(),
+            timezone: None,
             message: "hot reload test".to_owned(),
             user: None,
             delivery: None,
@@ -1712,6 +1786,7 @@ mod tests {
         let cron = vec![CronConfig {
             name: "distant".to_owned(),
             cron: "0 0 1 1 *".to_owned(), // once a year
+            timezone: None,
             message: "yearly".to_owned(),
             user: None,
             delivery: None,
@@ -1746,6 +1821,7 @@ mod tests {
         new_config.cron = vec![CronConfig {
             name: "fast".to_owned(),
             cron: "* * * * * * *".to_owned(),
+            timezone: None,
             message: "tick".to_owned(),
             user: None,
             delivery: None,
@@ -1803,6 +1879,7 @@ mod tests {
             name: "alice".to_owned(),
             trust: TrustLevel::Full,
             r#match: vec!["signal:alice-uuid".to_owned()],
+            timezone: None,
             sandbox: None,
         }];
         let (shared, router, _gateway) = make_shared_config_and_router_with_users_and_match(
@@ -1816,6 +1893,7 @@ mod tests {
         let cfg = CronConfig {
             name: "heartbeat".to_owned(),
             cron: "*/30 * * * *".to_owned(),
+            timezone: None,
             message: "check HEARTBEAT.md".to_owned(),
             user: Some("alice".to_owned()),
             delivery: None,
@@ -1840,6 +1918,7 @@ mod tests {
                 "signal:alice-uuid".to_owned(),
                 "signal:group:team-chat".to_owned(),
             ],
+            timezone: None,
             sandbox: None,
         }];
         let (shared, router, _gateway) =
@@ -1850,6 +1929,7 @@ mod tests {
         let cfg = CronConfig {
             name: "heartbeat".to_owned(),
             cron: "*/30 * * * *".to_owned(),
+            timezone: None,
             message: "check HEARTBEAT.md".to_owned(),
             user: Some("alice".to_owned()),
             delivery: None,
@@ -1878,6 +1958,7 @@ mod tests {
                 "terminal:default".to_owned(),
                 "signal:alice-uuid".to_owned(),
             ],
+            timezone: None,
             sandbox: None,
         }];
         let (shared, router, _gateway) =
@@ -1888,6 +1969,7 @@ mod tests {
         let cfg = CronConfig {
             name: "heartbeat".to_owned(),
             cron: "*/30 * * * *".to_owned(),
+            timezone: None,
             message: "check HEARTBEAT.md".to_owned(),
             user: Some("alice".to_owned()),
             delivery: None,
@@ -1910,6 +1992,7 @@ mod tests {
             name: "alice".to_owned(),
             trust: TrustLevel::Full,
             r#match: vec!["signal:alice-uuid".to_owned()],
+            timezone: None,
             sandbox: None,
         }];
         let (shared, router, gateway) =
@@ -1920,6 +2003,7 @@ mod tests {
         let cfg = CronConfig {
             name: "heartbeat".to_owned(),
             cron: "*/30 * * * *".to_owned(),
+            timezone: None,
             message: "check HEARTBEAT.md".to_owned(),
             user: Some("alice".to_owned()),
             delivery: None,
@@ -1949,6 +2033,7 @@ mod tests {
             name: "alice".to_owned(),
             trust: TrustLevel::Full,
             r#match: vec!["signal:alice-uuid".to_owned()],
+            timezone: None,
             sandbox: None,
         }];
         let (shared, router, _gateway) =
@@ -1959,6 +2044,7 @@ mod tests {
         let cfg = CronConfig {
             name: "heartbeat".to_owned(),
             cron: "*/30 * * * *".to_owned(),
+            timezone: None,
             message: "check HEARTBEAT.md".to_owned(),
             user: Some("alice".to_owned()),
             delivery: None,
@@ -1982,6 +2068,7 @@ mod tests {
                 "signal:alice-uuid".to_owned(),
                 "signal:group:team-chat".to_owned(),
             ],
+            timezone: None,
             sandbox: None,
         }];
         let (shared, router, _gateway) =
@@ -1993,6 +2080,7 @@ mod tests {
         let cfg = CronConfig {
             name: "heartbeat".to_owned(),
             cron: "*/30 * * * *".to_owned(),
+            timezone: None,
             message: "check HEARTBEAT.md".to_owned(),
             user: Some("alice".to_owned()),
             delivery: None,
@@ -2023,6 +2111,7 @@ mod tests {
         let cfg = CronConfig {
             name: "cleanup".to_owned(),
             cron: "0 3 * * *".to_owned(),
+            timezone: None,
             message: "run cleanup".to_owned(),
             user: None,
             delivery: None,
@@ -2054,6 +2143,7 @@ match = ["signal:alice-uuid", "terminal:default", "signal:group:team-chat"]
         let cfg = CronConfig {
             name: "heartbeat".to_owned(),
             cron: "*/30 * * * *".to_owned(),
+            timezone: None,
             message: "check HEARTBEAT.md".to_owned(),
             user: Some("alice".to_owned()),
             delivery: None,
@@ -2086,6 +2176,7 @@ match = ["signal:alice-uuid"]
         let cfg = CronConfig {
             name: "heartbeat".to_owned(),
             cron: "*/30 * * * *".to_owned(),
+            timezone: None,
             message: "check".to_owned(),
             user: Some("alice".to_owned()),
             delivery: None,
@@ -2117,6 +2208,7 @@ model = "test"
         let cfg = CronConfig {
             name: "cleanup".to_owned(),
             cron: "0 3 * * *".to_owned(),
+            timezone: None,
             message: "cleanup".to_owned(),
             user: None,
             delivery: None,
@@ -2147,6 +2239,7 @@ match = ["signal:alice-uuid"]
         let cfg = CronConfig {
             name: "heartbeat".to_owned(),
             cron: "*/30 * * * *".to_owned(),
+            timezone: None,
             message: "check".to_owned(),
             user: Some("mallory".to_owned()),
             delivery: None,
@@ -2229,6 +2322,7 @@ match = ["signal:alice-uuid"]
         let cron = vec![CronConfig {
             name: "rapid".to_owned(),
             cron: "* * * * * * *".to_owned(), // every second
+            timezone: None,
             message: "tick".to_owned(),
             user: None,
             delivery: None,
@@ -2271,6 +2365,7 @@ match = ["signal:alice-uuid"]
         let cfg = CronConfig {
             name: "heartbeat".to_owned(),
             cron: "*/30 * * * *".to_owned(),
+            timezone: None,
             message: "check HEARTBEAT.md".to_owned(),
             user: None,
             delivery: None,
@@ -2300,6 +2395,7 @@ match = ["signal:alice-uuid"]
         let cfg = CronConfig {
             name: "heartbeat".to_owned(),
             cron: "*/30 * * * *".to_owned(),
+            timezone: None,
             message: "check HEARTBEAT.md".to_owned(),
             user: None,
             delivery: None,
@@ -2328,6 +2424,7 @@ match = ["signal:alice-uuid"]
         let cfg = CronConfig {
             name: "todo-maintenance".to_owned(),
             cron: "0 3 * * *".to_owned(),
+            timezone: None,
             message: "Run daily todo maintenance".to_owned(),
             user: None,
             delivery: Some(CronDeliveryMode::AsNeeded),
@@ -2355,6 +2452,7 @@ match = ["signal:alice-uuid"]
         let cfg = CronConfig {
             name: "evening-mood-checkin".to_owned(),
             cron: "0 20 * * *".to_owned(),
+            timezone: None,
             message: "Send Alice an 8pm mood check-in".to_owned(),
             user: None,
             delivery: None,
@@ -2387,6 +2485,7 @@ match = ["signal:alice-uuid"]
         let cfg = CronConfig {
             name: "morning-briefing".to_owned(),
             cron: "0 8 * * *".to_owned(),
+            timezone: None,
             message: "Morning briefing".to_owned(),
             user: None,
             delivery: Some(CronDeliveryMode::Always),
@@ -2412,6 +2511,7 @@ match = ["signal:alice-uuid"]
         let cfg = CronConfig {
             name: "heartbeat".to_owned(),
             cron: "*/30 * * * *".to_owned(),
+            timezone: None,
             message: "check HEARTBEAT.md".to_owned(),
             user: None,
             delivery: None,
@@ -2484,19 +2584,26 @@ match = ["signal:alice-uuid"]
             let matches: Vec<String> = u.r#match.iter().map(|m| format!("\"{m}\"")).collect();
             let _ = write!(
                 toml_str,
-                "\n[[users]]\nname = \"{}\"\ntrust = \"{}\"\nmatch = [{}]\n",
+                "\n[[users]]\nname = \"{}\"\ntrust = \"{}\"\n",
                 u.name,
                 trust_as_str(u.trust),
-                matches.join(", "),
             );
+            if let Some(timezone) = &u.timezone {
+                let _ = writeln!(toml_str, "timezone = \"{timezone}\"");
+            }
+            let _ = writeln!(toml_str, "match = [{}]", matches.join(", "));
         }
 
         for entry in cron {
             let _ = write!(
                 toml_str,
-                "\n[[cron]]\nname = \"{}\"\ncron = \"{}\"\nmessage = \"{}\"\n",
-                entry.name, entry.cron, entry.message,
+                "\n[[cron]]\nname = \"{}\"\ncron = \"{}\"\n",
+                entry.name, entry.cron,
             );
+            if let Some(timezone) = &entry.timezone {
+                let _ = writeln!(toml_str, "timezone = \"{timezone}\"");
+            }
+            let _ = writeln!(toml_str, "message = \"{}\"", entry.message);
             if let Some(ref user) = entry.user {
                 let _ = writeln!(toml_str, "user = \"{user}\"");
             }
@@ -2544,10 +2651,14 @@ match = ["signal:alice-uuid"]
             for u in users {
                 let _ = write!(
                     users_toml,
-                    "\n[[users]]\nname = \"{}\"\ntrust = \"{}\"\nmatch = []\n",
+                    "\n[[users]]\nname = \"{}\"\ntrust = \"{}\"\n",
                     u.name,
                     trust_as_str(u.trust),
                 );
+                if let Some(timezone) = &u.timezone {
+                    let _ = writeln!(users_toml, "timezone = \"{timezone}\"");
+                }
+                let _ = writeln!(users_toml, "match = []");
             }
         }
 
@@ -2558,9 +2669,13 @@ match = ["signal:alice-uuid"]
         for entry in cron {
             let _ = write!(
                 toml_str,
-                "\n[[cron]]\nname = \"{}\"\ncron = \"{}\"\nmessage = \"{}\"\n",
-                entry.name, entry.cron, entry.message,
+                "\n[[cron]]\nname = \"{}\"\ncron = \"{}\"\n",
+                entry.name, entry.cron,
             );
+            if let Some(timezone) = &entry.timezone {
+                let _ = writeln!(toml_str, "timezone = \"{timezone}\"");
+            }
+            let _ = writeln!(toml_str, "message = \"{}\"", entry.message);
             if let Some(ref user) = entry.user {
                 let _ = writeln!(toml_str, "user = \"{user}\"");
             }
@@ -2605,6 +2720,7 @@ match = ["signal:alice-uuid"]
         let cron = vec![CronConfig {
             name: "fast-cron".to_owned(),
             cron: "* * * * * * *".to_owned(),
+            timezone: None,
             message: "tick".to_owned(),
             user: None,
             delivery: None,
@@ -2656,6 +2772,7 @@ match = ["signal:alice-uuid"]
         let cfg = CronConfig {
             name: "heartbeat".to_owned(),
             cron: "*/30 * * * *".to_owned(),
+            timezone: None,
             message: "check tasks".to_owned(),
             user: None,
             delivery: None,
@@ -2720,6 +2837,7 @@ match = ["signal:alice-uuid"]
         let cfg = CronConfig {
             name: "heartbeat".to_owned(),
             cron: "*/30 * * * *".to_owned(),
+            timezone: None,
             message: "check tasks".to_owned(),
             user: None,
             delivery: None,
@@ -2748,6 +2866,7 @@ match = ["signal:alice-uuid"]
         let cfg = CronConfig {
             name: "cleanup".to_owned(),
             cron: "0 3 * * *".to_owned(),
+            timezone: None,
             message: "run cleanup".to_owned(),
             user: None,
             delivery: None,
@@ -2788,6 +2907,7 @@ match = ["signal:alice-uuid"]
         let cfg = CronConfig {
             name: "group-briefing".to_owned(),
             cron: "0 8 * * *".to_owned(),
+            timezone: None,
             message: "Morning briefing".to_owned(),
             user: None,
             delivery: None,

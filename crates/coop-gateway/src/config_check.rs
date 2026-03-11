@@ -821,6 +821,23 @@ fn check_users(report: &mut CheckReport, config: &Config) {
             message: format!("duplicate user names: {}", dupes.join(", ")),
         });
     }
+
+    for user in &config.users {
+        match crate::cron_timezone::resolve_user_timezone(user) {
+            Ok(parsed) => report.push(CheckResult {
+                name: "users_timezones",
+                severity: Severity::Info,
+                passed: true,
+                message: format!("user '{}': timezone {}", user.name, parsed),
+            }),
+            Err(error) => report.push(CheckResult {
+                name: "users_timezones",
+                severity: Severity::Warning,
+                passed: false,
+                message: format!("user '{}': {error}", user.name),
+            }),
+        }
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -945,6 +962,7 @@ fn check_groups(report: &mut CheckReport, config: &Config) {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn check_cron(report: &mut CheckReport, config: &Config) {
     // 10. cron_expressions
     for entry in &config.cron {
@@ -979,7 +997,25 @@ fn check_cron(report: &mut CheckReport, config: &Config) {
         }
     }
 
-    // 12. cron_delivery
+    // 12. cron_timezones
+    for entry in &config.cron {
+        match crate::cron_timezone::resolve_cron_timezone(entry, &config.users) {
+            Ok(timezone) => report.push(CheckResult {
+                name: "cron_timezones",
+                severity: Severity::Info,
+                passed: true,
+                message: format!("cron '{}': timezone {timezone}", entry.name),
+            }),
+            Err(error) => report.push(CheckResult {
+                name: "cron_timezones",
+                severity: Severity::Warning,
+                passed: false,
+                message: format!("cron '{}': {error}", entry.name),
+            }),
+        }
+    }
+
+    // 13. cron_delivery
     for entry in &config.cron {
         if let Some(ref deliver) = entry.deliver
             && deliver.channel != "signal"
@@ -996,7 +1032,7 @@ fn check_cron(report: &mut CheckReport, config: &Config) {
         }
     }
 
-    // 13. cron_user_no_deliverable_channels
+    // 14. cron_user_no_deliverable_channels
     for entry in &config.cron {
         if entry.deliver.is_some() {
             continue;
@@ -1025,7 +1061,7 @@ fn check_cron(report: &mut CheckReport, config: &Config) {
         }
     }
 
-    // 14. cron_delivery_mode_legacy_heuristic
+    // 15. cron_delivery_mode_legacy_heuristic
     for entry in &config.cron {
         if entry.uses_legacy_delivery_mode() && entry.message.contains("HEARTBEAT.md") {
             report.push(CheckResult {
@@ -1040,7 +1076,7 @@ fn check_cron(report: &mut CheckReport, config: &Config) {
         }
     }
 
-    // 15. cron_message_contains_internal_delivery_tokens
+    // 16. cron_message_contains_internal_delivery_tokens
     for entry in &config.cron {
         if entry.message.contains("HEARTBEAT_OK") || entry.message.contains("NO_ACTION_NEEDED") {
             report.push(CheckResult {
@@ -1529,6 +1565,60 @@ mod tests {
             .unwrap();
         assert!(!cron_check.passed);
         assert!(report.has_warnings());
+    }
+
+    #[test]
+    fn test_invalid_user_timezone() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(workspace.join("SOUL.md"), "test soul").unwrap();
+
+        let config_path = dir.path().join("coop.toml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "[agent]\nid = \"test\"\nmodel = \"test-model\"\nworkspace = \"{}\"\n\n[[users]]\nname = \"alice\"\ntrust = \"full\"\ntimezone = \"Mars/Olympus_Mons\"\nmatch = [\"signal:alice-uuid\"]\n",
+                workspace.display()
+            ),
+        )
+        .unwrap();
+
+        let report = validate_config(&config_path, dir.path());
+        let check = report
+            .results
+            .iter()
+            .find(|r| r.name == "users_timezones" && !r.passed)
+            .unwrap();
+        assert!(check.message.contains("alice"));
+        assert!(check.message.contains("invalid timezone"));
+    }
+
+    #[test]
+    fn test_invalid_cron_timezone() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(workspace.join("SOUL.md"), "test soul").unwrap();
+
+        let config_path = dir.path().join("coop.toml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "[agent]\nid = \"test\"\nmodel = \"test-model\"\nworkspace = \"{}\"\n\n[[cron]]\nname = \"briefing\"\ncron = \"0 8 * * *\"\ntimezone = \"Mars/Olympus_Mons\"\nmessage = \"Morning briefing\"\n",
+                workspace.display()
+            ),
+        )
+        .unwrap();
+
+        let report = validate_config(&config_path, dir.path());
+        let check = report
+            .results
+            .iter()
+            .find(|r| r.name == "cron_timezones" && !r.passed)
+            .unwrap();
+        assert!(check.message.contains("briefing"));
+        assert!(check.message.contains("invalid timezone"));
     }
 
     #[test]

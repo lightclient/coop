@@ -24,6 +24,7 @@ anyhow = { workspace = true }
 arc-swap = "1.8.1"
 async-trait = { workspace = true }
 chrono = { workspace = true }
+chrono-tz = "0.10"
 clap = { workspace = true }
 coop-agent = { path = "../coop-agent" }
 coop-channels = { path = "../coop-channels" }
@@ -35,6 +36,7 @@ coop-tui = { path = "../coop-tui" }
 cron = "0.15.0"
 crossterm = { workspace = true }
 futures = { workspace = true }
+iana-time-zone = "0.1.65"
 qr2term = { workspace = true, optional = true }
 regex = "1.12.3"
 reqwest = { workspace = true }

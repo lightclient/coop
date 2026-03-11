@@ -267,7 +267,8 @@ max_rows_per_run = 200             # Max rows processed per maintenance run (def
 # [[cron]]
 # name = "morning-briefing"
 # cron = "0 8 * * *"
-# user = "alice"
+# timezone = "America/Chicago"       # Optional: explicit timezone (IANA name)
+# user = "alice"                     # If timezone is omitted, falls back to user's timezone, then the local system timezone, then UTC
 # delivery = "always"
 # message = "Morning briefing"
 # [cron.deliver]                     # Explicit delivery target
@@ -307,6 +308,7 @@ The sender UUID in the trace is what goes in your config:
 [[users]]
 name = "alice"
 trust = "full"
+timezone = "America/Chicago"         # Optional: defaults to the local system timezone when omitted
 match = ["terminal:default", "signal:<your-uuid>"]
 ```
 

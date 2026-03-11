@@ -377,6 +377,7 @@ mod tests {
             name: "alice".to_owned(),
             trust: TrustLevel::Full,
             r#match: vec!["signal:alice-uuid".to_owned()],
+            timezone: None,
             sandbox: None,
         }
     }
@@ -386,6 +387,7 @@ mod tests {
             name: "bob".to_owned(),
             trust: TrustLevel::Inner,
             r#match: vec!["signal:bob-uuid".to_owned()],
+            timezone: None,
             sandbox: None,
         }
     }
@@ -495,6 +497,7 @@ mod tests {
         current.cron = vec![CronConfig {
             name: "heartbeat".to_owned(),
             cron: "*/30 * * * *".to_owned(),
+            timezone: None,
             message: "check".to_owned(),
             user: None,
             delivery: None,
@@ -559,6 +562,7 @@ mod tests {
         current.cron = vec![CronConfig {
             name: "heartbeat".to_owned(),
             cron: "*/30 * * * *".to_owned(),
+            timezone: None,
             message: "check".to_owned(),
             user: None,
             delivery: None,

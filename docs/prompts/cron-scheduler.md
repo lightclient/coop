@@ -438,7 +438,14 @@ fn parse_cron(expr: &str) -> Result<Schedule> {
 
 ### Timezone
 
-Use UTC for all cron evaluation. Expressions fire in UTC. If local-time scheduling is needed later, add an optional `timezone` field to `CronConfig`.
+Cron expressions are evaluated in this order:
+
+1. `cron.timezone` if set
+2. else `user.timezone` if the cron runs as a configured user
+3. else the local system timezone
+4. else UTC if the system timezone cannot be determined
+
+Timezones use IANA names such as `America/Chicago` or `Europe/Berlin`.
 
 ### `list_sessions` visibility
 
