@@ -12,6 +12,7 @@ use image::ImageFormat;
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::collections::HashSet;
 use std::io::Cursor;
 use std::sync::RwLock;
 use tracing::{Instrument, debug, info, info_span, warn};
@@ -727,14 +728,29 @@ fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<u64> {
         .ok()
 }
 
-fn parse_streamed_tool_input(json_buf: &str) -> Result<Value> {
-    let input: Value = serde_json::from_str(json_buf)
-        .context("streamed tool_use input_json was invalid or incomplete")?;
+fn tool_allows_empty_object(parameters: &Value) -> bool {
+    parameters.get("type").and_then(Value::as_str) == Some("object")
+        && parameters
+            .get("required")
+            .is_none_or(|required| required.as_array().is_some_and(Vec::is_empty))
+}
+
+fn ensure_tool_input_object(input: Value, allow_empty_input: bool) -> Result<Value> {
+    let input = match input {
+        Value::Null if allow_empty_input => json!({}),
+        other => other,
+    };
     anyhow::ensure!(
         input.is_object(),
         "streamed tool_use input_json must decode to a JSON object"
     );
     Ok(input)
+}
+
+fn parse_streamed_tool_input(json_buf: &str, allow_empty_input: bool) -> Result<Value> {
+    let input: Value = serde_json::from_str(json_buf)
+        .context("streamed tool_use input_json was invalid or incomplete")?;
+    ensure_tool_input_object(input, allow_empty_input)
 }
 
 #[async_trait]
@@ -835,7 +851,7 @@ impl Provider for AnthropicProvider {
         let byte_stream = response.bytes_stream();
 
         let stream = futures::stream::unfold(
-            SseState::new(byte_stream, is_oauth),
+            SseState::new(byte_stream, is_oauth, tools),
             |mut state| async move {
                 loop {
                     let line = match state.next_line().await {
@@ -897,7 +913,9 @@ enum BlockAccumulator {
     ToolUse {
         id: String,
         name: String,
+        start_input: Option<Value>,
         json_buf: String,
+        saw_input_delta: bool,
     },
     Thinking,
 }
@@ -917,19 +935,27 @@ struct SseState<S> {
     blocks: Vec<BlockAccumulator>,
     usage: Usage,
     is_oauth: bool,
+    empty_input_tool_names: HashSet<String>,
 }
 
 impl<S> SseState<S>
 where
     S: futures::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin,
 {
-    fn new(byte_stream: S, is_oauth: bool) -> Self {
+    fn new(byte_stream: S, is_oauth: bool, tools: &[ToolDef]) -> Self {
+        let empty_input_tool_names = tools
+            .iter()
+            .filter(|tool| tool_allows_empty_object(&tool.parameters))
+            .map(|tool| tool.name.clone())
+            .collect();
+
         Self {
             byte_stream,
             line_buf: String::new(),
             blocks: Vec::new(),
             usage: Usage::default(),
             is_oauth,
+            empty_input_tool_names,
         }
     }
 
@@ -978,34 +1004,96 @@ where
                         msg = msg.with_text(text);
                     }
                 }
-                BlockAccumulator::ToolUse { id, name, json_buf } => {
+                BlockAccumulator::ToolUse {
+                    id,
+                    name,
+                    start_input,
+                    json_buf,
+                    saw_input_delta,
+                } => {
                     let coop_name = if self.is_oauth {
                         name.strip_prefix(TOOL_PREFIX).unwrap_or(&name).to_owned()
                     } else {
                         name
                     };
 
-                    match parse_streamed_tool_input(&json_buf) {
-                        Ok(input) => {
-                            msg = msg.with_tool_request(id, coop_name, input);
-                        }
-                        Err(error) => {
-                            warn!(
-                                tool_id = %id,
-                                tool_name = %coop_name,
-                                stop_reason = %stop_reason.as_deref().unwrap_or("unknown"),
-                                input_json_len = json_buf.len(),
-                                error = %error,
-                                "streamed tool_use input_json parse failed"
-                            );
+                    let allows_empty_input = self.empty_input_tool_names.contains(&coop_name);
 
-                            if stop_reason.as_deref() == Some("max_tokens") {
-                                return SseAction::Error(anyhow::anyhow!(
-                                    "Anthropic streamed tool_use for `{coop_name}` ended with invalid/incomplete input_json after max_tokens"
-                                ));
+                    let input = if saw_input_delta {
+                        match parse_streamed_tool_input(&json_buf, allows_empty_input) {
+                            Ok(input) => input,
+                            Err(error) => {
+                                warn!(
+                                    tool_id = %id,
+                                    tool_name = %coop_name,
+                                    stop_reason = %stop_reason.as_deref().unwrap_or("unknown"),
+                                    input_json_len = json_buf.len(),
+                                    error = %error,
+                                    "streamed tool_use input_json parse failed"
+                                );
+
+                                if stop_reason.as_deref() == Some("max_tokens") {
+                                    return SseAction::Error(anyhow::anyhow!(
+                                        "Anthropic streamed tool_use for `{coop_name}` ended with invalid/incomplete input_json after max_tokens"
+                                    ));
+                                }
+
+                                if stop_reason.as_deref() == Some("tool_use") {
+                                    return SseAction::Error(anyhow::anyhow!(
+                                        "Anthropic streamed tool_use for `{coop_name}` ended with invalid/incomplete input_json"
+                                    ));
+                                }
+
+                                continue;
                             }
                         }
-                    }
+                    } else if let Some(input) = start_input {
+                        match ensure_tool_input_object(input, allows_empty_input) {
+                            Ok(input) => input,
+                            Err(error) => {
+                                warn!(
+                                    tool_id = %id,
+                                    tool_name = %coop_name,
+                                    stop_reason = %stop_reason.as_deref().unwrap_or("unknown"),
+                                    error = %error,
+                                    "streamed tool_use start input was not a JSON object"
+                                );
+
+                                if stop_reason.as_deref() == Some("tool_use") {
+                                    return SseAction::Error(anyhow::anyhow!(
+                                        "Anthropic streamed tool_use for `{coop_name}` started with non-object input"
+                                    ));
+                                }
+
+                                continue;
+                            }
+                        }
+                    } else if stop_reason.as_deref() == Some("tool_use")
+                        && json_buf.trim().is_empty()
+                    {
+                        if allows_empty_input {
+                            debug!(
+                                tool_id = %id,
+                                tool_name = %coop_name,
+                                "streamed tool_use had no input_json delta, using empty object arguments"
+                            );
+                            json!({})
+                        } else {
+                            return SseAction::Error(anyhow::anyhow!(
+                                "Anthropic streamed tool_use for `{coop_name}` ended without input_json"
+                            ));
+                        }
+                    } else {
+                        warn!(
+                            tool_id = %id,
+                            tool_name = %coop_name,
+                            stop_reason = %stop_reason.as_deref().unwrap_or("unknown"),
+                            "streamed tool_use ended without usable input"
+                        );
+                        continue;
+                    };
+
+                    msg = msg.with_tool_request(id, coop_name, input);
                 }
                 BlockAccumulator::Thinking => {}
             }
@@ -1032,11 +1120,13 @@ where
                     SseContentBlock::Text { .. } => {
                         self.blocks.push(BlockAccumulator::Text(String::new()));
                     }
-                    SseContentBlock::ToolUse { id, name } => {
+                    SseContentBlock::ToolUse { id, name, input } => {
                         self.blocks.push(BlockAccumulator::ToolUse {
                             id,
                             name,
+                            start_input: input,
                             json_buf: String::new(),
+                            saw_input_delta: false,
                         });
                     }
                     SseContentBlock::Thinking | SseContentBlock::Unknown => {
@@ -1053,8 +1143,13 @@ where
                     SseAction::YieldDelta(text)
                 }
                 SseDelta::InputJson { partial_json } => {
-                    if let Some(BlockAccumulator::ToolUse { json_buf, .. }) = self.blocks.last_mut()
+                    if let Some(BlockAccumulator::ToolUse {
+                        json_buf,
+                        saw_input_delta,
+                        ..
+                    }) = self.blocks.last_mut()
                     {
+                        *saw_input_delta = true;
                         json_buf.push_str(&partial_json);
                     }
                     SseAction::Continue
@@ -1209,7 +1304,12 @@ enum SseContentBlock {
         text: String,
     },
     #[serde(rename = "tool_use")]
-    ToolUse { id: String, name: String },
+    ToolUse {
+        id: String,
+        name: String,
+        #[serde(default)]
+        input: Option<Value>,
+    },
     #[serde(rename = "thinking")]
     Thinking,
     /// Catch-all for unknown block types (e.g. model-generated images).
@@ -1449,12 +1549,35 @@ mod tests {
 
     fn streamed_tool_use_action(
         tool_name: &str,
-        partial_json: &str,
+        start_input: Option<Value>,
+        partial_json: Option<&str>,
         stop_reason: Option<&str>,
         is_oauth: bool,
     ) -> SseAction {
         let byte_stream = futures::stream::empty::<Result<bytes::Bytes, reqwest::Error>>();
-        let mut state = SseState::new(byte_stream, is_oauth);
+        let schema = match tool_name {
+            "config_read" | "mcp_config_read" => json!({
+                "type": "object",
+                "properties": {},
+            }),
+            "bash" | "mcp_bash" => json!({
+                "type": "object",
+                "properties": {
+                    "command": { "type": "string" }
+                },
+                "required": ["command"]
+            }),
+            _ => json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "content": { "type": "string" }
+                },
+                "required": ["path", "content"]
+            }),
+        };
+        let tools = vec![ToolDef::new(tool_name, "test", schema)];
+        let mut state = SseState::new(byte_stream, is_oauth, &tools);
 
         assert!(matches!(
             state.handle_event(SseEvent::MessageStart {
@@ -1476,20 +1599,23 @@ mod tests {
                 content_block: SseContentBlock::ToolUse {
                     id: "toolu_test".into(),
                     name: tool_name.into(),
+                    input: start_input,
                 },
             }),
             SseAction::Continue
         ));
 
-        assert!(matches!(
-            state.handle_event(SseEvent::ContentBlockDelta {
-                index: 0,
-                delta: SseDelta::InputJson {
-                    partial_json: partial_json.into(),
-                },
-            }),
-            SseAction::Continue
-        ));
+        if let Some(partial_json) = partial_json {
+            assert!(matches!(
+                state.handle_event(SseEvent::ContentBlockDelta {
+                    index: 0,
+                    delta: SseDelta::InputJson {
+                        partial_json: partial_json.into(),
+                    },
+                }),
+                SseAction::Continue
+            ));
+        }
 
         if let Some(stop_reason) = stop_reason {
             assert!(matches!(
@@ -1514,7 +1640,8 @@ mod tests {
     fn streamed_tool_use_errors_on_truncated_write_file_json_at_max_tokens() {
         let action = streamed_tool_use_action(
             "write_file",
-            r#"{"path":"notes/todo.txt","content":"hello""#,
+            None,
+            Some(r#"{"path":"notes/todo.txt","content":"hello""#),
             Some("max_tokens"),
             false,
         );
@@ -1531,7 +1658,8 @@ mod tests {
     fn streamed_tool_use_errors_on_truncated_oauth_bash_json_at_max_tokens() {
         let action = streamed_tool_use_action(
             "mcp_bash",
-            r#"{"command":"echo hello","timeout":30"#,
+            None,
+            Some(r#"{"command":"echo hello","timeout":30"#),
             Some("max_tokens"),
             true,
         );
@@ -1548,7 +1676,8 @@ mod tests {
     fn streamed_tool_use_skips_invalid_json_without_emitting_empty_object() {
         let action = streamed_tool_use_action(
             "write_file",
-            r#"{"path":"notes/todo.txt","content":"hello""#,
+            None,
+            Some(r#"{"path":"notes/todo.txt","content":"hello""#),
             None,
             false,
         );
@@ -1563,10 +1692,86 @@ mod tests {
     }
 
     #[test]
+    fn streamed_tool_use_errors_on_truncated_json_at_tool_use_stop() {
+        let action = streamed_tool_use_action(
+            "write_file",
+            None,
+            Some(r#"{"path":"notes/todo.txt","content":"hello""#),
+            Some("tool_use"),
+            false,
+        );
+
+        let SseAction::Error(error) = action else {
+            panic!("expected provider error for invalid tool_use JSON");
+        };
+        assert!(error.to_string().contains("write_file"));
+    }
+
+    #[test]
+    fn streamed_tool_use_uses_start_input_without_deltas() {
+        let action = streamed_tool_use_action(
+            "config_read",
+            Some(json!({})),
+            None,
+            Some("tool_use"),
+            false,
+        );
+
+        let SseAction::YieldFinal(message, usage) = action else {
+            panic!("expected final message");
+        };
+        let tool_requests = message.tool_requests();
+        assert_eq!(tool_requests.len(), 1);
+        assert_eq!(tool_requests[0].name, "config_read");
+        assert_eq!(tool_requests[0].arguments, json!({}));
+        assert_eq!(usage.stop_reason.as_deref(), Some("tool_use"));
+    }
+
+    #[test]
+    fn streamed_tool_use_coerces_null_json_to_empty_object() {
+        let action =
+            streamed_tool_use_action("config_read", None, Some("null"), Some("tool_use"), false);
+
+        let SseAction::YieldFinal(message, usage) = action else {
+            panic!("expected final message");
+        };
+        let tool_requests = message.tool_requests();
+        assert_eq!(tool_requests.len(), 1);
+        assert_eq!(tool_requests[0].name, "config_read");
+        assert_eq!(tool_requests[0].arguments, json!({}));
+        assert_eq!(usage.stop_reason.as_deref(), Some("tool_use"));
+    }
+
+    #[test]
+    fn streamed_tool_use_falls_back_to_empty_object_without_deltas() {
+        let action = streamed_tool_use_action("config_read", None, None, Some("tool_use"), false);
+
+        let SseAction::YieldFinal(message, usage) = action else {
+            panic!("expected final message");
+        };
+        let tool_requests = message.tool_requests();
+        assert_eq!(tool_requests.len(), 1);
+        assert_eq!(tool_requests[0].name, "config_read");
+        assert_eq!(tool_requests[0].arguments, json!({}));
+        assert_eq!(usage.stop_reason.as_deref(), Some("tool_use"));
+    }
+
+    #[test]
+    fn streamed_tool_use_errors_when_required_input_is_missing() {
+        let action = streamed_tool_use_action("write_file", None, None, Some("tool_use"), false);
+
+        let SseAction::Error(error) = action else {
+            panic!("expected provider error for missing required tool input");
+        };
+        assert!(error.to_string().contains("write_file"));
+    }
+
+    #[test]
     fn streamed_tool_use_keeps_valid_json_object_arguments() {
         let action = streamed_tool_use_action(
             "write_file",
-            r#"{"path":"notes/todo.txt","content":"hello"}"#,
+            None,
+            Some(r#"{"path":"notes/todo.txt","content":"hello"}"#),
             Some("tool_use"),
             false,
         );
@@ -1621,7 +1826,8 @@ mod tests {
         tracing::subscriber::with_default(subscriber, || {
             let action = streamed_tool_use_action(
                 "write_file",
-                r#"{"path":"notes/todo.txt","content":"hello""#,
+                None,
+                Some(r#"{"path":"notes/todo.txt","content":"hello""#),
                 Some("max_tokens"),
                 false,
             );

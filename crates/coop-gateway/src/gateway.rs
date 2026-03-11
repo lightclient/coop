@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Result, bail};
 use coop_core::prompt::{PromptBuilder, SkillEntry, WorkspaceIndex, scan_skills};
 use coop_core::{
     InboundMessage, Message, Role, SessionKey, SessionKind, ToolContext, ToolDef, ToolExecutor,
@@ -1493,7 +1493,7 @@ impl Gateway {
             streaming,
         );
 
-        async {
+        let (response, usage) = async {
             if streaming {
                 self.assistant_response_streaming(system_prompt, messages, tool_defs, event_tx)
                     .await
@@ -1503,7 +1503,13 @@ impl Gateway {
             }
         }
         .instrument(span)
-        .await
+        .await?;
+
+        if usage.stop_reason.as_deref() == Some("tool_use") && !response.has_tool_requests() {
+            bail!("provider returned stop_reason=tool_use but no tool requests were parsed");
+        }
+
+        Ok((response, usage))
     }
 
     async fn assistant_response_streaming(
@@ -3928,6 +3934,22 @@ model = "test-model"
         }
     }
 
+    #[derive(Debug)]
+    struct ToolUseStopWithoutToolRequestStreamingProvider {
+        model: ModelInfo,
+    }
+
+    impl ToolUseStopWithoutToolRequestStreamingProvider {
+        fn new() -> Self {
+            Self {
+                model: ModelInfo {
+                    name: "tool-use-stop-without-tool-request".into(),
+                    context_limit: 128_000,
+                },
+            }
+        }
+    }
+
     #[async_trait]
     impl Provider for TruncatedToolUseStreamingProvider {
         fn name(&self) -> &'static str {
@@ -3956,6 +3978,51 @@ model = "test-model"
             let stream = futures::stream::once(async {
                 Err(anyhow::anyhow!(
                     "Anthropic streamed tool_use for `write_file` ended with invalid/incomplete input_json after max_tokens"
+                ))
+            });
+            Ok(Box::pin(stream))
+        }
+
+        fn supports_streaming(&self) -> bool {
+            true
+        }
+    }
+
+    #[async_trait]
+    impl Provider for ToolUseStopWithoutToolRequestStreamingProvider {
+        fn name(&self) -> &'static str {
+            "tool-use-stop-without-tool-request"
+        }
+
+        fn model_info(&self) -> ModelInfo {
+            self.model.clone()
+        }
+
+        async fn complete(
+            &self,
+            _system: &[String],
+            _messages: &[Message],
+            _tools: &[ToolDef],
+        ) -> Result<(Message, Usage)> {
+            anyhow::bail!("not supported")
+        }
+
+        async fn stream(
+            &self,
+            _system: &[String],
+            _messages: &[Message],
+            _tools: &[ToolDef],
+        ) -> Result<ProviderStream> {
+            let usage = Usage {
+                input_tokens: Some(10),
+                output_tokens: Some(5),
+                stop_reason: Some("tool_use".into()),
+                ..Default::default()
+            };
+            let stream = futures::stream::once(async move {
+                Ok((
+                    Some(Message::assistant().with_text("Right, let me check that.")),
+                    Some(usage),
                 ))
             });
             Ok(Box::pin(stream))
@@ -4057,6 +4124,67 @@ model = "test-model"
         assert!(
             !all_text.contains("missing required parameter"),
             "turn trace should not report missing required params from a truncated tool call"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn tool_use_stop_without_tool_requests_emits_error_and_rolls_back() {
+        let workspace = test_workspace();
+        let provider: Arc<dyn Provider> =
+            Arc::new(ToolUseStopWithoutToolRequestStreamingProvider::new());
+        let executor = Arc::new(DefaultExecutor::new());
+        let gateway = Arc::new(
+            Gateway::new(
+                shared_config(test_config()),
+                workspace.path().to_path_buf(),
+                registry(provider),
+                executor,
+                None,
+                None,
+            )
+            .unwrap(),
+        );
+
+        let session_key = gateway.default_session_key();
+        let (event_tx, mut event_rx) = mpsc::channel(32);
+
+        let result = gateway
+            .run_turn_with_trust(
+                &session_key,
+                "hello",
+                TrustLevel::Full,
+                Some("alice"),
+                None,
+                event_tx,
+            )
+            .await;
+
+        assert!(result.is_ok());
+
+        let mut saw_error_event = false;
+        let mut saw_assistant_message = false;
+        while let Ok(event) = event_rx.try_recv() {
+            match event {
+                TurnEvent::Error(message) => {
+                    saw_error_event = true;
+                    assert!(
+                        message.contains("stop_reason=tool_use")
+                            || message.contains("no tool requests were parsed")
+                    );
+                }
+                TurnEvent::AssistantMessage(_) => saw_assistant_message = true,
+                _ => {}
+            }
+        }
+
+        assert!(saw_error_event, "expected turn error event");
+        assert!(
+            !saw_assistant_message,
+            "should not emit an assistant message for an impossible tool_use stop"
+        );
+        assert!(
+            gateway.messages(&session_key).is_empty(),
+            "failed turn should roll back session state"
         );
     }
 
