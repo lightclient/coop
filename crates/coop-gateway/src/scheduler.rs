@@ -19,7 +19,7 @@ use crate::heartbeat::{
     is_heartbeat_content_empty, strip_suppression_token,
 };
 use crate::reminder::{Reminder, ReminderStore};
-use crate::router::MessageRouter;
+use crate::router::{MessageRouter, RouteDecision};
 
 /// Sender for delivering cron output to channels.
 ///
@@ -471,6 +471,7 @@ async fn fire_cron_with_timezone(
         };
 
         let prompt_delivery_mode = (!delivery_targets.is_empty()).then_some(delivery_mode);
+        let delivery_prompt_channel = prompt_channel.clone();
 
         match router
             .dispatch_collect_text_with_channel_and_cron_delivery(
@@ -489,7 +490,14 @@ async fn fire_cron_with_timezone(
                 );
 
                 deliver_cron_response(
-                    cfg, response, &delivery_targets, &agent_id, router, deliver_tx,
+                    cfg,
+                    response,
+                    &delivery_targets,
+                    &decision,
+                    delivery_prompt_channel.as_deref(),
+                    &agent_id,
+                    router,
+                    deliver_tx,
                 )
                 .await;
             }
@@ -502,10 +510,13 @@ async fn fire_cron_with_timezone(
     .await;
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn deliver_cron_response(
     cfg: &CronConfig,
     response: String,
     delivery_targets: &[(String, String)],
+    decision: &RouteDecision,
+    prompt_channel: Option<&str>,
     agent_id: &str,
     router: &MessageRouter,
     deliver_tx: Option<&DeliverySender>,
@@ -543,7 +554,36 @@ async fn deliver_cron_response(
                 }
                 return;
             }
-            SuppressionTokenResult::Deliver(cleaned) => cleaned,
+            SuppressionTokenResult::Deliver(cleaned) => match router
+                .review_as_needed_cron_delivery(
+                    decision,
+                    &cfg.message,
+                    cfg.review_prompt.as_deref(),
+                    prompt_channel,
+                    &cleaned,
+                )
+                .await
+            {
+                Ok(true) => cleaned,
+                Ok(false) => {
+                    debug!(
+                        cron.name = %cfg.name,
+                        cron.delivery_mode = %delivery_mode,
+                        "cron suppressed: as-needed delivery review vetoed message"
+                    );
+                    return;
+                }
+                Err(error) => {
+                    warn!(
+                        cron.name = %cfg.name,
+                        cron.delivery_mode = %delivery_mode,
+                        fallback = "deliver_original",
+                        error = %error,
+                        "cron delivery review failed; delivering original as-needed content"
+                    );
+                    cleaned
+                }
+            },
         },
         CronDeliveryMode::Always => {
             if matches!(
@@ -913,6 +953,7 @@ mod tests {
             user: Some("alice".to_owned()),
             delivery: None,
             deliver: None,
+            review_prompt: None,
             sandbox: None,
         };
         let sender = match &cfg.user {
@@ -932,6 +973,7 @@ mod tests {
             user: None,
             delivery: None,
             deliver: None,
+            review_prompt: None,
             sandbox: None,
         };
         let sender = match &cfg.user {
@@ -972,6 +1014,7 @@ mod tests {
             user: None,
             delivery: None,
             deliver: None,
+            review_prompt: None,
             sandbox: None,
         }];
         let (shared, router, _gateway) =
@@ -1012,6 +1055,7 @@ mod tests {
             user: Some("alice".to_owned()),
             delivery: None,
             deliver: None,
+            review_prompt: None,
             sandbox: None,
         }];
         let (shared, router, gateway) =
@@ -1055,6 +1099,7 @@ mod tests {
             user: None,
             delivery: None,
             deliver: None,
+            review_prompt: None,
             sandbox: None,
         }];
         let (shared, router, gateway) =
@@ -1101,6 +1146,7 @@ mod tests {
             user: Some("alice".to_owned()),
             delivery: None,
             deliver: None,
+            review_prompt: None,
             sandbox: None,
         };
 
@@ -1129,6 +1175,7 @@ mod tests {
             user: None,
             delivery: None,
             deliver: None,
+            review_prompt: None,
             sandbox: None,
         };
 
@@ -1157,6 +1204,7 @@ mod tests {
             user: None,
             delivery: None,
             deliver: None,
+            review_prompt: None,
             sandbox: None,
         };
 
@@ -1250,6 +1298,68 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct SequenceProvider {
+        model: ModelInfo,
+        responses: std::sync::Mutex<std::collections::VecDeque<String>>,
+    }
+
+    impl SequenceProvider {
+        fn new(responses: &[&str]) -> Self {
+            Self {
+                model: ModelInfo {
+                    name: "sequence-provider".to_owned(),
+                    context_limit: 128_000,
+                },
+                responses: std::sync::Mutex::new(
+                    responses.iter().map(|r| (*r).to_owned()).collect(),
+                ),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Provider for SequenceProvider {
+        fn name(&self) -> &'static str {
+            "sequence-provider"
+        }
+
+        fn model_info(&self) -> ModelInfo {
+            self.model.clone()
+        }
+
+        async fn complete(
+            &self,
+            _system: &[String],
+            _messages: &[Message],
+            _tools: &[ToolDef],
+        ) -> Result<(Message, Usage)> {
+            let text = self
+                .responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or_else(|| anyhow::anyhow!("no queued response"))?;
+            Ok((
+                Message::assistant().with_text(text),
+                Usage {
+                    input_tokens: Some(100),
+                    output_tokens: Some(50),
+                    ..Default::default()
+                },
+            ))
+        }
+
+        async fn stream(
+            &self,
+            _system: &[String],
+            _messages: &[Message],
+            _tools: &[ToolDef],
+        ) -> Result<coop_core::traits::ProviderStream> {
+            anyhow::bail!("streaming not supported");
+        }
+    }
+
     #[tokio::test]
     async fn fire_cron_with_delivery_sends_response() {
         let (shared, router, _gateway) =
@@ -1268,6 +1378,7 @@ mod tests {
                 channel: "signal".to_owned(),
                 target: "alice-uuid".to_owned(),
             }),
+            review_prompt: None,
             sandbox: None,
         };
 
@@ -1297,6 +1408,7 @@ mod tests {
                 channel: "signal".to_owned(),
                 target: "alice-uuid".to_owned(),
             }),
+            review_prompt: None,
             sandbox: None,
         };
 
@@ -1336,6 +1448,7 @@ mod tests {
                 channel: "signal".to_owned(),
                 target: "alice-uuid".to_owned(),
             }),
+            review_prompt: None,
             sandbox: None,
         };
 
@@ -1389,6 +1502,7 @@ mod tests {
                 channel: "signal".to_owned(),
                 target: "alice-uuid".to_owned(),
             }),
+            review_prompt: None,
             sandbox: None,
         };
 
@@ -1415,6 +1529,7 @@ mod tests {
             user: None,
             delivery: None,
             deliver: None,
+            review_prompt: None,
             sandbox: None,
         };
 
@@ -1440,6 +1555,7 @@ mod tests {
                 channel: "signal".to_owned(),
                 target: "alice-uuid".to_owned(),
             }),
+            review_prompt: None,
             sandbox: None,
         };
 
@@ -1464,6 +1580,7 @@ mod tests {
                 channel: "signal".to_owned(),
                 target: "alice-uuid".to_owned(),
             }),
+            review_prompt: None,
             sandbox: None,
         };
 
@@ -1493,6 +1610,7 @@ mod tests {
                 channel: "signal".to_owned(),
                 target: "alice-uuid".to_owned(),
             }),
+            review_prompt: None,
             sandbox: None,
         };
 
@@ -1534,6 +1652,7 @@ mod tests {
                 channel: "signal".to_owned(),
                 target: "alice-uuid".to_owned(),
             }),
+            review_prompt: None,
             sandbox: None,
         };
 
@@ -1566,6 +1685,7 @@ mod tests {
                 channel: "signal".to_owned(),
                 target: "alice-uuid".to_owned(),
             }),
+            review_prompt: None,
             sandbox: None,
         };
 
@@ -1603,6 +1723,7 @@ mod tests {
                 channel: "signal".to_owned(),
                 target: "alice-uuid".to_owned(),
             }),
+            review_prompt: None,
             sandbox: None,
         };
 
@@ -1641,6 +1762,7 @@ mod tests {
                 channel: "signal".to_owned(),
                 target: "alice-uuid".to_owned(),
             }),
+            review_prompt: None,
             sandbox: None,
         };
 
@@ -1666,6 +1788,7 @@ mod tests {
             user: None,
             delivery: None,
             deliver: None,
+            review_prompt: None,
             sandbox: None,
         };
 
@@ -1685,6 +1808,7 @@ mod tests {
                 channel: "signal".to_owned(),
                 target: "alice-uuid".to_owned(),
             }),
+            review_prompt: None,
             sandbox: None,
         }];
         let (shared, router, gateway) =
@@ -1757,6 +1881,7 @@ mod tests {
             user: None,
             delivery: None,
             deliver: None,
+            review_prompt: None,
             sandbox: None,
         }];
         shared.store(Arc::new(new_config));
@@ -1791,6 +1916,7 @@ mod tests {
             user: None,
             delivery: None,
             deliver: None,
+            review_prompt: None,
             sandbox: None,
         }];
         let (shared, router, gateway) = make_shared_config_and_router(None, &cron, "response");
@@ -1826,6 +1952,7 @@ mod tests {
             user: None,
             delivery: None,
             deliver: None,
+            review_prompt: None,
             sandbox: None,
         }];
         shared.store(Arc::new(new_config));
@@ -1882,11 +2009,10 @@ mod tests {
             timezone: None,
             sandbox: None,
         }];
-        let (shared, router, _gateway) = make_shared_config_and_router_with_users_and_match(
-            &users,
-            &[],
-            "Server needs attention",
-        );
+        let provider: Arc<dyn Provider> =
+            Arc::new(SequenceProvider::new(&["Server needs attention", "YES"]));
+        let (shared, router, _gateway) =
+            make_shared_config_and_router_with_users_and_match_and_provider(&users, &[], provider);
         let (tx, mut rx) = mpsc::channel::<OutboundMessage>(8);
         let deliver_tx = DeliverySender::new(tx);
 
@@ -1898,6 +2024,7 @@ mod tests {
             user: Some("alice".to_owned()),
             delivery: None,
             deliver: None,
+            review_prompt: None,
             sandbox: None,
         };
 
@@ -1921,8 +2048,10 @@ mod tests {
             timezone: None,
             sandbox: None,
         }];
+        let provider: Arc<dyn Provider> =
+            Arc::new(SequenceProvider::new(&["Alert: disk full", "YES"]));
         let (shared, router, _gateway) =
-            make_shared_config_and_router_with_users_and_match(&users, &[], "Alert: disk full");
+            make_shared_config_and_router_with_users_and_match_and_provider(&users, &[], provider);
         let (tx, mut rx) = mpsc::channel::<OutboundMessage>(8);
         let deliver_tx = DeliverySender::new(tx);
 
@@ -1934,6 +2063,7 @@ mod tests {
             user: Some("alice".to_owned()),
             delivery: None,
             deliver: None,
+            review_prompt: None,
             sandbox: None,
         };
 
@@ -1961,8 +2091,10 @@ mod tests {
             timezone: None,
             sandbox: None,
         }];
+        let provider: Arc<dyn Provider> =
+            Arc::new(SequenceProvider::new(&["Important alert", "YES"]));
         let (shared, router, _gateway) =
-            make_shared_config_and_router_with_users_and_match(&users, &[], "Important alert");
+            make_shared_config_and_router_with_users_and_match_and_provider(&users, &[], provider);
         let (tx, mut rx) = mpsc::channel::<OutboundMessage>(8);
         let deliver_tx = DeliverySender::new(tx);
 
@@ -1974,6 +2106,7 @@ mod tests {
             user: Some("alice".to_owned()),
             delivery: None,
             deliver: None,
+            review_prompt: None,
             sandbox: None,
         };
 
@@ -2008,6 +2141,7 @@ mod tests {
             user: Some("alice".to_owned()),
             delivery: None,
             deliver: None,
+            review_prompt: None,
             sandbox: None,
         };
 
@@ -2036,8 +2170,10 @@ mod tests {
             timezone: None,
             sandbox: None,
         }];
+        let provider: Arc<dyn Provider> =
+            Arc::new(SequenceProvider::new(&["Your server is down", "YES"]));
         let (shared, router, _gateway) =
-            make_shared_config_and_router_with_users_and_match(&users, &[], "Your server is down");
+            make_shared_config_and_router_with_users_and_match_and_provider(&users, &[], provider);
         let (tx, mut rx) = mpsc::channel::<OutboundMessage>(8);
         let deliver_tx = DeliverySender::new(tx);
 
@@ -2049,6 +2185,7 @@ mod tests {
             user: Some("alice".to_owned()),
             delivery: None,
             deliver: None,
+            review_prompt: None,
             sandbox: None,
         };
 
@@ -2071,8 +2208,10 @@ mod tests {
             timezone: None,
             sandbox: None,
         }];
+        let provider: Arc<dyn Provider> =
+            Arc::new(SequenceProvider::new(&["Alert content", "YES"]));
         let (shared, router, _gateway) =
-            make_shared_config_and_router_with_users_and_match(&users, &[], "Alert content");
+            make_shared_config_and_router_with_users_and_match_and_provider(&users, &[], provider);
         let (tx, mut rx) = mpsc::channel::<OutboundMessage>(8);
         let deliver_tx = DeliverySender::new(tx);
 
@@ -2088,6 +2227,7 @@ mod tests {
                 channel: "signal".to_owned(),
                 target: "override-target".to_owned(),
             }),
+            review_prompt: None,
             sandbox: None,
         };
 
@@ -2116,6 +2256,7 @@ mod tests {
             user: None,
             delivery: None,
             deliver: None,
+            review_prompt: None,
             sandbox: None,
         };
 
@@ -2148,6 +2289,7 @@ match = ["signal:alice-uuid", "terminal:default", "signal:group:team-chat"]
             user: Some("alice".to_owned()),
             delivery: None,
             deliver: None,
+            review_prompt: None,
             sandbox: None,
         };
 
@@ -2184,6 +2326,7 @@ match = ["signal:alice-uuid"]
                 channel: "signal".to_owned(),
                 target: "override-uuid".to_owned(),
             }),
+            review_prompt: None,
             sandbox: None,
         };
 
@@ -2213,6 +2356,7 @@ model = "test"
             user: None,
             delivery: None,
             deliver: None,
+            review_prompt: None,
             sandbox: None,
         };
 
@@ -2244,6 +2388,7 @@ match = ["signal:alice-uuid"]
             user: Some("mallory".to_owned()),
             delivery: None,
             deliver: None,
+            review_prompt: None,
             sandbox: None,
         };
 
@@ -2327,6 +2472,7 @@ match = ["signal:alice-uuid"]
             user: None,
             delivery: None,
             deliver: None,
+            review_prompt: None,
             sandbox: None,
         }];
         let (shared, router, _gateway) =
@@ -2373,6 +2519,7 @@ match = ["signal:alice-uuid"]
                 channel: "signal".to_owned(),
                 target: "alice-uuid".to_owned(),
             }),
+            review_prompt: None,
             sandbox: None,
         };
 
@@ -2403,6 +2550,7 @@ match = ["signal:alice-uuid"]
                 channel: "signal".to_owned(),
                 target: "alice-uuid".to_owned(),
             }),
+            review_prompt: None,
             sandbox: None,
         };
 
@@ -2432,6 +2580,7 @@ match = ["signal:alice-uuid"]
                 channel: "signal".to_owned(),
                 target: "alice-uuid".to_owned(),
             }),
+            review_prompt: None,
             sandbox: None,
         };
 
@@ -2441,6 +2590,209 @@ match = ["signal:alice-uuid"]
             rx.try_recv().is_err(),
             "NO_ACTION_NEEDED should suppress delivery for as_needed crons"
         );
+    }
+
+    #[tokio::test]
+    async fn fire_cron_as_needed_no_action_needed_skips_review() {
+        let provider: Arc<dyn Provider> = Arc::new(FailOnSecondCallProvider::new(
+            "NO_ACTION_NEEDED",
+            "review should not run",
+        ));
+        let (shared, router, _gateway) =
+            make_shared_config_and_router_with_provider(None, &[], provider);
+        let (tx, mut rx) = mpsc::channel::<OutboundMessage>(8);
+        let deliver_tx = DeliverySender::new(tx);
+
+        let cfg = CronConfig {
+            name: "todo-maintenance".to_owned(),
+            cron: "0 3 * * *".to_owned(),
+            timezone: None,
+            message: "Run daily todo maintenance".to_owned(),
+            user: None,
+            delivery: Some(CronDeliveryMode::AsNeeded),
+            deliver: Some(CronDelivery {
+                channel: "signal".to_owned(),
+                target: "alice-uuid".to_owned(),
+            }),
+            review_prompt: None,
+            sandbox: None,
+        };
+
+        fire_cron(&cfg, &router, Some(&deliver_tx), &shared).await;
+
+        assert!(
+            rx.try_recv().is_err(),
+            "NO_ACTION_NEEDED should suppress without invoking review"
+        );
+    }
+
+    #[tokio::test]
+    async fn fire_cron_as_needed_review_vetoes_low_signal_message() {
+        let provider: Arc<dyn Provider> =
+            Arc::new(SequenceProvider::new(&["All checks passed.", "NO"]));
+        let (shared, router, gateway) =
+            make_shared_config_and_router_with_provider(None, &[], provider);
+        let (tx, mut rx) = mpsc::channel::<OutboundMessage>(8);
+        let deliver_tx = DeliverySender::new(tx);
+
+        let cfg = CronConfig {
+            name: "todo-maintenance".to_owned(),
+            cron: "0 3 * * *".to_owned(),
+            timezone: None,
+            message: "Run daily todo maintenance".to_owned(),
+            user: None,
+            delivery: Some(CronDeliveryMode::AsNeeded),
+            deliver: Some(CronDelivery {
+                channel: "signal".to_owned(),
+                target: "alice-uuid".to_owned(),
+            }),
+            review_prompt: None,
+            sandbox: None,
+        };
+
+        fire_cron(&cfg, &router, Some(&deliver_tx), &shared).await;
+
+        assert!(
+            rx.try_recv().is_err(),
+            "review veto should suppress low-signal as_needed delivery"
+        );
+
+        let dm_key = SessionKey {
+            agent_id: "test".to_owned(),
+            kind: SessionKind::Dm("signal:alice-uuid".to_owned()),
+        };
+        assert_eq!(
+            gateway.session_message_count(&dm_key),
+            0,
+            "suppressed review should not inject into DM session"
+        );
+    }
+
+    #[tokio::test]
+    async fn fire_cron_as_needed_review_allows_important_message() {
+        let provider: Arc<dyn Provider> =
+            Arc::new(SequenceProvider::new(&["Your server is down.", "YES"]));
+        let (shared, router, _gateway) =
+            make_shared_config_and_router_with_provider(None, &[], provider);
+        let (tx, mut rx) = mpsc::channel::<OutboundMessage>(8);
+        let deliver_tx = DeliverySender::new(tx);
+
+        let cfg = CronConfig {
+            name: "heartbeat".to_owned(),
+            cron: "*/30 * * * *".to_owned(),
+            timezone: None,
+            message: "check HEARTBEAT.md".to_owned(),
+            user: None,
+            delivery: Some(CronDeliveryMode::AsNeeded),
+            deliver: Some(CronDelivery {
+                channel: "signal".to_owned(),
+                target: "alice-uuid".to_owned(),
+            }),
+            review_prompt: None,
+            sandbox: None,
+        };
+
+        fire_cron(&cfg, &router, Some(&deliver_tx), &shared).await;
+
+        let msg = rx.try_recv().unwrap();
+        assert_eq!(msg.content, "Your server is down.");
+    }
+
+    #[tokio::test]
+    async fn fire_cron_as_needed_review_failure_delivers_original_message() {
+        let provider: Arc<dyn Provider> = Arc::new(FailOnSecondCallProvider::new(
+            "Investigate disk usage.",
+            "review failed",
+        ));
+        let (shared, router, _gateway) =
+            make_shared_config_and_router_with_provider(None, &[], provider);
+        let (tx, mut rx) = mpsc::channel::<OutboundMessage>(8);
+        let deliver_tx = DeliverySender::new(tx);
+
+        let cfg = CronConfig {
+            name: "todo-maintenance".to_owned(),
+            cron: "0 3 * * *".to_owned(),
+            timezone: None,
+            message: "Run daily todo maintenance".to_owned(),
+            user: None,
+            delivery: Some(CronDeliveryMode::AsNeeded),
+            deliver: Some(CronDelivery {
+                channel: "signal".to_owned(),
+                target: "alice-uuid".to_owned(),
+            }),
+            review_prompt: None,
+            sandbox: None,
+        };
+
+        fire_cron(&cfg, &router, Some(&deliver_tx), &shared).await;
+
+        let msg = rx.try_recv().unwrap();
+        assert_eq!(msg.content, "Investigate disk usage.");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn trace_records_as_needed_delivery_review() {
+        use std::io::BufRead;
+        use tracing_subscriber::fmt::format::FmtSpan;
+        use tracing_subscriber::prelude::*;
+
+        let dir = tempfile::tempdir().unwrap();
+        let trace_file = dir.path().join("traces.jsonl");
+        let file_appender = tracing_appender::rolling::never(dir.path(), "traces.jsonl");
+        let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+
+        let jsonl_layer = tracing_subscriber::fmt::layer()
+            .json()
+            .with_writer(non_blocking)
+            .with_span_list(true)
+            .with_file(true)
+            .with_line_number(true)
+            .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
+            .with_filter(tracing_subscriber::EnvFilter::new("debug"));
+
+        let subscriber = tracing_subscriber::Registry::default().with(jsonl_layer);
+        let dispatch = tracing::dispatcher::Dispatch::new(subscriber);
+        let default_guard = tracing::dispatcher::set_default(&dispatch);
+
+        let provider: Arc<dyn Provider> =
+            Arc::new(SequenceProvider::new(&["All checks passed.", "NO"]));
+        let (shared, router, _gateway) =
+            make_shared_config_and_router_with_provider(None, &[], provider);
+        let (tx, _rx) = mpsc::channel::<OutboundMessage>(8);
+        let deliver_tx = DeliverySender::new(tx);
+
+        let cfg = CronConfig {
+            name: "todo-maintenance".to_owned(),
+            cron: "0 3 * * *".to_owned(),
+            timezone: None,
+            message: "Run daily todo maintenance".to_owned(),
+            user: None,
+            delivery: Some(CronDeliveryMode::AsNeeded),
+            deliver: Some(CronDelivery {
+                channel: "signal".to_owned(),
+                target: "alice-uuid".to_owned(),
+            }),
+            review_prompt: None,
+            sandbox: None,
+        };
+
+        fire_cron(&cfg, &router, Some(&deliver_tx), &shared).await;
+
+        drop(default_guard);
+        drop(guard);
+
+        let file = std::fs::File::open(&trace_file).unwrap();
+        let lines: Vec<String> = std::io::BufReader::new(file)
+            .lines()
+            .map(|line| line.unwrap())
+            .filter(|line| !line.is_empty())
+            .collect();
+        let trace = lines.join("\n");
+
+        assert!(trace.contains("cron_delivery_review"));
+        assert!(trace.contains("custom_prompt"));
+        assert!(trace.contains("as-needed cron delivery reviewed"));
+        assert!(trace.contains("cron suppressed: as-needed delivery review vetoed message"));
     }
 
     #[tokio::test]
@@ -2460,6 +2812,7 @@ match = ["signal:alice-uuid"]
                 channel: "signal".to_owned(),
                 target: "alice-uuid".to_owned(),
             }),
+            review_prompt: None,
             sandbox: None,
         };
 
@@ -2493,6 +2846,7 @@ match = ["signal:alice-uuid"]
                 channel: "signal".to_owned(),
                 target: "alice-uuid".to_owned(),
             }),
+            review_prompt: None,
             sandbox: None,
         };
 
@@ -2519,6 +2873,7 @@ match = ["signal:alice-uuid"]
                 channel: "signal".to_owned(),
                 target: "alice-uuid".to_owned(),
             }),
+            review_prompt: None,
             sandbox: None,
         };
 
@@ -2570,6 +2925,15 @@ match = ["signal:alice-uuid"]
         cron: &[CronConfig],
         response: &str,
     ) -> (SharedConfig, MessageRouter, Arc<Gateway>) {
+        let provider: Arc<dyn Provider> = Arc::new(FakeProvider::new(response));
+        make_shared_config_and_router_with_users_and_match_and_provider(users, cron, provider)
+    }
+
+    fn make_shared_config_and_router_with_users_and_match_and_provider(
+        users: &[UserConfig],
+        cron: &[CronConfig],
+        provider: Arc<dyn Provider>,
+    ) -> (SharedConfig, MessageRouter, Arc<Gateway>) {
         use std::fmt::Write;
 
         let dir = tempfile::tempdir().unwrap();
@@ -2604,6 +2968,9 @@ match = ["signal:alice-uuid"]
                 let _ = writeln!(toml_str, "timezone = \"{timezone}\"");
             }
             let _ = writeln!(toml_str, "message = \"{}\"", entry.message);
+            if let Some(ref review_prompt) = entry.review_prompt {
+                let _ = writeln!(toml_str, "review_prompt = \"{review_prompt}\"");
+            }
             if let Some(ref user) = entry.user {
                 let _ = writeln!(toml_str, "user = \"{user}\"");
             }
@@ -2617,7 +2984,6 @@ match = ["signal:alice-uuid"]
         }
 
         let config: Config = toml::from_str(&toml_str).unwrap();
-        let provider: Arc<dyn Provider> = Arc::new(FakeProvider::new(response));
         let executor = Arc::new(DefaultExecutor::new());
         let shared = shared_config(config);
         let gateway = Arc::new(
@@ -2676,6 +3042,9 @@ match = ["signal:alice-uuid"]
                 let _ = writeln!(toml_str, "timezone = \"{timezone}\"");
             }
             let _ = writeln!(toml_str, "message = \"{}\"", entry.message);
+            if let Some(ref review_prompt) = entry.review_prompt {
+                let _ = writeln!(toml_str, "review_prompt = \"{review_prompt}\"");
+            }
             if let Some(ref user) = entry.user {
                 let _ = writeln!(toml_str, "user = \"{user}\"");
             }
@@ -2725,6 +3094,7 @@ match = ["signal:alice-uuid"]
             user: None,
             delivery: None,
             deliver: None,
+            review_prompt: None,
             sandbox: None,
         }];
         let (shared, router, gateway) =
@@ -2780,6 +3150,7 @@ match = ["signal:alice-uuid"]
                 channel: "signal".to_owned(),
                 target: "alice-uuid".to_owned(),
             }),
+            review_prompt: None,
             sandbox: None,
         };
 
@@ -2845,6 +3216,7 @@ match = ["signal:alice-uuid"]
                 channel: "signal".to_owned(),
                 target: "alice-uuid".to_owned(),
             }),
+            review_prompt: None,
             sandbox: None,
         };
 
@@ -2871,6 +3243,7 @@ match = ["signal:alice-uuid"]
             user: None,
             delivery: None,
             deliver: None,
+            review_prompt: None,
             sandbox: None,
         };
 
@@ -2915,6 +3288,7 @@ match = ["signal:alice-uuid"]
                 channel: "signal".to_owned(),
                 target: "group:deadbeef".to_owned(),
             }),
+            review_prompt: None,
             sandbox: None,
         };
 

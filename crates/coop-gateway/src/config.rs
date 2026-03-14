@@ -525,6 +525,8 @@ pub(crate) struct CronConfig {
     #[serde(default)]
     pub deliver: Option<CronDelivery>,
     #[serde(default)]
+    pub review_prompt: Option<String>,
+    #[serde(default)]
     pub sandbox: Option<SandboxOverrides>,
 }
 
@@ -986,6 +988,28 @@ message = "check HEARTBEAT.md"
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.cron.len(), 1);
         assert_eq!(config.cron[0].delivery, Some(CronDeliveryMode::AsNeeded));
+    }
+
+    #[test]
+    fn parse_config_with_cron_review_prompt() {
+        let toml_str = r#"
+[agent]
+id = "coop"
+model = "test"
+
+[[cron]]
+name = "heartbeat"
+cron = "*/30 * * * *"
+delivery = "as_needed"
+review_prompt = "Reply YES only for outages. Reply NO otherwise."
+message = "check HEARTBEAT.md"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.cron.len(), 1);
+        assert_eq!(
+            config.cron[0].review_prompt.as_deref(),
+            Some("Reply YES only for outages. Reply NO otherwise."),
+        );
     }
 
     #[test]

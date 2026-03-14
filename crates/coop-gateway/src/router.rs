@@ -478,6 +478,27 @@ impl MessageRouter {
         Ok((decision, text))
     }
 
+    pub(crate) async fn review_as_needed_cron_delivery(
+        &self,
+        decision: &RouteDecision,
+        cron_message: &str,
+        review_prompt_override: Option<&str>,
+        prompt_channel: Option<&str>,
+        proposed_response: &str,
+    ) -> Result<bool> {
+        self.gateway
+            .evaluate_as_needed_cron_delivery(
+                &decision.session_key,
+                cron_message,
+                proposed_response,
+                review_prompt_override,
+                decision.trust,
+                decision.user_name.as_deref(),
+                prompt_channel,
+            )
+            .await
+    }
+
     #[cfg(test)]
     pub(crate) async fn inject_collect_text(
         &self,

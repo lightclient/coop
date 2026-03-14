@@ -29,6 +29,8 @@ mod compaction;
 mod compaction_store;
 #[path = "../src/config.rs"]
 mod config;
+#[path = "../src/cron_delivery.rs"]
+mod cron_delivery;
 #[allow(dead_code)]
 #[path = "../src/group_history.rs"]
 mod group_history;

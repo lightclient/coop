@@ -18,6 +18,7 @@ use uuid::Uuid;
 use crate::compaction::{self, CompactionState};
 use crate::compaction_store::CompactionStore;
 use crate::config::{CronDeliveryMode, SharedConfig, find_group_config_by_session};
+use crate::cron_delivery;
 use crate::group_history::{GroupHistoryBuffer, GroupHistoryEntry};
 use crate::group_trigger::{self, SILENT_REPLY_TOKEN};
 use crate::memory_auto_capture;
@@ -1478,6 +1479,62 @@ impl Gateway {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn evaluate_as_needed_cron_delivery(
+        &self,
+        session_key: &SessionKey,
+        cron_message: &str,
+        proposed_response: &str,
+        review_prompt_override: Option<&str>,
+        trust: TrustLevel,
+        user_name: Option<&str>,
+        channel: Option<&str>,
+    ) -> Result<bool> {
+        let review_input =
+            format!("{cron_message}\n\nProposed scheduled message:\n{proposed_response}");
+        let system_prompt = self
+            .build_prompt(session_key, trust, user_name, channel, &review_input, None)
+            .await?;
+
+        let review_prompt = cron_delivery::build_as_needed_review_prompt(
+            channel,
+            cron_message,
+            proposed_response,
+            review_prompt_override,
+        );
+        let mut messages = self.messages(session_key);
+        messages.push(Message::user().with_text(review_prompt));
+
+        let provider = self.providers.primary();
+        let model = provider.model_info().name;
+        let span = info_span!(
+            "cron_delivery_review",
+            session = %session_key,
+            trust = ?trust,
+            user = ?user_name,
+            channel = ?channel,
+            proposed_len = proposed_response.len(),
+            model = %model,
+            custom_prompt = review_prompt_override.is_some(),
+        );
+
+        async {
+            let (response, _usage) = provider.complete(&system_prompt, &messages, &[]).await?;
+            let text = response.text();
+            let decision = cron_delivery::review_allows_delivery(&text);
+            debug!(
+                session = %session_key,
+                model = %model,
+                response = text.trim(),
+                decision,
+                "as-needed cron delivery reviewed"
+            );
+            Ok(decision)
+        }
+        .instrument(span)
+        .await
+    }
+
     async fn assistant_response(
         &self,
         system_prompt: &[String],
@@ -1597,7 +1654,7 @@ fn build_cron_delivery_prompt_block(
             "## Scheduled Delivery\n- This scheduled response will be delivered to the user via {channel}.\n- This cron uses delivery = \"always\". Always reply with the content to deliver.\n- Do not reply with NO_ACTION_NEEDED."
         ),
         CronDeliveryMode::AsNeeded => format!(
-            "## Scheduled Delivery\n- This scheduled response will be delivered to the user via {channel}.\n- This cron uses delivery = \"as_needed\". If nothing needs attention, reply with exactly NO_ACTION_NEEDED.\n- If something needs attention, reply with only the content to deliver.\n- Never include NO_ACTION_NEEDED alongside real content."
+            "## Scheduled Delivery\n- This scheduled response will be delivered to the user via {channel}.\n- This cron uses delivery = \"as_needed\". Be highly selective: only send a message when the user would likely want the interruption now.\n- Routine status, unchanged conditions, low-confidence guesses, or information that can wait should be treated as no action needed.\n- If nothing needs attention, reply with exactly NO_ACTION_NEEDED.\n- If something truly needs attention, reply with only the content to deliver.\n- Never include NO_ACTION_NEEDED alongside real content."
         ),
     }
 }
@@ -1887,6 +1944,7 @@ model = "test-model"
             .join("\n\n");
 
         assert!(prompt.contains("delivery = \"as_needed\""));
+        assert!(prompt.contains("Be highly selective"));
         assert!(prompt.contains("NO_ACTION_NEEDED"));
     }
 

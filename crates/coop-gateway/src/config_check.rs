@@ -1090,6 +1090,23 @@ fn check_cron(report: &mut CheckReport, config: &Config) {
             });
         }
     }
+
+    // 17. cron_review_prompt_non_empty
+    for entry in &config.cron {
+        if let Some(review_prompt) = &entry.review_prompt
+            && review_prompt.trim().is_empty()
+        {
+            report.push(CheckResult {
+                name: "cron_review_prompt",
+                severity: Severity::Error,
+                passed: false,
+                message: format!(
+                    "cron '{}' review_prompt must be non-empty if set",
+                    entry.name
+                ),
+            });
+        }
+    }
 }
 
 fn check_web_tools(report: &mut CheckReport, config: &Config) {
@@ -1700,6 +1717,33 @@ mod tests {
             check.is_none(),
             "should not warn when user has signal channel"
         );
+    }
+
+    #[test]
+    fn test_cron_review_prompt_must_be_non_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(workspace.join("SOUL.md"), "test soul").unwrap();
+
+        let config_path = dir.path().join("coop.toml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "[agent]\nid = \"test\"\nmodel = \"test-model\"\nworkspace = \"{}\"\n\n[[cron]]\nname = \"heartbeat\"\ncron = \"*/30 * * * *\"\ndelivery = \"as_needed\"\nreview_prompt = \"   \"\nmessage = \"check HEARTBEAT.md\"\n",
+                workspace.display()
+            ),
+        )
+        .unwrap();
+
+        let report = validate_config(&config_path, dir.path());
+        let check = report
+            .results
+            .iter()
+            .find(|r| r.name == "cron_review_prompt")
+            .unwrap();
+        assert!(!check.passed);
+        assert!(check.message.contains("review_prompt must be non-empty"));
     }
 
     #[test]

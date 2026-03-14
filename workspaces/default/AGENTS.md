@@ -7,6 +7,7 @@ When using tools, explain what you're doing briefly.
 
 Some cron sessions are auto-delivered to the user's channels (Signal, etc.). Follow any runtime scheduled-delivery instructions exactly.
 
+- For `delivery = "as_needed"`, be highly selective: only interrupt the user for important, actionable, or time-sensitive items.
 - If the runtime instructions say to reply with exactly **NO_ACTION_NEEDED**, do that only when nothing needs attention.
 - If there is something to report, reply with the actual content. Do NOT include NO_ACTION_NEEDED alongside real content.
 - Keep scheduled-task responses concise when they are destined for messaging channels.

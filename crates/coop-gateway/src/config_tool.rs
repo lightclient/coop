@@ -502,6 +502,7 @@ mod tests {
             user: None,
             delivery: None,
             deliver: None,
+            review_prompt: None,
             sandbox: None,
         }];
         let mut proposed = current.clone();
@@ -567,6 +568,7 @@ mod tests {
             user: None,
             delivery: None,
             deliver: None,
+            review_prompt: None,
             sandbox: None,
         }];
         let mut proposed = current.clone();

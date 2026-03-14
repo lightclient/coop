@@ -8,6 +8,7 @@ mod config_check;
 mod config_tool;
 mod config_watcher;
 mod config_write;
+mod cron_delivery;
 mod cron_timezone;
 mod gateway;
 mod group_history;

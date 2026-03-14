@@ -190,14 +190,21 @@ dimensions = 1024
 # Scheduled tasks
 # delivery = "as_needed": if nothing needs attention, the agent replies
 # with NO_ACTION_NEEDED and delivery is suppressed. If something needs
-# attention, the response is delivered. Empty HEARTBEAT.md still skips the
-# LLM call entirely for heartbeat-style checks.
+# attention, the agent proposes a message and Coop runs a second YES/NO
+# review before delivery, suppressing low-signal updates. If the review
+# call itself fails, Coop delivers the proposed message instead of dropping
+# it. Empty HEARTBEAT.md still skips the LLM call entirely for heartbeat-
+# style checks.
 [[cron]]
 name = "heartbeat"
 cron = "*/30 * * * *"              # standard cron expression
 user = "alice"                     # run as this user (optional, must exist in users)
 delivery = "as_needed"
 message = "check HEARTBEAT.md"     # message sent to the agent
+# Optional: override the default YES/NO review instructions for this cron.
+# Coop still appends <delivery_channel>, <scheduled_task>, and
+# <proposed_message> blocks after this prompt.
+# review_prompt = "Reply YES only for outages or urgent failures. Reply NO otherwise."
 
 # Explicit delivery override: sends response to a specific target
 # instead of auto-resolving from user match patterns.
@@ -242,6 +249,7 @@ message = "run cleanup"
 - Cron `timezone` must be a valid IANA timezone name if set; otherwise cron falls back to the user's timezone, then the local system timezone, then UTC
 - Cron delivery channel must be `signal`
 - Cron `delivery` must be `always` or `as_needed`
+- Cron `review_prompt` must be non-empty if set
 - Cron with user but no `deliver`: warns if user has no non-terminal match patterns (cron will have no delivery targets)
 - API keys: if `provider.api_keys` is set, each entry must use `env:` prefix and the referenced env var must be set. Otherwise, `ANTHROPIC_API_KEY` must be set. Plus embedding provider key if configured
 - Sandbox: memory must be a valid size (e.g. `2g`, `512m`), pids_limit > 0

@@ -112,6 +112,7 @@ mod tests {
             user: Some("alice".to_owned()),
             delivery: None,
             deliver: None,
+            review_prompt: None,
             sandbox: None,
         };
         let users = vec![UserConfig {
@@ -136,6 +137,7 @@ mod tests {
             user: Some("alice".to_owned()),
             delivery: None,
             deliver: None,
+            review_prompt: None,
             sandbox: None,
         };
         let users = vec![UserConfig {
@@ -176,6 +178,7 @@ mod tests {
             user: Some("alice".to_owned()),
             delivery: None,
             deliver: None,
+            review_prompt: None,
             sandbox: None,
         };
         let users = vec![UserConfig {
@@ -202,6 +205,7 @@ mod tests {
             user: None,
             delivery: None,
             deliver: None,
+            review_prompt: None,
             sandbox: None,
         };
 
@@ -221,6 +225,7 @@ mod tests {
             user: None,
             delivery: None,
             deliver: None,
+            review_prompt: None,
             sandbox: None,
         };
 
