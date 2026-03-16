@@ -1,12 +1,12 @@
 use anyhow::{Result, bail};
 use coop_core::prompt::{PromptBuilder, SkillEntry, WorkspaceIndex, scan_skills};
 use coop_core::{
-    InboundMessage, Message, Role, SessionKey, SessionKind, ToolContext, ToolDef, ToolExecutor,
-    TrustLevel, TurnConfig, TurnEvent, TurnResult, TypingNotifier, Usage,
+    Content, InboundMessage, Message, Role, SessionKey, SessionKind, ToolContext, ToolDef,
+    ToolExecutor, TrustLevel, TurnConfig, TurnEvent, TurnResult, TypingNotifier, Usage,
 };
 use coop_memory::Memory;
 use futures::StreamExt;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -643,9 +643,11 @@ impl Gateway {
                     break;
                 }
 
+                let tool_requests = response.tool_requests();
                 let mut result_msg = Message::user();
+                let mut completed_tool_ids = HashSet::new();
 
-                for req in response.tool_requests() {
+                for req in &tool_requests {
                     if turn_cancel.is_cancelled() {
                         info!("turn cancelled before tool execution: {}", req.name);
                         break;
@@ -691,6 +693,7 @@ impl Gateway {
                     .instrument(tool_span)
                     .await;
 
+                    completed_tool_ids.insert(req.id.clone());
                     result_msg =
                         result_msg.with_tool_result(&req.id, &output.content, output.is_error);
 
@@ -704,16 +707,42 @@ impl Gateway {
                             ),
                         })
                         .await;
+                }
 
+                if turn_cancel.is_cancelled() {
+                    for req in &tool_requests {
+                        if completed_tool_ids.contains(&req.id) {
+                            continue;
+                        }
+
+                        let output = coop_core::ToolOutput::error(
+                            "tool execution was cancelled because the turn was stopped by the user",
+                        );
+                        result_msg =
+                            result_msg.with_tool_result(&req.id, &output.content, output.is_error);
+
+                        let _ = event_tx
+                            .send(TurnEvent::ToolResult {
+                                id: req.id.clone(),
+                                message: Message::user().with_tool_result(
+                                    &req.id,
+                                    &output.content,
+                                    output.is_error,
+                                ),
+                            })
+                            .await;
+                    }
+                }
+
+                if result_msg.has_tool_results() {
+                    self.append_message(session_key, result_msg.clone());
+                    new_messages.push(result_msg);
                 }
 
                 if turn_cancel.is_cancelled() {
                     info!("turn cancelled after tool execution");
                     break;
                 }
-
-                self.append_message(session_key, result_msg.clone());
-                new_messages.push(result_msg);
 
                 // Compact mid-turn if the context grew past the threshold
                 // during this iteration. The next iteration will use the
@@ -1166,34 +1195,99 @@ impl Gateway {
         }
     }
 
-    /// If the session ends with an assistant message containing tool_use blocks
-    /// but no subsequent user message with matching tool_result blocks, append a
-    /// synthetic tool_result message so the API doesn't reject the history.
-    fn repair_dangling_tool_use(&self, session_key: &SessionKey) {
-        let msgs = self.messages(session_key);
-        let Some(last) = msgs.last() else { return };
+    fn replace_session_messages(&self, session_key: &SessionKey, messages: Vec<Message>) {
+        if let Err(e) = self.session_store.replace(session_key, &messages) {
+            warn!(session = %session_key, error = %e, "failed to persist repaired session");
+        }
+        self.sessions
+            .lock()
+            .expect("sessions mutex poisoned")
+            .insert(session_key.clone(), messages);
+    }
 
-        if last.role != Role::Assistant || !last.has_tool_requests() {
+    /// Ensure every assistant `tool_use` has matching `tool_result` blocks in
+    /// the immediately following user message.
+    fn repair_dangling_tool_use(&self, session_key: &SessionKey) {
+        let mut msgs = self.messages(session_key);
+        if msgs.is_empty() {
             return;
         }
 
-        let tool_ids: Vec<String> = last.tool_requests().iter().map(|r| r.id.clone()).collect();
+        let mut repaired_any = false;
+        let mut i = 0;
+        while i < msgs.len() {
+            if msgs[i].role != Role::Assistant || !msgs[i].has_tool_requests() {
+                i += 1;
+                continue;
+            }
 
-        warn!(
-            session = %session_key,
-            dangling_tool_ids = ?tool_ids,
-            "repairing session with dangling tool_use blocks from interrupted turn"
-        );
+            let tool_requests = msgs[i].tool_requests();
+            let next_idx = i + 1;
+            let next_is_user = next_idx < msgs.len() && msgs[next_idx].role == Role::User;
 
-        let mut repair_msg = Message::user();
-        for id in &tool_ids {
-            repair_msg = repair_msg.with_tool_result(
-                id,
-                "error: previous turn was interrupted before this tool result was recorded",
-                true,
+            let mut matched_results = HashMap::new();
+            let mut remainder = Vec::new();
+            if next_is_user {
+                let expected_ids: HashSet<String> =
+                    tool_requests.iter().map(|req| req.id.clone()).collect();
+                for content in msgs[next_idx].content.iter().cloned() {
+                    match &content {
+                        Content::ToolResult { id, .. } if expected_ids.contains(id) => {
+                            matched_results.entry(id.clone()).or_insert(content);
+                        }
+                        _ => remainder.push(content),
+                    }
+                }
+            }
+
+            let missing_ids: Vec<String> = tool_requests
+                .iter()
+                .filter_map(|req| {
+                    (!matched_results.contains_key(&req.id)).then_some(req.id.clone())
+                })
+                .collect();
+
+            if missing_ids.is_empty() && next_is_user {
+                i += 1;
+                continue;
+            }
+
+            repaired_any = true;
+            warn!(
+                session = %session_key,
+                dangling_tool_ids = ?missing_ids,
+                "repairing session with dangling tool_use blocks from interrupted turn"
             );
+
+            let mut repaired_content = Vec::new();
+            for req in &tool_requests {
+                if let Some(content) = matched_results.remove(&req.id) {
+                    repaired_content.push(content);
+                } else {
+                    repaired_content.push(Content::tool_result(
+                        &req.id,
+                        "error: previous turn was interrupted before this tool result was recorded",
+                        true,
+                    ));
+                }
+            }
+            repaired_content.extend(remainder);
+
+            if next_is_user {
+                msgs[next_idx].content = repaired_content;
+            } else {
+                let mut repair_msg = Message::user();
+                repair_msg.content = repaired_content;
+                msgs.insert(next_idx, repair_msg);
+                i += 1;
+            }
+
+            i += 1;
         }
-        self.append_message(session_key, repair_msg);
+
+        if repaired_any {
+            self.replace_session_messages(session_key, msgs);
+        }
     }
 
     pub(crate) fn messages(&self, session_key: &SessionKey) -> Vec<Message> {
@@ -1803,11 +1897,11 @@ fn strip_provider_prefix(model: &str) -> &str {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use coop_core::Provider;
-    use coop_core::fakes::FakeProvider;
+    use coop_core::fakes::{FakeProvider, SimpleExecutor};
     use coop_core::tools::DefaultExecutor;
     use coop_core::traits::ProviderStream;
     use coop_core::types::{Content, ModelInfo};
+    use coop_core::{Provider, Tool, ToolContext, ToolDef, ToolOutput};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -2811,6 +2905,128 @@ model = "test-model"
         }
     }
 
+    #[derive(Debug)]
+    struct DelayedTool {
+        delay: Duration,
+    }
+
+    #[async_trait]
+    impl Tool for DelayedTool {
+        fn definition(&self) -> ToolDef {
+            ToolDef::new(
+                "slow_tool",
+                "A slow test tool",
+                serde_json::json!({"type": "object"}),
+            )
+        }
+
+        async fn execute(
+            &self,
+            _arguments: serde_json::Value,
+            _ctx: &ToolContext,
+        ) -> Result<ToolOutput> {
+            tokio::time::sleep(self.delay).await;
+            Ok(ToolOutput::success("slow tool finished"))
+        }
+    }
+
+    #[derive(Debug)]
+    struct CancelSafeHistoryProvider {
+        model: ModelInfo,
+        call_count: Mutex<u32>,
+    }
+
+    impl CancelSafeHistoryProvider {
+        fn new() -> Self {
+            Self {
+                model: ModelInfo {
+                    name: "cancel-safe-history".into(),
+                    context_limit: 128_000,
+                },
+                call_count: Mutex::new(0),
+            }
+        }
+    }
+
+    fn validate_tool_history(messages: &[Message]) -> Result<()> {
+        for (idx, message) in messages.iter().enumerate() {
+            if message.role != Role::Assistant || !message.has_tool_requests() {
+                continue;
+            }
+
+            let Some(next) = messages.get(idx + 1) else {
+                bail!("assistant tool_use at index {idx} has no following user message");
+            };
+            if next.role != Role::User {
+                bail!("assistant tool_use at index {idx} is not followed by a user message");
+            }
+
+            let result_ids: HashSet<String> = next
+                .content
+                .iter()
+                .filter_map(|content| match content {
+                    Content::ToolResult { id, .. } => Some(id.clone()),
+                    _ => None,
+                })
+                .collect();
+
+            for req in message.tool_requests() {
+                if !result_ids.contains(&req.id) {
+                    bail!("missing tool_result for {}", req.id);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    #[async_trait]
+    impl Provider for CancelSafeHistoryProvider {
+        fn name(&self) -> &'static str {
+            "cancel-safe-history"
+        }
+
+        fn model_info(&self) -> ModelInfo {
+            self.model.clone()
+        }
+
+        async fn complete(
+            &self,
+            _system: &[String],
+            messages: &[Message],
+            _tools: &[ToolDef],
+        ) -> Result<(Message, Usage)> {
+            let mut call_count = self.call_count.lock().unwrap();
+            *call_count += 1;
+
+            if *call_count == 1 {
+                return Ok((
+                    Message::assistant().with_tool_request(
+                        "tool_cancelled_turn",
+                        "slow_tool",
+                        serde_json::json!({}),
+                    ),
+                    Usage::default(),
+                ));
+            }
+
+            validate_tool_history(messages)?;
+            Ok((
+                Message::assistant().with_text("history ok"),
+                Usage::default(),
+            ))
+        }
+
+        async fn stream(
+            &self,
+            _system: &[String],
+            _messages: &[Message],
+            _tools: &[ToolDef],
+        ) -> Result<ProviderStream> {
+            anyhow::bail!("not supported")
+        }
+    }
+
     #[tokio::test]
     async fn cancel_active_turn_stops_iteration() {
         let workspace = test_workspace();
@@ -2889,6 +3105,96 @@ model = "test-model"
         let session_key = gateway.default_session_key();
         assert!(!gateway.cancel_active_turn(&session_key));
         assert!(!gateway.has_active_turn(&session_key));
+    }
+
+    #[tokio::test]
+    async fn cancelled_turn_commits_tool_results_before_injected_follow_up() {
+        let workspace = test_workspace();
+        let provider: Arc<dyn Provider> = Arc::new(CancelSafeHistoryProvider::new());
+        let mut executor = SimpleExecutor::new();
+        executor.add(Box::new(DelayedTool {
+            delay: Duration::from_millis(100),
+        }));
+        let gateway = Arc::new(
+            Gateway::new(
+                shared_config(test_config()),
+                workspace.path().to_path_buf(),
+                registry(provider),
+                Arc::new(executor),
+                None,
+                None,
+            )
+            .unwrap(),
+        );
+
+        let session_key = gateway.default_session_key();
+        let (tx1, mut rx1) = mpsc::channel(256);
+        let gw1 = Arc::clone(&gateway);
+        let sk1 = session_key.clone();
+        let first_turn = tokio::spawn(async move {
+            gw1.run_turn_with_trust(&sk1, "start", TrustLevel::Full, Some("alice"), None, tx1)
+                .await
+        });
+
+        loop {
+            match rx1.recv().await {
+                Some(TurnEvent::ToolStart { .. }) => break,
+                Some(_) => {}
+                None => panic!("first turn ended before tool execution started"),
+            }
+        }
+
+        gateway.inject_pending_inbound(&session_key, "follow-up during tool".into());
+        assert!(gateway.cancel_active_turn(&session_key));
+
+        first_turn.await.unwrap().unwrap();
+        while rx1.try_recv().is_ok() {}
+
+        let msgs = gateway.messages(&session_key);
+        assert_eq!(
+            msgs.len(),
+            4,
+            "expected original, assistant, tool_result, follow-up"
+        );
+        assert_eq!(msgs[0].role, Role::User);
+        assert_eq!(msgs[1].role, Role::Assistant);
+        assert!(
+            msgs[2].has_tool_results(),
+            "cancelled turn should persist tool results"
+        );
+        assert_eq!(msgs[3].role, Role::User);
+        assert_eq!(msgs[3].text(), "follow-up during tool");
+
+        let result_ids: HashSet<String> = msgs[2]
+            .content
+            .iter()
+            .filter_map(|content| match content {
+                Content::ToolResult { id, .. } => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(result_ids.contains("tool_cancelled_turn"));
+
+        let (tx2, mut rx2) = mpsc::channel(256);
+        gateway
+            .run_turn_with_trust(
+                &session_key,
+                "next turn",
+                TrustLevel::Full,
+                Some("alice"),
+                None,
+                tx2,
+            )
+            .await
+            .unwrap();
+        while rx2.try_recv().is_ok() {}
+
+        let msgs = gateway.messages(&session_key);
+        assert!(
+            msgs.iter()
+                .any(|msg| msg.role == Role::Assistant && msg.text() == "history ok"),
+            "second turn should succeed against repaired history"
+        );
     }
 
     #[tokio::test]
@@ -3322,6 +3628,61 @@ model = "test-model"
         assert!(content_strs[0].1, "should be marked as error");
         assert_eq!(content_strs[1].0, "tool_b");
         assert!(content_strs[1].1, "should be marked as error");
+    }
+
+    #[test]
+    fn repair_dangling_tool_use_repairs_orphan_before_follow_up_user_message() {
+        let workspace = test_workspace();
+        let provider: Arc<dyn Provider> = Arc::new(FakeProvider::new("ok"));
+        let executor = Arc::new(DefaultExecutor::new());
+        let gateway = Arc::new(
+            Gateway::new(
+                shared_config(test_config()),
+                workspace.path().to_path_buf(),
+                registry(provider),
+                executor,
+                None,
+                None,
+            )
+            .unwrap(),
+        );
+
+        let session_key = gateway.default_session_key();
+        gateway.append_message(&session_key, Message::user().with_text("do something"));
+        gateway.append_message(
+            &session_key,
+            Message::assistant().with_tool_request(
+                "tool_a",
+                "bash",
+                serde_json::json!({"command": "echo hi"}),
+            ),
+        );
+        gateway.append_message(
+            &session_key,
+            Message::user().with_text("follow-up question"),
+        );
+
+        gateway.repair_dangling_tool_use(&session_key);
+
+        let msgs = gateway.messages(&session_key);
+        assert_eq!(
+            msgs.len(),
+            3,
+            "repair should augment the next user message in place"
+        );
+        assert_eq!(msgs[2].role, Role::User);
+        assert_eq!(msgs[2].text(), "follow-up question");
+        assert!(msgs[2].has_tool_results());
+
+        let tool_results: Vec<_> = msgs[2]
+            .content
+            .iter()
+            .filter_map(|content| match content {
+                Content::ToolResult { id, is_error, .. } => Some((id.clone(), *is_error)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tool_results, vec![("tool_a".to_owned(), true)]);
     }
 
     #[test]
