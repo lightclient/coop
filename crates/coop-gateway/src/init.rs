@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -11,13 +12,47 @@ use coop_core::user_workspace_dir_name;
 // Constants
 // ---------------------------------------------------------------------------
 
-const MODELS: &[(&str, &str)] = &[
+const ANTHROPIC_MODELS: &[(&str, &str)] = &[
     ("claude-sonnet-4-20250514", "fast, recommended"),
     ("claude-opus-4-0-20250514", "smartest, slower"),
     ("claude-haiku-3-5-20241022", "cheapest, fastest"),
 ];
+const OPENAI_MODELS: &[(&str, &str)] = &[
+    ("gpt-4o-mini", "fast, recommended"),
+    ("gpt-5-mini", "smart reasoning"),
+    ("gpt-5-codex", "coding / responses API"),
+];
+const OLLAMA_DEFAULT_MODEL: &str = "llama3.2";
+const OPENAI_COMPATIBLE_DEFAULT_MODEL: &str = "gpt-4o-mini";
 
 const NAME_PATTERN: &str = "^[a-z0-9][a-z0-9_-]{0,31}$";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InitProvider {
+    Anthropic,
+    OpenAi,
+    OpenAiCompatible,
+    Ollama,
+}
+
+impl InitProvider {
+    fn provider_name(self) -> &'static str {
+        match self {
+            Self::Anthropic => "anthropic",
+            Self::OpenAi => "openai",
+            Self::OpenAiCompatible => "openai-compatible",
+            Self::Ollama => "ollama",
+        }
+    }
+
+    fn default_api_key_env(self) -> Option<&'static str> {
+        match self {
+            Self::Anthropic => Some("ANTHROPIC_API_KEY"),
+            Self::OpenAi => Some("OPENAI_API_KEY"),
+            Self::OpenAiCompatible | Self::Ollama => None,
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Input helpers
@@ -71,6 +106,22 @@ fn prompt_continue() {
     std::io::stdin().read_line(&mut input).ok();
 }
 
+fn choose_model(prompt: &str, models: &[(&str, &str)]) -> String {
+    println!("{prompt}");
+    for (i, (id, desc)) in models.iter().enumerate() {
+        println!("  {}. {id} ({desc})", i + 1);
+    }
+    println!("  {}. Custom model ID\n", models.len() + 1);
+
+    let choice = prompt_choice("Choose", models.len() + 1, 1);
+    if choice == models.len() + 1 {
+        prompt_input("Model ID", models[0].0)
+    } else {
+        let idx = choice.saturating_sub(1).min(models.len() - 1);
+        models[idx].0.to_owned()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Validation
 // ---------------------------------------------------------------------------
@@ -100,11 +151,31 @@ fn validate_name(name: &str) -> Result<(), String> {
 // Config generation
 // ---------------------------------------------------------------------------
 
-fn generate_config(agent_name: &str, model_id: &str, user_name: &str) -> String {
+fn generate_config(
+    agent_name: &str,
+    provider: InitProvider,
+    model_id: &str,
+    user_name: &str,
+    base_url: Option<&str>,
+    api_key_env: Option<&str>,
+) -> String {
+    let agent_model = match provider {
+        InitProvider::Anthropic => format!("anthropic/{model_id}"),
+        _ => model_id.to_owned(),
+    };
+
+    let mut provider_block = format!("[provider]\nname = \"{}\"\n", provider.provider_name());
+    if let Some(base_url) = base_url.filter(|value| !value.trim().is_empty()) {
+        let _ = writeln!(provider_block, "base_url = \"{}\"", base_url.trim());
+    }
+    if let Some(api_key_env) = api_key_env.filter(|value| !value.trim().is_empty()) {
+        let _ = writeln!(provider_block, "api_key_env = \"{}\"", api_key_env.trim());
+    }
+
     format!(
         r#"[agent]
 id = "{agent_name}"
-model = "anthropic/{model_id}"
+model = "{agent_model}"
 workspace = "./workspace"
 
 [[users]]
@@ -112,9 +183,7 @@ name = "{user_name}"
 trust = "full"
 match = ["terminal:default"]
 
-[provider]
-name = "anthropic"
-
+{provider_block}
 [memory]
 db_path = "./db/memory.db"
 
@@ -125,12 +194,6 @@ db_path = "./db/memory.db"
 # mention_names = ["{agent_name}"]
 # default_trust = "familiar"
 # trust_ceiling = {{ fixed = "familiar" }}
-#
-# For LLM-based trigger (cheap model pre-screens messages):
-# [[groups]]
-# match = ["signal:group:YOUR_GROUP_ID_HERE"]
-# trigger = "llm"
-# trigger_model = "claude-haiku-3-5-20241022"
 "#
     )
 }
@@ -206,9 +269,9 @@ fn collapse_home(path: &Path) -> String {
 // API key detection
 // ---------------------------------------------------------------------------
 
-fn detect_api_key() -> ApiKeyStatus {
+fn detect_anthropic_api_key() -> ApiKeyStatus {
     if std::env::var("ANTHROPIC_API_KEY").is_ok() {
-        return ApiKeyStatus::EnvSet;
+        return ApiKeyStatus::EnvSet("ANTHROPIC_API_KEY");
     }
     if let Ok(home) = std::env::var("HOME") {
         let creds = PathBuf::from(home).join(".claude/.credentials.json");
@@ -219,8 +282,16 @@ fn detect_api_key() -> ApiKeyStatus {
     ApiKeyStatus::None
 }
 
+fn detect_openai_api_key() -> ApiKeyStatus {
+    if std::env::var("OPENAI_API_KEY").is_ok() {
+        ApiKeyStatus::EnvSet("OPENAI_API_KEY")
+    } else {
+        ApiKeyStatus::None
+    }
+}
+
 enum ApiKeyStatus {
-    EnvSet,
+    EnvSet(&'static str),
     ClaudeCodeCreds(PathBuf),
     None,
 }
@@ -258,80 +329,111 @@ pub(crate) fn cmd_init(dir_arg: Option<&str>) -> anyhow::Result<()> {
 
     std::fs::create_dir_all(&dir)?;
 
-    // Step 2: API key
-    println!();
-    match detect_api_key() {
-        ApiKeyStatus::EnvSet => {
-            println!("✓ Found ANTHROPIC_API_KEY in environment.");
-        }
-        ApiKeyStatus::ClaudeCodeCreds(creds_path) => {
-            println!("Found Claude Code credentials at {}.", creds_path.display());
-            if prompt_yes_no("Use your Claude Code subscription?", true) {
-                println!("\nAdd this to your shell profile (~/.bashrc, ~/.zshrc, etc.):\n");
-                println!(
-                    "  export ANTHROPIC_API_KEY=$(jq -r '.claudeAiOauth.accessToken' ~/.claude/.credentials.json)\n"
-                );
-                println!("Then restart your shell or run `source ~/.bashrc`.\n");
-                println!("Note: OAuth tokens expire periodically. If you get auth errors,");
-                println!("re-run the export command or open Claude Code to refresh the token.\n");
-                prompt_continue();
-            } else {
-                print_manual_key_instructions();
-                prompt_continue();
-            }
-        }
-        ApiKeyStatus::None => {
-            println!("Coop needs an Anthropic API key to talk to Claude.\n");
-            println!("Options:");
-            println!("  1. Regular API key from console.anthropic.com");
-            println!("  2. Claude Code OAuth token (Pro/Max subscription)\n");
+    // Step 2: Provider
+    println!("Choose a provider:");
+    println!("  1. Anthropic");
+    println!("  2. OpenAI");
+    println!("  3. OpenAI-compatible");
+    println!("  4. Ollama\n");
 
-            let choice = prompt_choice("Choose", 2, 1);
-
-            if choice == 2 {
-                println!("\nAdd this to your shell profile (~/.bashrc, ~/.zshrc, etc.):\n");
-                println!(
-                    "  export ANTHROPIC_API_KEY=$(jq -r '.claudeAiOauth.accessToken' ~/.claude/.credentials.json)\n"
-                );
-                println!("Then restart your shell or run `source ~/.bashrc`.\n");
-                prompt_continue();
-            } else {
-                println!("\nPaste your API key (starts with sk-ant-api): ");
-                std::io::stdout().flush().ok();
-                let mut key_input = String::new();
-                std::io::stdin().read_line(&mut key_input).ok();
-                let key = key_input.trim();
-                if !key.is_empty()
-                    && !key.starts_with("sk-ant-api")
-                    && !key.starts_with("sk-ant-oat")
-                {
-                    println!(
-                        "Warning: key doesn't match expected prefix (sk-ant-api or sk-ant-oat)."
-                    );
-                }
-                print_manual_key_instructions();
-                prompt_continue();
-            }
-        }
-    }
-
-    // Step 3: Model
-    println!();
-    println!("Which model?");
-    for (i, (id, desc)) in MODELS.iter().enumerate() {
-        println!("  {}. {id} ({desc})", i + 1);
-    }
-    println!("  4. Custom model ID\n");
-
-    let model_choice = prompt_choice("Choose", 4, 1);
-    let model_id = if model_choice == 4 {
-        prompt_input("Model ID", MODELS[0].0)
-    } else {
-        let idx = model_choice.saturating_sub(1).min(MODELS.len() - 1);
-        MODELS[idx].0.to_owned()
+    let provider = match prompt_choice("Choose", 4, 1) {
+        1 => InitProvider::Anthropic,
+        2 => InitProvider::OpenAi,
+        3 => InitProvider::OpenAiCompatible,
+        _ => InitProvider::Ollama,
     };
 
-    // Step 4: Agent name
+    // Step 3: Provider auth / endpoint
+    let mut provider_base_url: Option<String> = None;
+    let mut provider_api_key_env: Option<String> = None;
+
+    println!();
+    match provider {
+        InitProvider::Anthropic => match detect_anthropic_api_key() {
+            ApiKeyStatus::EnvSet(env_name) => {
+                println!("✓ Found {env_name} in environment.");
+            }
+            ApiKeyStatus::ClaudeCodeCreds(creds_path) => {
+                println!("Found Claude Code credentials at {}.", creds_path.display());
+                if prompt_yes_no("Use your Claude Code subscription?", true) {
+                    println!("\nAdd this to your shell profile (~/.bashrc, ~/.zshrc, etc.):\n");
+                    println!(
+                        "  export ANTHROPIC_API_KEY=$(jq -r '.claudeAiOauth.accessToken' ~/.claude/.credentials.json)\n"
+                    );
+                    println!("Then restart your shell or run `source ~/.bashrc`.\n");
+                    println!("Note: OAuth tokens expire periodically. If you get auth errors,");
+                    println!(
+                        "re-run the export command or open Claude Code to refresh the token.\n"
+                    );
+                    prompt_continue();
+                } else {
+                    print_manual_key_instructions(provider);
+                    prompt_continue();
+                }
+            }
+            ApiKeyStatus::None => {
+                println!("Coop needs an Anthropic API key to talk to Claude.\n");
+                println!("Options:");
+                println!("  1. Regular API key from console.anthropic.com");
+                println!("  2. Claude Code OAuth token (Pro/Max subscription)\n");
+
+                let choice = prompt_choice("Choose", 2, 1);
+                if choice == 2 {
+                    println!("\nAdd this to your shell profile (~/.bashrc, ~/.zshrc, etc.):\n");
+                    println!(
+                        "  export ANTHROPIC_API_KEY=$(jq -r '.claudeAiOauth.accessToken' ~/.claude/.credentials.json)\n"
+                    );
+                    println!("Then restart your shell or run `source ~/.bashrc`.\n");
+                    prompt_continue();
+                } else {
+                    print_manual_key_instructions(provider);
+                    prompt_continue();
+                }
+            }
+        },
+        InitProvider::OpenAi => match detect_openai_api_key() {
+            ApiKeyStatus::EnvSet(env_name) => {
+                println!("✓ Found {env_name} in environment.");
+            }
+            ApiKeyStatus::ClaudeCodeCreds(_) | ApiKeyStatus::None => {
+                print_manual_key_instructions(provider);
+                prompt_continue();
+            }
+        },
+        InitProvider::OpenAiCompatible => {
+            let base_url = prompt_input("Base URL", "http://localhost:8000/v1");
+            provider_base_url = Some(base_url);
+            let api_key_env = prompt_input(
+                "API key env var (leave blank if your server does not require one)",
+                "",
+            );
+            if !api_key_env.trim().is_empty() {
+                provider_api_key_env = Some(api_key_env.trim().to_owned());
+                println!(
+                    "\nSet {} in your shell profile before running coop.",
+                    api_key_env.trim()
+                );
+                prompt_continue();
+            }
+        }
+        InitProvider::Ollama => {
+            let base_url = prompt_input("Ollama base URL", "http://localhost:11434");
+            if base_url != "http://localhost:11434" {
+                provider_base_url = Some(base_url);
+            }
+        }
+    }
+
+    // Step 4: Model
+    println!();
+    let model_id = match provider {
+        InitProvider::Anthropic => choose_model("Which Anthropic model?", ANTHROPIC_MODELS),
+        InitProvider::OpenAi => choose_model("Which OpenAI model?", OPENAI_MODELS),
+        InitProvider::OpenAiCompatible => prompt_input("Model ID", OPENAI_COMPATIBLE_DEFAULT_MODEL),
+        InitProvider::Ollama => prompt_input("Model ID", OLLAMA_DEFAULT_MODEL),
+    };
+
+    // Step 5: Agent name
     println!();
     let agent_name = loop {
         let name = prompt_input("What should your agent be called?", "cooper");
@@ -352,11 +454,18 @@ pub(crate) fn cmd_init(dir_arg: Option<&str>) -> anyhow::Result<()> {
         }
     };
 
-    // Step 6: Write config
-    let config_content = generate_config(&agent_name, &model_id, &user_name);
+    // Step 7: Write config
+    let config_content = generate_config(
+        &agent_name,
+        provider,
+        &model_id,
+        &user_name,
+        provider_base_url.as_deref(),
+        provider_api_key_env.as_deref(),
+    );
     std::fs::write(&config_path, &config_content)?;
 
-    // Step 7 + 8: Scaffold workspace + directories
+    // Step 8 + 9: Scaffold workspace + directories
     let created_files = scaffold_workspace(&dir, &user_name)?;
 
     // Step 9: Summary
@@ -373,9 +482,13 @@ pub(crate) fn cmd_init(dir_arg: Option<&str>) -> anyhow::Result<()> {
         .results
         .iter()
         .any(|r| r.name == "api_key_present" && !r.passed);
-    if api_key_missing {
+    if api_key_missing
+        && let Some(env_name) = provider_api_key_env
+            .as_deref()
+            .or_else(|| provider.default_api_key_env())
+    {
         println!(
-            "\nNote: ANTHROPIC_API_KEY is not set. Set it in your shell profile before running `coop chat`."
+            "\nNote: {env_name} is not set. Set it in your shell profile before running `coop chat`."
         );
     }
 
@@ -408,9 +521,15 @@ pub(crate) fn cmd_init(dir_arg: Option<&str>) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn print_manual_key_instructions() {
+fn print_manual_key_instructions(provider: InitProvider) {
+    let env_name = provider.default_api_key_env().unwrap_or("API_KEY_ENV");
+    let example = match provider {
+        InitProvider::Anthropic => "sk-ant-api...",
+        InitProvider::OpenAi | InitProvider::OpenAiCompatible => "sk-test-xxx",
+        InitProvider::Ollama => "token-if-needed",
+    };
     println!("\nAdd this to your shell profile:\n");
-    println!("  export ANTHROPIC_API_KEY=sk-ant-api...\n");
+    println!("  export {env_name}={example}\n");
     println!("Never store API keys in config files. Coop reads them from environment variables.");
 }
 
@@ -495,7 +614,14 @@ mod tests {
 
     #[test]
     fn test_generate_config() {
-        let config = generate_config("cooper", "claude-sonnet-4-20250514", "alice");
+        let config = generate_config(
+            "cooper",
+            InitProvider::Anthropic,
+            "claude-sonnet-4-20250514",
+            "alice",
+            None,
+            None,
+        );
         assert!(config.contains("id = \"cooper\""));
         assert!(config.contains("model = \"anthropic/claude-sonnet-4-20250514\""));
         assert!(config.contains("name = \"alice\""));
@@ -506,7 +632,14 @@ mod tests {
 
     #[test]
     fn test_generate_config_roundtrip() {
-        let config_str = generate_config("cooper", "claude-sonnet-4-20250514", "alice");
+        let config_str = generate_config(
+            "cooper",
+            InitProvider::Anthropic,
+            "claude-sonnet-4-20250514",
+            "alice",
+            None,
+            None,
+        );
         let config: crate::config::Config = toml::from_str(&config_str).unwrap();
         assert_eq!(config.agent.id, "cooper");
         assert_eq!(config.agent.model, "anthropic/claude-sonnet-4-20250514");
@@ -516,6 +649,29 @@ mod tests {
         assert_eq!(config.users[0].trust, coop_core::TrustLevel::Full);
         assert_eq!(config.provider.name, "anthropic");
         assert_eq!(config.memory.db_path, "./db/memory.db");
+    }
+
+    #[test]
+    fn test_generate_openai_compatible_config_roundtrip() {
+        let config_str = generate_config(
+            "cooper",
+            InitProvider::OpenAiCompatible,
+            "gpt-4o-mini",
+            "alice",
+            Some("http://localhost:8000/v1"),
+            Some("OPENAI_COMPAT_API_KEY"),
+        );
+        let config: crate::config::Config = toml::from_str(&config_str).unwrap();
+        assert_eq!(config.provider.name, "openai-compatible");
+        assert_eq!(
+            config.provider.base_url.as_deref(),
+            Some("http://localhost:8000/v1")
+        );
+        assert_eq!(
+            config.provider.api_key_env.as_deref(),
+            Some("OPENAI_COMPAT_API_KEY")
+        );
+        assert_eq!(config.agent.model, "gpt-4o-mini");
     }
 
     #[test]

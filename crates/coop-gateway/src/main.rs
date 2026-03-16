@@ -24,6 +24,7 @@ mod memory_prompt_index;
 mod memory_reconcile;
 mod memory_tools;
 mod overflow_recovery;
+mod provider_factory;
 mod provider_registry;
 mod reminder;
 mod router;
@@ -45,7 +46,6 @@ mod web_tools;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::Parser;
-use coop_agent::AnthropicProvider;
 use coop_core::tools::{CompositeExecutor, DefaultExecutor};
 use coop_core::{InboundKind, InboundMessage, Provider, TurnEvent};
 use coop_ipc::{
@@ -150,57 +150,6 @@ fn resolve_tui_user(config: &Config, user_flag: Option<&str>) -> String {
         name.to_owned()
     } else {
         "root".to_owned()
-    }
-}
-
-/// Create an `AnthropicProvider` from config, using `api_keys` if set or
-/// falling back to `ANTHROPIC_API_KEY`.
-fn create_provider(config: &Config) -> Result<AnthropicProvider> {
-    if config.provider.api_keys.is_empty() {
-        AnthropicProvider::from_env(&config.agent.model)
-    } else {
-        AnthropicProvider::from_key_refs(&config.provider.api_keys, &config.agent.model)
-    }
-}
-
-/// Build a `ProviderRegistry` with the primary provider and any group trigger models.
-fn build_provider_registry(
-    primary: Arc<dyn Provider>,
-    config: &Config,
-) -> provider_registry::ProviderRegistry {
-    let mut registry = provider_registry::ProviderRegistry::new(primary);
-
-    // Collect unique trigger models that differ from the primary.
-    let primary_model = registry.primary().model_info().name;
-    let mut seen = std::collections::HashSet::new();
-    for group in &config.groups {
-        let model = group.trigger_model_or_default();
-        if model != primary_model && seen.insert(model.to_owned()) {
-            match create_provider_with_model(config, model) {
-                Ok(provider) => {
-                    info!(model = model, "registered trigger model provider");
-                    registry.register(model.to_owned(), Arc::new(provider));
-                }
-                Err(e) => {
-                    warn!(
-                        model = model,
-                        error = %e,
-                        "failed to create trigger model provider, will use primary"
-                    );
-                }
-            }
-        }
-    }
-
-    registry
-}
-
-/// Create a provider instance configured for a specific model.
-fn create_provider_with_model(config: &Config, model: &str) -> Result<AnthropicProvider> {
-    if config.provider.api_keys.is_empty() {
-        AnthropicProvider::from_env(model)
-    } else {
-        AnthropicProvider::from_key_refs(&config.provider.api_keys, model)
     }
 }
 
@@ -486,15 +435,9 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
         .to_path_buf();
     let workspace = config.resolve_workspace(&config_dir)?;
 
-    anyhow::ensure!(
-        config.provider.name == "anthropic",
-        "only the 'anthropic' provider is supported (got '{}')",
-        config.provider.name
-    );
-
-    let provider: Arc<dyn Provider> =
-        Arc::new(create_provider(&config).context("failed to initialize Anthropic provider")?);
-    let providers = build_provider_registry(Arc::clone(&provider), &config);
+    let provider = provider_factory::create_primary_provider(&config)
+        .context("failed to initialize provider")?;
+    let providers = provider_factory::build_provider_registry(Arc::clone(&provider), &config);
 
     #[cfg(feature = "signal")]
     let mut signal_channel: Option<SignalChannel> = None;
@@ -926,15 +869,9 @@ async fn cmd_chat(config_path: Option<&str>, user_flag: Option<&str>) -> Result<
         .to_path_buf();
     let workspace = config.resolve_workspace(&config_dir)?;
 
-    anyhow::ensure!(
-        config.provider.name == "anthropic",
-        "only the 'anthropic' provider is supported (got '{}')",
-        config.provider.name
-    );
-
-    let provider: Arc<dyn Provider> =
-        Arc::new(create_provider(&config).context("failed to initialize Anthropic provider")?);
-    let providers = build_provider_registry(Arc::clone(&provider), &config);
+    let provider = provider_factory::create_primary_provider(&config)
+        .context("failed to initialize provider")?;
+    let providers = provider_factory::build_provider_registry(Arc::clone(&provider), &config);
 
     let memory = init_memory_store(&config, &config_dir, Arc::clone(&provider))?;
 
@@ -1285,8 +1222,8 @@ async fn cmd_memory(config_path: Option<&str>, command: MemoryCommands) -> Resul
         .unwrap_or(&PathBuf::from("."))
         .to_path_buf();
 
-    let provider: Arc<dyn Provider> =
-        Arc::new(create_provider(&config).context("failed to initialize Anthropic provider")?);
+    let provider = provider_factory::create_primary_provider(&config)
+        .context("failed to initialize provider")?;
 
     let memory = init_memory_store(&config, &config_dir, provider)?;
 

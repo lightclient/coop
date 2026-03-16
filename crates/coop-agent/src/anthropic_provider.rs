@@ -5,24 +5,36 @@
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD as BASE64;
 use futures::StreamExt;
-use image::ImageFormat;
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::collections::HashSet;
-use std::io::Cursor;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::RwLock;
 use tracing::{Instrument, debug, info, info_span, warn};
+
+#[cfg(test)]
+use base64::Engine as _;
+#[cfg(test)]
+use base64::engine::general_purpose::STANDARD as BASE64;
+#[cfg(test)]
+use image::ImageFormat;
+#[cfg(test)]
+use std::io::Cursor;
 
 use coop_core::traits::{Provider, ProviderStream};
 use coop_core::types::{Content, Message, ModelInfo, Role, ToolDef, Usage};
 
+use crate::image_prep::prepare_anthropic_image;
+#[cfg(test)]
+use crate::image_prep::{
+    ANTHROPIC_MAX_LONG_EDGE, MAX_IMAGE_BYTES, MAX_IMAGE_DIMENSION, base64_decoded_size,
+    downscale_image, exceeds_dimension_limit,
+};
 use crate::key_pool::KeyPool;
+use crate::provider_spec::ProviderSpec;
 
-const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
+const DEFAULT_ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const CLAUDE_CODE_VERSION: &str = "2.1.29";
 
@@ -31,24 +43,6 @@ const TOOL_PREFIX: &str = "mcp_";
 
 /// Max retry attempts for transient errors.
 const MAX_RETRIES: u32 = 3;
-
-/// Anthropic API limit: 5 MB per image (decoded bytes).
-const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
-
-/// Anthropic scales images with long edge > 1568px server-side, so we cap
-/// at this before iterative shrinking — usually enough to get under 5 MB.
-const ANTHROPIC_MAX_LONG_EDGE: u32 = 1568;
-
-/// Anthropic rejects images with any dimension > 2000px in many-image requests.
-/// We enforce this for all images proactively since we can't predict the API's
-/// internal image budget (it depends on total image count across the conversation).
-const MAX_IMAGE_DIMENSION: u32 = 2000;
-
-/// Each iterative shrink pass reduces dimensions to this fraction.
-const SHRINK_FACTOR: f64 = 0.75;
-
-/// JPEG quality for lossy re-encoding.
-const JPEG_QUALITY: u8 = 85;
 
 /// Parse an Anthropic API error response body into a friendly message.
 ///
@@ -82,180 +76,16 @@ fn format_api_error(status: reqwest::StatusCode, raw_body: &str) -> String {
     }
 }
 
-/// Estimate the decoded byte count of a base64 string.
-///
-/// Standard base64 encodes 3 bytes into 4 characters. This computes the
-/// decoded size accounting for padding, without actually decoding.
-#[cfg(test)]
-fn base64_decoded_size(b64: &str) -> usize {
-    let len = b64.len();
-    if len == 0 {
-        return 0;
-    }
-    let padding = b64
-        .as_bytes()
-        .iter()
-        .rev()
-        .take(2)
-        .filter(|&&b| b == b'=')
-        .count();
-    (len / 4) * 3 - padding
-}
-
-/// Downscale a base64-encoded image so its decoded bytes fit under `MAX_IMAGE_BYTES`.
-///
-/// Strategy:
-/// 1. Cap the long edge at `ANTHROPIC_MAX_LONG_EDGE` (1568 px) — Anthropic
-///    resizes anything larger server-side anyway.
-/// 2. If still over 5 MB, iteratively shrink by `SHRINK_FACTOR` (75 %).
-/// 3. Re-encode as PNG for `image/png` inputs, JPEG (quality 85) otherwise.
-///
-/// Returns `(new_base64_data, mime_type)` or `None` if decoding/resizing fails.
-fn downscale_image(b64_data: &str, mime_type: &str) -> Option<(String, String)> {
-    let raw = BASE64.decode(b64_data).ok()?;
-    let img = image::load_from_memory(&raw).ok()?;
-
-    let use_png = mime_type == "image/png";
-    let output_format = if use_png {
-        ImageFormat::Png
-    } else {
-        ImageFormat::Jpeg
-    };
-    let out_mime = if use_png { "image/png" } else { "image/jpeg" };
-
-    // First pass: cap long edge at Anthropic's server-side limit.
-    let (w, h) = (img.width(), img.height());
-    let long_edge = w.max(h);
-    let mut img = if long_edge > ANTHROPIC_MAX_LONG_EDGE {
-        let scale = f64::from(ANTHROPIC_MAX_LONG_EDGE) / f64::from(long_edge);
-        let nw = scale_dim(w, scale);
-        let nh = scale_dim(h, scale);
-        img.resize_exact(nw, nh, image::imageops::FilterType::Lanczos3)
-    } else {
-        img
-    };
-
-    // Iterative shrink until under the limit (or dimensions collapse).
-    // The API enforces the 5 MB limit on the base64 *string* length,
-    // not the decoded byte count. Check the base64 output directly.
-    loop {
-        let encoded_bytes = encode_image(&img, output_format)?;
-        let b64_out = BASE64.encode(&encoded_bytes);
-        if b64_out.len() <= MAX_IMAGE_BYTES {
-            return Some((b64_out, out_mime.to_owned()));
-        }
-
-        let (cw, ch) = (img.width(), img.height());
-        let nw = scale_dim(cw, SHRINK_FACTOR);
-        let nh = scale_dim(ch, SHRINK_FACTOR);
-        if nw == 0 || nh == 0 {
-            return None;
-        }
-        img = img.resize_exact(nw, nh, image::imageops::FilterType::Lanczos3);
-    }
-}
-
-/// Scale a pixel dimension by a factor, rounding to the nearest integer.
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-fn scale_dim(dim: u32, factor: f64) -> u32 {
-    (f64::from(dim) * factor).round() as u32
-}
-
-/// Encode a `DynamicImage` to bytes in the given format.
-fn encode_image(img: &image::DynamicImage, format: ImageFormat) -> Option<Vec<u8>> {
-    let mut buf = Cursor::new(Vec::new());
-    match format {
-        ImageFormat::Jpeg => {
-            let encoder =
-                image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, JPEG_QUALITY);
-            img.write_with_encoder(encoder).ok()?;
-        }
-        _ => {
-            img.write_to(&mut buf, format).ok()?;
-        }
-    }
-    Some(buf.into_inner())
-}
-
-/// Check if a base64-encoded image has any dimension exceeding `MAX_IMAGE_DIMENSION`.
-///
-/// Uses `ImageReader::into_dimensions()` which only reads the image header,
-/// avoiding a full pixel decode. Returns `true` if any dimension exceeds the limit.
-fn exceeds_dimension_limit(b64_data: &str) -> bool {
-    let Ok(raw) = BASE64.decode(b64_data) else {
-        return false;
-    };
-    let cursor = Cursor::new(raw);
-    let Ok(reader) = image::ImageReader::new(cursor).with_guessed_format() else {
-        return false;
-    };
-    match reader.into_dimensions() {
-        Ok((w, h)) => w > MAX_IMAGE_DIMENSION || h > MAX_IMAGE_DIMENSION,
-        Err(_) => false,
-    }
-}
-
-/// Format a single image content block for the Anthropic API.
-///
-/// Downscales the image if it exceeds either:
-/// - `MAX_IMAGE_BYTES` (5 MB decoded)
-/// - `MAX_IMAGE_DIMENSION` (2000px on any axis, Anthropic's many-image limit)
-///
-/// Returns `None` (skip) only if downscaling also fails.
 fn format_image_block(data: &str, mime_type: &str) -> Option<Value> {
-    // The API enforces the 5 MB limit on the base64 string length.
-    let b64_len = data.len();
-    let over_size = b64_len > MAX_IMAGE_BYTES;
-    let over_dimension = !over_size && exceeds_dimension_limit(data);
-
-    if over_size || over_dimension {
-        let reason = if over_size {
-            "exceeds 5 MB API limit"
-        } else {
-            "exceeds 2000px dimension limit for many-image requests"
-        };
-        info!(
-            b64_len,
-            max_bytes = MAX_IMAGE_BYTES,
-            mime = %mime_type,
-            reason,
-            "image needs downscaling"
-        );
-        if let Some((new_data, new_mime)) = downscale_image(data, mime_type) {
-            info!(
-                original_b64_len = b64_len,
-                new_b64_len = new_data.len(),
-                new_mime = %new_mime,
-                reason,
-                "image downscaled successfully"
-            );
-            Some(json!({
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": new_mime,
-                    "data": new_data
-                }
-            }))
-        } else {
-            warn!(
-                b64_len,
-                mime = %mime_type,
-                reason,
-                "failed to downscale image, skipping"
-            );
-            None
+    let prepared = prepare_anthropic_image(data, mime_type)?;
+    Some(json!({
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": prepared.mime_type,
+            "data": prepared.data,
         }
-    } else {
-        Some(json!({
-            "type": "image",
-            "source": {
-                "type": "base64",
-                "media_type": mime_type,
-                "data": data
-            }
-        }))
-    }
+    }))
 }
 
 /// Direct Anthropic provider with OAuth support and key rotation.
@@ -263,6 +93,8 @@ pub struct AnthropicProvider {
     client: Client,
     keys: KeyPool,
     model: RwLock<ModelInfo>,
+    base_url: String,
+    extra_headers: BTreeMap<String, String>,
 }
 
 impl AnthropicProvider {
@@ -270,6 +102,15 @@ impl AnthropicProvider {
     ///
     /// Each key auto-detects OAuth (sk-ant-oat*) vs regular API keys.
     pub fn new(api_keys: Vec<String>, model_name: &str) -> Result<Self> {
+        Self::with_options(api_keys, model_name, None, BTreeMap::new())
+    }
+
+    pub fn with_options(
+        api_keys: Vec<String>,
+        model_name: &str,
+        base_url: Option<&str>,
+        extra_headers: BTreeMap<String, String>,
+    ) -> Result<Self> {
         anyhow::ensure!(!api_keys.is_empty(), "at least one API key is required");
 
         let key_count = api_keys.len();
@@ -280,9 +121,7 @@ impl AnthropicProvider {
             .build()
             .context("failed to create HTTP client")?;
 
-        // Strip provider prefix (e.g. "anthropic/claude-sonnet-4-20250514" -> "claude-sonnet-4-20250514")
         let api_model = model_name.strip_prefix("anthropic/").unwrap_or(model_name);
-
         let model = ModelInfo {
             name: api_model.to_owned(),
             context_limit: 200_000,
@@ -292,7 +131,22 @@ impl AnthropicProvider {
             client,
             keys: KeyPool::new(api_keys),
             model: RwLock::new(model),
+            base_url: base_url
+                .unwrap_or(DEFAULT_ANTHROPIC_BASE_URL)
+                .trim_end_matches('/')
+                .to_owned(),
+            extra_headers,
         })
+    }
+
+    pub fn from_spec(spec: &ProviderSpec) -> Result<Self> {
+        let keys = spec.resolved_api_keys()?;
+        Self::with_options(
+            keys,
+            &spec.model,
+            spec.base_url.as_deref(),
+            spec.extra_headers.clone(),
+        )
     }
 
     /// Create from environment variable ANTHROPIC_API_KEY (single-key, backward compat).
@@ -321,11 +175,11 @@ impl AnthropicProvider {
         api_key: &str,
         is_oauth: bool,
     ) -> reqwest::RequestBuilder {
+        let base_url = format!("{}/v1/messages", self.base_url);
         let url = if is_oauth {
-            // OAuth requires ?beta=true query parameter
-            format!("{ANTHROPIC_API_URL}?beta=true")
+            format!("{base_url}?beta=true")
         } else {
-            ANTHROPIC_API_URL.to_owned()
+            base_url
         };
 
         let mut req = self
@@ -353,6 +207,10 @@ impl AnthropicProvider {
                 .header("x-app", "cli");
         } else {
             req = req.header("x-api-key", api_key);
+        }
+
+        for (name, value) in &self.extra_headers {
+            req = req.header(name, value);
         }
 
         req.json(body)
@@ -714,6 +572,8 @@ impl std::fmt::Debug for AnthropicProvider {
         f.debug_struct("AnthropicProvider")
             .field("model", &model.name)
             .field("key_count", &self.keys.len())
+            .field("base_url", &self.base_url)
+            .field("extra_header_count", &self.extra_headers.len())
             .finish_non_exhaustive()
     }
 }

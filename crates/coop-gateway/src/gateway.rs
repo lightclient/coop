@@ -1265,10 +1265,9 @@ impl Gateway {
     fn sync_provider_model(&self) {
         let config_model = self.config.load().agent.model.clone();
         let provider_model = self.providers.primary().model_info().name;
-        // Strip prefix for comparison (config may have "anthropic/" prefix, provider won't)
-        let config_api_model = config_model
-            .strip_prefix("anthropic/")
-            .unwrap_or(&config_model);
+        // Strip provider prefix for comparison — the provider stores the bare model name
+        // after its own prefix normalization (e.g. "anthropic/claude-…" → "claude-…").
+        let config_api_model = strip_provider_prefix(&config_model);
         if provider_model != config_api_model {
             debug!(
                 old = %provider_model,
@@ -1781,6 +1780,22 @@ fn parse_session_key(session: &str, agent_id: &str) -> Option<SessionKey> {
     }
 
     None
+}
+
+/// Strip a known provider namespace prefix from a model string for comparison.
+///
+/// Config values like `"anthropic/claude-sonnet-4-20250514"` or `"openai/gpt-4o-mini"`
+/// carry the provider prefix, but the provider's `model_info().name` stores only
+/// the bare model name. This strips the first `<word>/` segment when it matches
+/// a known provider namespace.
+fn strip_provider_prefix(model: &str) -> &str {
+    const PREFIXES: &[&str] = &["anthropic/", "openai/", "ollama/", "openai-compatible/"];
+    for prefix in PREFIXES {
+        if let Some(stripped) = model.strip_prefix(prefix) {
+            return stripped;
+        }
+    }
+    model
 }
 
 #[allow(clippy::unwrap_used)]

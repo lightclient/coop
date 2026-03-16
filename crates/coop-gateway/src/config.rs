@@ -4,6 +4,7 @@ use coop_core::TrustLevel;
 use coop_core::prompt::{CacheHint, PromptFileConfig};
 use coop_memory::MemoryMaintenanceConfig;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -193,10 +194,39 @@ pub(crate) struct ProviderConfig {
     #[serde(default = "default_provider")]
     pub name: String,
     /// Key references with `env:` prefix (e.g. `env:ANTHROPIC_API_KEY`).
-    /// Enables rotation on rate limits. When empty/omitted, falls back
-    /// to ANTHROPIC_API_KEY env var.
+    /// Enables key rotation. When empty/omitted, falls back to `api_key_env`
+    /// or the provider default environment variable.
     #[serde(default)]
     pub api_keys: Vec<String>,
+    #[serde(default)]
+    pub api_key_env: Option<String>,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub extra_headers: BTreeMap<String, String>,
+}
+
+impl ProviderConfig {
+    pub(crate) fn normalized_name(&self) -> String {
+        self.name.trim().to_ascii_lowercase()
+    }
+
+    pub(crate) fn default_api_key_env(&self) -> Option<&'static str> {
+        match self.normalized_name().as_str() {
+            "anthropic" => Some("ANTHROPIC_API_KEY"),
+            "openai" => Some("OPENAI_API_KEY"),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn effective_api_key_env(&self) -> Option<String> {
+        self.api_key_env
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .or_else(|| self.default_api_key_env().map(str::to_owned))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1338,6 +1368,70 @@ name = "anthropic"
 "#;
         let config: Config = toml::from_str(toml_str).unwrap();
         assert!(config.provider.api_keys.is_empty());
+    }
+
+    #[test]
+    fn parse_provider_with_base_url_and_api_key_env() {
+        let toml_str = r#"
+[agent]
+id = "test"
+model = "gpt-4o-mini"
+
+[provider]
+name = "openai-compatible"
+base_url = "http://localhost:8000/v1"
+api_key_env = "OPENAI_COMPAT_API_KEY"
+
+[provider.extra_headers]
+X-Test = "1"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            config.provider.base_url.as_deref(),
+            Some("http://localhost:8000/v1")
+        );
+        assert_eq!(
+            config.provider.api_key_env.as_deref(),
+            Some("OPENAI_COMPAT_API_KEY")
+        );
+        assert_eq!(
+            config
+                .provider
+                .extra_headers
+                .get("X-Test")
+                .map(String::as_str),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn provider_effective_api_key_env_prefers_explicit_value() {
+        let provider = ProviderConfig {
+            name: "openai".to_owned(),
+            api_keys: Vec::new(),
+            api_key_env: Some("CUSTOM_OPENAI_KEY".to_owned()),
+            base_url: None,
+            extra_headers: BTreeMap::new(),
+        };
+        assert_eq!(
+            provider.effective_api_key_env().as_deref(),
+            Some("CUSTOM_OPENAI_KEY")
+        );
+    }
+
+    #[test]
+    fn provider_effective_api_key_env_uses_provider_default() {
+        let provider = ProviderConfig {
+            name: "anthropic".to_owned(),
+            api_keys: Vec::new(),
+            api_key_env: None,
+            base_url: None,
+            extra_headers: BTreeMap::new(),
+        };
+        assert_eq!(
+            provider.effective_api_key_env().as_deref(),
+            Some("ANTHROPIC_API_KEY")
+        );
     }
 
     #[test]

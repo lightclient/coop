@@ -897,6 +897,10 @@ where
         }
     }
 
+    if let Some(env_name) = config.provider.effective_api_key_env() {
+        capture_keys.insert(env_name);
+    }
+
     if let Some(embedding) = &config.memory.embedding
         && let Some(env_var) = embedding.required_api_key_env()
     {
@@ -1698,6 +1702,9 @@ mod tests {
                     "env:ANTHROPIC_API_KEY".to_owned(),
                     "env:SECONDARY_KEY".to_owned(),
                 ],
+                api_key_env: None,
+                base_url: None,
+                extra_headers: BTreeMap::new(),
             },
             prompt: crate::config::PromptConfig::default(),
             memory: crate::config::MemoryConfig::default(),

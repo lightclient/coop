@@ -190,7 +190,7 @@ mod tests {
 
         let workspace = dir.path().join("workspace");
         let bad_toml = format!(
-            "[agent]\nid = \"test\"\nmodel = \"test-model\"\nworkspace = \"{}\"\n\n[provider]\nname = \"openai\"\n",
+            "[agent]\nid = \"test\"\nmodel = \"test-model\"\nworkspace = \"{}\"\n\n[provider]\nname = \"unsupported-provider\"\n",
             workspace.display()
         );
 

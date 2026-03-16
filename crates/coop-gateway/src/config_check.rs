@@ -193,7 +193,11 @@ pub(crate) fn validate_config(config_path: &Path, config_dir: &Path) -> CheckRep
     };
 
     // 4. provider_known
-    let provider_ok = config.provider.name == "anthropic";
+    let provider_name = config.provider.normalized_name();
+    let provider_ok = matches!(
+        provider_name.as_str(),
+        "anthropic" | "openai" | "openai-compatible" | "ollama"
+    );
     report.push(CheckResult {
         name: "provider_known",
         severity: Severity::Error,
@@ -202,67 +206,13 @@ pub(crate) fn validate_config(config_path: &Path, config_dir: &Path) -> CheckRep
             format!("provider: {}", config.provider.name)
         } else {
             format!(
-                "unknown provider '{}' (only 'anthropic' supported)",
+                "unknown provider '{}' (supported: anthropic, openai, openai-compatible, ollama)",
                 config.provider.name
             )
         },
     });
 
-    // 5. api_key_present
-    if config.provider.api_keys.is_empty() {
-        let api_key_ok = std::env::var("ANTHROPIC_API_KEY").is_ok();
-        report.push(CheckResult {
-            name: "api_key_present",
-            severity: Severity::Error,
-            passed: api_key_ok,
-            message: if api_key_ok {
-                "API key: present".to_owned()
-            } else {
-                "ANTHROPIC_API_KEY environment variable not set".to_owned()
-            },
-        });
-    } else {
-        let mut all_ok = true;
-
-        for entry in &config.provider.api_keys {
-            if let Some(var_name) = entry.strip_prefix("env:") {
-                let is_set = std::env::var(var_name).is_ok();
-                if !is_set {
-                    report.push(CheckResult {
-                        name: "api_key_present",
-                        severity: Severity::Error,
-                        passed: false,
-                        message: format!(
-                            "{var_name} environment variable not set (from api_keys entry '{entry}')"
-                        ),
-                    });
-                    all_ok = false;
-                }
-            } else {
-                report.push(CheckResult {
-                    name: "api_key_present",
-                    severity: Severity::Error,
-                    passed: false,
-                    message: format!(
-                        "api_keys entry '{entry}' must use 'env:' prefix (e.g. env:ANTHROPIC_API_KEY)"
-                    ),
-                });
-                all_ok = false;
-            }
-        }
-
-        if all_ok {
-            report.push(CheckResult {
-                name: "api_key_present",
-                severity: Severity::Info,
-                passed: true,
-                message: format!(
-                    "API keys: {} configured (rotation enabled)",
-                    config.provider.api_keys.len()
-                ),
-            });
-        }
-    }
+    check_provider_config(&mut report, &config);
 
     // 6. memory config
     check_memory(&mut report, &config, config_dir);
@@ -323,6 +273,164 @@ pub(crate) fn validate_config(config_path: &Path, config_dir: &Path) -> CheckRep
     check_binary_exists(&mut report);
 
     report
+}
+
+#[allow(clippy::too_many_lines)]
+fn check_provider_config(report: &mut CheckReport, config: &Config) {
+    let provider_name = config.provider.normalized_name();
+
+    if provider_name == "openai-compatible" {
+        let base_url_ok = config.provider.base_url.as_ref().is_some_and(|value| {
+            let trimmed = value.trim();
+            !trimmed.is_empty()
+                && (trimmed.starts_with("http://") || trimmed.starts_with("https://"))
+        });
+        report.push(CheckResult {
+            name: "provider_base_url",
+            severity: Severity::Error,
+            passed: base_url_ok,
+            message: if base_url_ok {
+                format!(
+                    "provider.base_url: {}",
+                    config.provider.base_url.as_deref().unwrap_or_default()
+                )
+            } else {
+                "openai-compatible provider requires provider.base_url with http:// or https://"
+                    .to_owned()
+            },
+        });
+    } else if let Some(base_url) = &config.provider.base_url {
+        let valid = {
+            let trimmed = base_url.trim();
+            !trimmed.is_empty()
+                && (trimmed.starts_with("http://") || trimmed.starts_with("https://"))
+        };
+        report.push(CheckResult {
+            name: "provider_base_url",
+            severity: Severity::Error,
+            passed: valid,
+            message: if valid {
+                format!("provider.base_url: {base_url}")
+            } else {
+                "provider.base_url must start with http:// or https://".to_owned()
+            },
+        });
+    }
+
+    if let Some(api_key_env) = &config.provider.api_key_env {
+        let valid = !api_key_env.trim().is_empty();
+        report.push(CheckResult {
+            name: "provider_api_key_env",
+            severity: Severity::Error,
+            passed: valid,
+            message: if valid {
+                format!("provider.api_key_env: {api_key_env}")
+            } else {
+                "provider.api_key_env must not be empty".to_owned()
+            },
+        });
+    }
+
+    let mut all_env_refs_valid = true;
+    for entry in &config.provider.api_keys {
+        if let Some(var_name) = entry.strip_prefix("env:") {
+            let is_set = std::env::var(var_name).is_ok();
+            if !is_set {
+                report.push(CheckResult {
+                    name: "api_key_present",
+                    severity: Severity::Error,
+                    passed: false,
+                    message: format!(
+                        "{var_name} environment variable not set (from api_keys entry '{entry}')"
+                    ),
+                });
+                all_env_refs_valid = false;
+            }
+        } else {
+            report.push(CheckResult {
+                name: "api_key_present",
+                severity: Severity::Error,
+                passed: false,
+                message: format!(
+                    "api_keys entry '{entry}' must use 'env:' prefix (e.g. env:ANTHROPIC_API_KEY)"
+                ),
+            });
+            all_env_refs_valid = false;
+        }
+    }
+
+    if !config.provider.api_keys.is_empty() {
+        if all_env_refs_valid {
+            report.push(CheckResult {
+                name: "api_key_present",
+                severity: Severity::Info,
+                passed: true,
+                message: format!(
+                    "API keys: {} configured (rotation enabled)",
+                    config.provider.api_keys.len()
+                ),
+            });
+        }
+        return;
+    }
+
+    let effective_env = config.provider.effective_api_key_env();
+    let key_required = matches!(provider_name.as_str(), "anthropic" | "openai")
+        || config.provider.api_key_env.is_some();
+
+    if let Some(env_name) = effective_env {
+        let api_key_ok = std::env::var(&env_name).is_ok();
+        report.push(CheckResult {
+            name: "api_key_present",
+            severity: if key_required {
+                Severity::Error
+            } else {
+                Severity::Info
+            },
+            passed: api_key_ok || !key_required,
+            message: if api_key_ok {
+                format!("{env_name}: present")
+            } else if key_required {
+                format!("{env_name} environment variable not set")
+            } else {
+                format!("{env_name} environment variable not set (optional)")
+            },
+        });
+    } else {
+        report.push(CheckResult {
+            name: "api_key_present",
+            severity: Severity::Info,
+            passed: true,
+            message: "provider authentication: not required".to_owned(),
+        });
+    }
+
+    let mut header_error = false;
+    for (name, value) in &config.provider.extra_headers {
+        let valid = !name.trim().is_empty()
+            && !name.contains(['\n', '\r'])
+            && !value.contains(['\n', '\r']);
+        if !valid {
+            report.push(CheckResult {
+                name: "provider_extra_headers",
+                severity: Severity::Error,
+                passed: false,
+                message: format!("provider.extra_headers contains invalid entry '{name}'"),
+            });
+            header_error = true;
+        }
+    }
+    if !header_error && !config.provider.extra_headers.is_empty() {
+        report.push(CheckResult {
+            name: "provider_extra_headers",
+            severity: Severity::Info,
+            passed: true,
+            message: format!(
+                "provider.extra_headers: {} configured",
+                config.provider.extra_headers.len()
+            ),
+        });
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1307,7 +1415,7 @@ mod tests {
         std::fs::write(
             &config_path,
             format!(
-                "[agent]\nid = \"test\"\nmodel = \"test-model\"\nworkspace = \"{}\"\n\n[provider]\nname = \"openai\"\n",
+                "[agent]\nid = \"test\"\nmodel = \"test-model\"\nworkspace = \"{}\"\n\n[provider]\nname = \"invalid-provider\"\n",
                 workspace.display()
             ),
         )
@@ -1320,7 +1428,7 @@ mod tests {
             .find(|r| r.name == "provider_known")
             .unwrap();
         assert!(!provider_check.passed);
-        assert!(provider_check.message.contains("openai"));
+        assert!(provider_check.message.contains("invalid-provider"));
     }
 
     #[test]
