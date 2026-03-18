@@ -557,7 +557,9 @@ impl Default for TurnConfig {
 /// The result of a completed turn.
 #[derive(Debug, Clone)]
 pub struct TurnResult {
-    /// New messages produced during this turn (assistant + tool results).
+    /// User-visible messages produced by this turn.
+    ///
+    /// This is typically just the terminal assistant reply, if any.
     pub messages: Vec<Message>,
     /// Cumulative token usage.
     pub usage: Usage,
@@ -570,7 +572,7 @@ pub struct TurnResult {
 pub enum TurnEvent {
     /// Partial text delta (for streaming to UI/channels).
     TextDelta(String),
-    /// A complete assistant message (may contain tool calls).
+    /// The terminal assistant message for the turn.
     AssistantMessage(Message),
     /// A tool execution started.
     ToolStart {

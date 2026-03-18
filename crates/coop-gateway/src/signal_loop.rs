@@ -198,15 +198,10 @@ async fn dispatch_signal_turn_background(
             TurnEvent::ToolResult { .. } | TurnEvent::Compacting => {}
             TurnEvent::AssistantMessage(ref msg) => {
                 if !verbose {
-                    // In quiet mode, keep only the text from the most recent
-                    // assistant message that has text. This replaces any
-                    // accumulated TextDelta content so intermediate "thinking
-                    // aloud" fragments from earlier iterations don't get
-                    // concatenated with the final reply.
-                    let msg_text = msg.text();
-                    if !msg_text.is_empty() {
-                        text = msg_text;
-                    }
+                    // AssistantMessage is emitted only for the terminal reply,
+                    // so replace any accumulated deltas with the exact final
+                    // assistant text, even when the final reply is empty.
+                    text = msg.text();
                 }
             }
             TurnEvent::Error(message) => {
@@ -303,10 +298,7 @@ async fn dispatch_signal_turn<C: Channel>(
             TurnEvent::ToolResult { .. } | TurnEvent::Compacting => {}
             TurnEvent::AssistantMessage(ref msg) => {
                 if !verbose {
-                    let msg_text = msg.text();
-                    if !msg_text.is_empty() {
-                        text = msg_text;
-                    }
+                    text = msg.text();
                 }
             }
             TurnEvent::Error(message) => {

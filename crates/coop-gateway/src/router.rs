@@ -450,13 +450,10 @@ impl MessageRouter {
                     text.push_str(&delta);
                 }
                 TurnEvent::AssistantMessage(ref message) => {
-                    // Only keep the final assistant response (the one without
-                    // tool requests). Intermediate "thinking" text before tool
-                    // calls is not useful for delivery.
-                    let msg_text = message.text();
-                    if !message.has_tool_requests() && !msg_text.is_empty() {
-                        text = msg_text;
-                    }
+                    // AssistantMessage is emitted only for the terminal reply,
+                    // so replace any accumulated deltas with exactly what the
+                    // turn completed with, even when that final reply is empty.
+                    text = message.text();
                 }
                 TurnEvent::Error(message) => {
                     text = message;
@@ -520,10 +517,7 @@ impl MessageRouter {
                     text.push_str(&delta);
                 }
                 TurnEvent::AssistantMessage(ref message) => {
-                    let msg_text = message.text();
-                    if !message.has_tool_requests() && !msg_text.is_empty() {
-                        text = msg_text;
-                    }
+                    text = message.text();
                 }
                 TurnEvent::Error(message) => {
                     turn_error = Some(message);

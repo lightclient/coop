@@ -570,17 +570,19 @@ impl Gateway {
                                 self.append_message(session_key, response.clone());
                                 new_messages.push(response.clone());
 
-                                let _ = event_tx
-                                    .send(TurnEvent::AssistantMessage(response.clone()))
-                                    .await;
+                                let has_tool_requests = response.has_tool_requests();
+                                if !has_tool_requests {
+                                    let _ = event_tx
+                                        .send(TurnEvent::AssistantMessage(response.clone()))
+                                        .await;
+                                }
 
                                 debug!(
-                                    has_tool_requests = response.has_tool_requests(),
+                                    has_tool_requests,
                                     response_text_len = response.text().len(),
                                     "iteration complete"
                                 );
 
-                                let has_tool_requests = response.has_tool_requests();
                                 break Ok((response, !has_tool_requests));
                             }
                             Err(err)
@@ -635,7 +637,7 @@ impl Gateway {
                         let _ = event_tx.send(TurnEvent::Error(user_msg)).await;
                         let _ = event_tx
                             .send(TurnEvent::Done(TurnResult {
-                                messages: new_messages,
+                                messages: Vec::new(),
                                 usage: total_usage,
                                 hit_limit: false,
                             }))
@@ -849,10 +851,11 @@ impl Gateway {
             self.record_turn_usage(session_key, &total_usage);
 
             let post_turn_messages = new_messages.clone();
+            let turn_result_messages = terminal_turn_messages(&new_messages);
 
             let _ = event_tx
                 .send(TurnEvent::Done(TurnResult {
-                    messages: new_messages,
+                    messages: turn_result_messages,
                     usage: total_usage,
                     hit_limit,
                 }))
@@ -1813,6 +1816,16 @@ impl Gateway {
     }
 }
 
+fn terminal_turn_messages(messages: &[Message]) -> Vec<Message> {
+    messages
+        .iter()
+        .rev()
+        .find(|message| message.role == Role::Assistant && !message.has_tool_requests())
+        .cloned()
+        .into_iter()
+        .collect()
+}
+
 fn build_cron_delivery_prompt_block(
     delivery_mode: CronDeliveryMode,
     channel: Option<&str>,
@@ -1973,11 +1986,12 @@ fn strip_provider_prefix(model: &str) -> &str {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use coop_core::fakes::{FakeProvider, SimpleExecutor};
+    use coop_core::fakes::{FakeProvider, FakeTool, SimpleExecutor};
     use coop_core::tools::DefaultExecutor;
     use coop_core::traits::ProviderStream;
     use coop_core::types::{Content, ModelInfo};
     use coop_core::{Provider, Tool, ToolContext, ToolDef, ToolOutput};
+    use std::collections::VecDeque;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -2921,6 +2935,67 @@ model = "test-model"
         }
     }
 
+    #[derive(Debug)]
+    struct SequencedProvider {
+        model: ModelInfo,
+        responses: Mutex<VecDeque<Message>>,
+    }
+
+    impl SequencedProvider {
+        fn new(responses: Vec<Message>) -> Self {
+            Self {
+                model: ModelInfo {
+                    name: "sequenced-model".into(),
+                    context_limit: 128_000,
+                },
+                responses: Mutex::new(VecDeque::from(responses)),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Provider for SequencedProvider {
+        fn name(&self) -> &'static str {
+            "sequenced"
+        }
+
+        fn model_info(&self) -> ModelInfo {
+            self.model.clone()
+        }
+
+        async fn complete(
+            &self,
+            _system: &[String],
+            _messages: &[Message],
+            _tools: &[ToolDef],
+        ) -> Result<(Message, Usage)> {
+            let response = self
+                .responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or_else(|| anyhow::anyhow!("script exhausted"))?;
+
+            Ok((
+                response,
+                Usage {
+                    input_tokens: Some(100),
+                    output_tokens: Some(50),
+                    ..Default::default()
+                },
+            ))
+        }
+
+        async fn stream(
+            &self,
+            _system: &[String],
+            _messages: &[Message],
+            _tools: &[ToolDef],
+        ) -> Result<ProviderStream> {
+            anyhow::bail!("not supported")
+        }
+    }
+
     /// Provider that sleeps before returning a tool request, allowing cancellation.
     #[derive(Debug)]
     struct SlowToolProvider {
@@ -3362,6 +3437,70 @@ model = "test-model"
             !has_second,
             "session should NOT have second turn's message (it was skipped)"
         );
+    }
+
+    #[tokio::test]
+    async fn assistant_message_event_only_emits_terminal_reply() {
+        let workspace = test_workspace();
+        let provider: Arc<dyn Provider> = Arc::new(SequencedProvider::new(vec![
+            Message::assistant()
+                .with_text("before tool")
+                .with_tool_request("tool_1", "fake_tool", serde_json::json!({})),
+            Message::assistant().with_text("after tool"),
+        ]));
+        let mut executor = SimpleExecutor::new();
+        executor.add(Box::new(FakeTool::new("fake_tool", "ok")));
+        let gateway = Arc::new(
+            Gateway::new(
+                shared_config(test_config()),
+                workspace.path().to_path_buf(),
+                registry(provider),
+                Arc::new(executor),
+                None,
+                None,
+            )
+            .unwrap(),
+        );
+
+        let session_key = gateway.default_session_key();
+        let (event_tx, mut event_rx) = mpsc::channel(256);
+
+        gateway
+            .run_turn_with_trust(
+                &session_key,
+                "hello",
+                TrustLevel::Full,
+                Some("alice"),
+                None,
+                event_tx,
+            )
+            .await
+            .unwrap();
+
+        let mut assistant_messages = Vec::new();
+        let mut done_messages = None;
+        while let Ok(event) = event_rx.try_recv() {
+            match event {
+                TurnEvent::AssistantMessage(message) => assistant_messages.push(message),
+                TurnEvent::Done(result) => done_messages = Some(result.messages),
+                _ => {}
+            }
+        }
+
+        assert_eq!(
+            assistant_messages.len(),
+            1,
+            "only the terminal assistant reply should be emitted as an AssistantMessage event"
+        );
+        assert_eq!(assistant_messages[0].text(), "after tool");
+
+        let done_messages = done_messages.expect("turn should emit Done");
+        assert_eq!(
+            done_messages.len(),
+            1,
+            "Done should only return the terminal assistant reply"
+        );
+        assert_eq!(done_messages[0].text(), "after tool");
     }
 
     #[tokio::test]
