@@ -59,6 +59,7 @@ fn provider_spec(config: &Config, model: &str) -> Result<ProviderSpec> {
         api_key_env: config.provider.effective_api_key_env(),
         base_url: config.provider.base_url.clone(),
         extra_headers: config.provider.extra_headers.clone(),
+        refresh_token: config.provider.refresh_token.clone(),
     })
 }
 

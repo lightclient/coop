@@ -451,6 +451,7 @@ mod tests {
             api_key_env: None,
             base_url: None,
             extra_headers: BTreeMap::new(),
+            refresh_token: None,
         })
         .unwrap();
 
@@ -467,6 +468,7 @@ mod tests {
             api_key_env: None,
             base_url: Some("http://localhost:8000/v1".into()),
             extra_headers: BTreeMap::new(),
+            refresh_token: None,
         })
         .unwrap();
 

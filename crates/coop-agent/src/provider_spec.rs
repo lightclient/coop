@@ -48,6 +48,7 @@ pub struct ProviderSpec {
     pub api_key_env: Option<String>,
     pub base_url: Option<String>,
     pub extra_headers: BTreeMap<String, String>,
+    pub refresh_token: Option<String>,
 }
 
 impl ProviderSpec {
@@ -59,6 +60,7 @@ impl ProviderSpec {
             api_key_env: None,
             base_url: None,
             extra_headers: BTreeMap::new(),
+            refresh_token: None,
         }
     }
 

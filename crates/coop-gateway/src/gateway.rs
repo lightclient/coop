@@ -3072,10 +3072,13 @@ model = "test-model"
             messages: &[Message],
             _tools: &[ToolDef],
         ) -> Result<(Message, Usage)> {
-            let mut call_count = self.call_count.lock().unwrap();
-            *call_count += 1;
+            let count = {
+                let mut call_count = self.call_count.lock().unwrap();
+                *call_count += 1;
+                *call_count
+            };
 
-            if *call_count == 1 {
+            if count == 1 {
                 return Ok((
                     Message::assistant().with_tool_request(
                         "tool_cancelled_turn",

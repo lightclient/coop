@@ -1705,6 +1705,7 @@ mod tests {
                 api_key_env: None,
                 base_url: None,
                 extra_headers: BTreeMap::new(),
+                refresh_token: None,
             },
             prompt: crate::config::PromptConfig::default(),
             memory: crate::config::MemoryConfig::default(),

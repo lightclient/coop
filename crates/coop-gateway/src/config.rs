@@ -204,6 +204,11 @@ pub(crate) struct ProviderConfig {
     pub base_url: Option<String>,
     #[serde(default)]
     pub extra_headers: BTreeMap<String, String>,
+    /// Optional refresh token for OpenAI Codex OAuth. Uses `env:` prefix
+    /// (e.g. `"env:OPENAI_REFRESH_TOKEN"`). When set alongside a Codex OAuth
+    /// access token, the provider auto-refreshes before expiry.
+    #[serde(default)]
+    pub refresh_token: Option<String>,
 }
 
 impl ProviderConfig {
@@ -1412,6 +1417,7 @@ X-Test = "1"
             api_key_env: Some("CUSTOM_OPENAI_KEY".to_owned()),
             base_url: None,
             extra_headers: BTreeMap::new(),
+            refresh_token: None,
         };
         assert_eq!(
             provider.effective_api_key_env().as_deref(),
@@ -1427,6 +1433,7 @@ X-Test = "1"
             api_key_env: None,
             base_url: None,
             extra_headers: BTreeMap::new(),
+            refresh_token: None,
         };
         assert_eq!(
             provider.effective_api_key_env().as_deref(),
