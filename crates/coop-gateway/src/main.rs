@@ -31,6 +31,7 @@ mod router;
 mod sandbox_executor;
 mod scheduler;
 mod service;
+mod session_search;
 mod session_store;
 #[cfg(feature = "signal")]
 mod signal_loop;
@@ -522,6 +523,8 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
         Arc::clone(&scheduler_notify),
     );
     let web_executor = web_tools::WebToolExecutor::new(&web_tool_config);
+    let session_search_executor =
+        session_search::SessionSearchExecutor::new(Arc::clone(&memory), Arc::clone(&provider));
 
     #[allow(unused_mut)]
     let mut executors: Vec<Box<dyn coop_core::ToolExecutor>> = vec![
@@ -530,6 +533,7 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
         Box::new(memory_executor),
         Box::new(reminder_executor),
         Box::new(web_executor),
+        Box::new(session_search_executor),
     ];
 
     #[cfg(feature = "signal")]
@@ -879,11 +883,14 @@ async fn cmd_chat(config_path: Option<&str>, user_flag: Option<&str>) -> Result<
     let config_executor = config_tool::ConfigToolExecutor::new(config_file.clone());
     let memory_executor = MemoryToolExecutor::new(Arc::clone(&memory));
     let web_executor = web_tools::WebToolExecutor::new(&config.tools.web);
+    let session_search_executor =
+        session_search::SessionSearchExecutor::new(Arc::clone(&memory), Arc::clone(&provider));
     let executor: Arc<dyn coop_core::ToolExecutor> = Arc::new(CompositeExecutor::new(vec![
         Box::new(default_executor),
         Box::new(config_executor),
         Box::new(memory_executor),
         Box::new(web_executor),
+        Box::new(session_search_executor),
     ]));
 
     let agent_id = config.agent.id.clone();

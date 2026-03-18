@@ -5,7 +5,7 @@ use coop_core::SessionKey;
 use crate::types::{
     MemoryMaintenanceConfig, MemoryMaintenanceReport, MemoryQuery, NewObservation, Observation,
     ObservationHistoryEntry, ObservationIndex, Person, ReconcileDecision, ReconcileRequest,
-    SessionSummary, WriteOutcome,
+    SessionMessage, SessionSearchHit, SessionSummary, WriteOutcome,
 };
 
 #[async_trait]
@@ -70,6 +70,33 @@ pub trait Memory: Send + Sync {
         &self,
         config: &MemoryMaintenanceConfig,
     ) -> Result<MemoryMaintenanceReport>;
+
+    /// Index a session message for full-text search.
+    async fn index_session_message(&self, _msg: &SessionMessage) -> Result<()> {
+        Ok(())
+    }
+
+    /// Search session transcripts via FTS5, grouped by session.
+    ///
+    /// `exclude_since` skips messages newer than the given timestamp,
+    /// preventing the current turn's messages from appearing in results.
+    async fn search_session_messages(
+        &self,
+        _query: &str,
+        _limit: usize,
+        _exclude_since: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<Vec<SessionSearchHit>> {
+        Ok(Vec::new())
+    }
+
+    /// Load messages for a session from the search index.
+    async fn load_session_messages(
+        &self,
+        _session_key: &str,
+        _limit: usize,
+    ) -> Result<Vec<SessionMessage>> {
+        Ok(Vec::new())
+    }
 
     /// Rebuild the vector search index from stored embeddings.
     /// Returns the number of entries rebuilt. Implementations without

@@ -50,6 +50,8 @@ mod memory_prompt_index;
 #[path = "../src/overflow_recovery.rs"]
 mod overflow_recovery;
 #[allow(dead_code)]
+#[path = "../src/session_search.rs"]
+mod session_search;
 #[path = "../src/session_store.rs"]
 mod session_store;
 

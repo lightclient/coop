@@ -40,6 +40,8 @@ mod overflow_recovery;
 #[path = "../src/provider_registry.rs"]
 mod provider_registry;
 #[allow(dead_code)]
+#[path = "../src/session_search.rs"]
+mod session_search;
 #[path = "../src/session_store.rs"]
 mod session_store;
 

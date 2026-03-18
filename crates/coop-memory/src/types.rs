@@ -298,6 +298,27 @@ pub fn trust_to_str(trust: TrustLevel) -> &'static str {
     }
 }
 
+/// A message indexed for session search.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionMessage {
+    pub session_key: String,
+    pub role: String,
+    pub content: String,
+    pub tool_name: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// A hit from session transcript search, grouped by session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionSearchHit {
+    pub session_key: String,
+    pub snippet: String,
+    pub message_count: usize,
+    pub earliest: DateTime<Utc>,
+    pub latest: DateTime<Utc>,
+    pub score: f64,
+}
+
 pub fn trust_from_str(value: &str) -> TrustLevel {
     match value {
         "owner" => TrustLevel::Owner,

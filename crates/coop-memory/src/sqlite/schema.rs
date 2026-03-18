@@ -169,6 +169,37 @@ pub(super) fn init_schema(conn: &Connection) -> Result<()> {
         CREATE UNIQUE INDEX IF NOT EXISTS idx_session_summaries_key
             ON session_summaries(agent_id, session_key);
 
+        CREATE TABLE IF NOT EXISTS session_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            agent_id TEXT NOT NULL,
+            session_key TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            tool_name TEXT,
+            created_at INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_session_msg_key
+            ON session_messages(agent_id, session_key);
+        CREATE INDEX IF NOT EXISTS idx_session_msg_created
+            ON session_messages(agent_id, created_at DESC);
+
+        CREATE VIRTUAL TABLE IF NOT EXISTS session_messages_fts USING fts5(
+            content,
+            content='session_messages',
+            content_rowid='id'
+        );
+
+        CREATE TRIGGER IF NOT EXISTS session_msg_ai AFTER INSERT ON session_messages BEGIN
+            INSERT INTO session_messages_fts(rowid, content)
+            VALUES (new.id, new.content);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS session_msg_ad AFTER DELETE ON session_messages BEGIN
+            INSERT INTO session_messages_fts(session_messages_fts, rowid, content)
+            VALUES ('delete', old.id, old.content);
+        END;
+
         CREATE TABLE IF NOT EXISTS people (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             agent_id TEXT NOT NULL,

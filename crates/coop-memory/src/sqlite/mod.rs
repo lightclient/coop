@@ -3,6 +3,7 @@ mod helpers;
 mod maintenance;
 mod query;
 mod schema;
+mod session_search;
 mod write_ops;
 
 #[cfg(test)]
@@ -20,8 +21,8 @@ use tracing::{debug, instrument, warn};
 use crate::traits::{EmbeddingProvider, Memory, Reconciler};
 use crate::types::{
     MemoryMaintenanceConfig, MemoryMaintenanceReport, MemoryQuery, NewObservation, Observation,
-    ObservationHistoryEntry, ObservationIndex, Person, SessionSummary, WriteOutcome,
-    embedding_text, normalize_file_path,
+    ObservationHistoryEntry, ObservationIndex, Person, SessionMessage, SessionSearchHit,
+    SessionSummary, WriteOutcome, embedding_text, normalize_file_path,
 };
 
 const DAY_MS: f32 = 86_400_000.0;
@@ -590,6 +591,30 @@ impl Memory for SqliteMemory {
         }
 
         Ok(result.report)
+    }
+
+    #[instrument(skip(self, msg), fields(session = %msg.session_key))]
+    async fn index_session_message(&self, msg: &SessionMessage) -> Result<()> {
+        self.index_session_message_sync(msg)
+    }
+
+    #[instrument(skip(self), fields(query_len = query.len(), limit))]
+    async fn search_session_messages(
+        &self,
+        query: &str,
+        limit: usize,
+        exclude_since: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<Vec<SessionSearchHit>> {
+        self.search_session_messages_sync(query, limit, exclude_since)
+    }
+
+    #[instrument(skip(self), fields(session_key, limit))]
+    async fn load_session_messages(
+        &self,
+        session_key: &str,
+        limit: usize,
+    ) -> Result<Vec<SessionMessage>> {
+        self.load_session_messages_sync(session_key, limit)
     }
 
     #[instrument(skip(self))]

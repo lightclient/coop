@@ -50,6 +50,10 @@ pub(crate) struct Gateway {
     group_history: Mutex<GroupHistoryBuffer>,
     /// Messages injected mid-turn, drained at the start of each iteration.
     pending_inbound: Mutex<HashMap<SessionKey, Vec<String>>>,
+    /// Per-session conversation epoch — incremented on `/new` so the
+    /// session search index can distinguish separate conversations
+    /// within the same DM channel.
+    session_epochs: Mutex<HashMap<SessionKey, u64>>,
 }
 
 /// Tracks cumulative token usage and context size for a session.
@@ -182,6 +186,7 @@ impl Gateway {
             session_turn_locks: Mutex::new(HashMap::new()),
             group_history: Mutex::new(GroupHistoryBuffer::new()),
             pending_inbound: Mutex::new(HashMap::new()),
+            session_epochs: Mutex::new(HashMap::new()),
         })
     }
 
@@ -854,6 +859,37 @@ impl Gateway {
                 .await;
 
             if let Some(memory) = &self.memory {
+                // Index turn messages for session search (FTS5).
+                // Use the epoch-tagged key so /new resets create distinct
+                // conversations in the search index.
+                let memory_for_index = Arc::clone(memory);
+                let index_session_key = self.search_index_key(session_key);
+                let index_messages = post_turn_messages.clone();
+                tokio::spawn(async move {
+                    let session_msgs = crate::session_search::messages_to_session_messages(
+                        &index_session_key,
+                        &index_messages,
+                    );
+                    let count = session_msgs.len();
+                    for msg in &session_msgs {
+                        if let Err(error) = memory_for_index.index_session_message(msg).await {
+                            warn!(
+                                session = %index_session_key,
+                                error = %error,
+                                "failed to index session message"
+                            );
+                            break;
+                        }
+                    }
+                    if count > 0 {
+                        debug!(
+                            session = %index_session_key,
+                            indexed_count = count,
+                            "session messages indexed for search"
+                        );
+                    }
+                });
+
                 let memory_for_summary = Arc::clone(memory);
                 let summary_session_key = session_key.clone();
                 tokio::spawn(async move {
@@ -985,6 +1021,46 @@ impl Gateway {
             .lock()
             .expect("session_usage mutex poisoned")
             .remove(session_key);
+
+        // Bump the conversation epoch so session search can distinguish
+        // conversations before vs after this /new reset.
+        let new_epoch = self.bump_session_epoch(session_key);
+        debug!(session = %session_key, epoch = new_epoch, "session epoch incremented");
+    }
+
+    /// Return a search-index key that includes the conversation epoch.
+    ///
+    /// For session key `agent:dm:signal:uuid` at epoch 2, returns
+    /// `agent:dm:signal:uuid#2`. Epoch 0 (first conversation) omits the
+    /// suffix for backward compatibility with messages indexed before the
+    /// epoch system existed.
+    pub(crate) fn search_index_key(&self, session_key: &SessionKey) -> String {
+        let epoch = self.session_epoch(session_key);
+        if epoch == 0 {
+            session_key.to_string()
+        } else {
+            format!("{session_key}#{epoch}")
+        }
+    }
+
+    fn session_epoch(&self, session_key: &SessionKey) -> u64 {
+        self.session_epochs
+            .lock()
+            .expect("session_epochs mutex poisoned")
+            .get(session_key)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    #[allow(clippy::significant_drop_tightening)]
+    fn bump_session_epoch(&self, session_key: &SessionKey) -> u64 {
+        let mut epochs = self
+            .session_epochs
+            .lock()
+            .expect("session_epochs mutex poisoned");
+        let epoch = epochs.entry(session_key.clone()).or_insert(0);
+        *epoch += 1;
+        *epoch
     }
 
     /// Cancel the active turn for a session, if one is running.
