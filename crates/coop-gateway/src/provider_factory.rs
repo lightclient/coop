@@ -6,6 +6,7 @@ use coop_agent::{ProviderKind, ProviderSpec, create_provider};
 use coop_core::Provider;
 
 use crate::config::Config;
+use crate::model_catalog::resolve_available_model;
 use crate::provider_registry::ProviderRegistry;
 
 pub(crate) fn create_primary_provider(config: &Config) -> Result<Arc<dyn Provider>> {
@@ -51,15 +52,23 @@ pub(crate) fn build_provider_registry(
 }
 
 fn provider_spec(config: &Config, model: &str) -> Result<ProviderSpec> {
-    let kind = ProviderKind::from_name(&config.provider.name)?;
+    let provider = if config.providers.is_empty() {
+        &config.provider
+    } else {
+        resolve_available_model(config, model)
+            .ok_or_else(|| anyhow::anyhow!("model '{model}' is not configured in any provider"))?
+            .provider
+    };
+
+    let kind = ProviderKind::from_name(&provider.name)?;
     Ok(ProviderSpec {
         kind,
         model: model.to_owned(),
-        api_keys: config.provider.api_keys.clone(),
-        api_key_env: config.provider.effective_api_key_env(),
-        base_url: config.provider.base_url.clone(),
-        extra_headers: config.provider.extra_headers.clone(),
-        refresh_token: config.provider.refresh_token.clone(),
+        api_keys: provider.api_keys.clone(),
+        api_key_env: provider.effective_api_key_env(),
+        base_url: provider.base_url.clone(),
+        extra_headers: provider.extra_headers.clone(),
+        refresh_token: provider.refresh_token.clone(),
     })
 }
 
@@ -103,6 +112,17 @@ mod tests {
         .expect("config parses");
         let provider = create_primary_provider(&config).expect("provider creates");
         assert_eq!(provider.name(), "ollama");
+    }
+
+    #[test]
+    fn create_primary_provider_from_multiple_providers() {
+        let config: Config = toml::from_str(
+            "[agent]\nid = \"test\"\nmodel = \"gpt-5-codex\"\nworkspace = \".\"\n\n[[providers]]\nname = \"anthropic\"\nmodels = [\"anthropic/claude-sonnet-4-20250514\"]\napi_key_env = \"HOME\"\n\n[[providers]]\nname = \"openai\"\nmodels = [\"gpt-5-codex\"]\napi_key_env = \"HOME\"\n",
+        )
+        .expect("config parses");
+
+        let provider = create_primary_provider(&config).expect("provider creates");
+        assert_eq!(provider.name(), "openai");
     }
 
     async fn spawn_openai_compatible_server() -> String {

@@ -45,6 +45,8 @@ pub(crate) struct Config {
     #[serde(default)]
     pub provider: ProviderConfig,
     #[serde(default)]
+    pub providers: Vec<ProviderConfig>,
+    #[serde(default)]
     pub prompt: PromptConfig,
     #[serde(default)]
     pub memory: MemoryConfig,
@@ -790,6 +792,14 @@ const fn default_memory_max_rows_per_run() -> usize {
 }
 
 impl Config {
+    pub(crate) fn main_provider_configs(&self) -> Vec<&ProviderConfig> {
+        if self.providers.is_empty() {
+            vec![&self.provider]
+        } else {
+            self.providers.iter().collect()
+        }
+    }
+
     /// Load config from a TOML file.
     pub(crate) fn load(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path)
@@ -1392,6 +1402,28 @@ models = ["llama3.2", "qwen2.5-coder:14b"]
         assert_eq!(config.provider.models.len(), 2);
         assert_eq!(config.provider.models[0], "llama3.2");
         assert_eq!(config.provider.models[1], "qwen2.5-coder:14b");
+    }
+
+    #[test]
+    fn parse_config_with_multiple_main_providers() {
+        let toml_str = r#"
+[agent]
+id = "test"
+model = "gpt-5-codex"
+
+[[providers]]
+name = "anthropic"
+models = ["anthropic/claude-sonnet-4-20250514"]
+
+[[providers]]
+name = "openai"
+models = ["gpt-5-codex", "gpt-5-mini"]
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.providers.len(), 2);
+        assert_eq!(config.providers[0].name, "anthropic");
+        assert_eq!(config.providers[1].name, "openai");
+        assert_eq!(config.providers[1].models[0], "gpt-5-codex");
     }
 
     #[test]

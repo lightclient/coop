@@ -27,7 +27,7 @@ Non-owner callers can still change non-security config: model, cron messages/sch
 Changes to these fields take effect immediately (hot-reload):
 
 - `agent.model` — switch models on the fly
-- `provider.models` — update the selectable model list
+- `provider.models` — update the selectable model list in legacy single-provider configs
 - `users` — add/remove users, change trust levels or match patterns
 - `cron` — add/remove/edit scheduled tasks
 - `memory.prompt_index` — toggle prompt index, change limits
@@ -38,7 +38,7 @@ These fields require a process restart:
 
 - `agent.id`
 - `agent.workspace`
-- `provider.name`
+- `providers` and provider backend settings (`name`, `api_keys`, `api_key_env`, `base_url`, `extra_headers`, `refresh_token`)
 - `channels` (all channel config)
 - `memory.db_path`
 - `memory.embedding` (provider, model, dimensions)
@@ -125,21 +125,39 @@ pids_limit = 512                   # max PIDs per command (default: 512)
 [channels.signal]
 db_path = "./db/signal.db"         # path to signal-cli database (restart-required)
 
-# Provider
-[provider]
-name = "anthropic"                 # restart-required; supported: anthropic, openai, openai-compatible, ollama
-# Optional list of user-selectable main models. When omitted, Coop falls back
-# to a small built-in catalog for supported hosted providers. Add custom model
-# IDs here for local or openai-compatible backends.
+# Providers — use [[providers]] to let /model switch across backends.
+# When a provider entry omits models, Coop falls back to a small built-in
+# catalog for anthropic, openai, and ollama. openai-compatible backends should
+# usually set models explicitly.
+
+[[providers]]
+name = "anthropic"                 # supported: anthropic, openai, openai-compatible, ollama
 # models = [
 #   "anthropic/claude-sonnet-4-20250514",
 #   "anthropic/claude-opus-4-0-20250514",
 #   "anthropic/claude-haiku-3-5-20241022",
 # ]
-# Multiple API keys for automatic rotation on rate limits (optional).
-# Each entry is an env: reference. Keys rotate proactively at 90%
-# utilization and reactively on 429 errors. Omit for single-key mode.
 # api_keys = ["env:ANTHROPIC_API_KEY", "env:ANTHROPIC_API_KEY_2", "env:ANTHROPIC_API_KEY_3"]
+
+[[providers]]
+name = "openai"
+# models = ["gpt-5-codex", "gpt-5-mini", "gpt-4o-mini"]
+
+[[providers]]
+name = "ollama"
+# models = ["llama3.2", "qwen2.5-coder:14b"]
+
+# OpenAI-compatible example:
+# [[providers]]
+# name = "openai-compatible"
+# base_url = "https://your-endpoint/v1"
+# api_key_env = "OPENAI_COMPAT_API_KEY"
+# models = ["meta-llama/Llama-3.3-70B-Instruct"]
+
+# Legacy single-provider form is still supported:
+# [provider]
+# name = "anthropic"
+# models = ["anthropic/claude-sonnet-4-20250514"]
 
 # Prompt file configuration
 # Controls which workspace files are loaded into the system prompt.
@@ -247,8 +265,9 @@ message = "run cleanup"
 ### Validation constraints
 
 - `agent.id` and `agent.model` must be non-empty
-- `provider.name` must be one of `anthropic`, `openai`, `openai-compatible`, `ollama`
-- `provider.models` must not contain empty entries; duplicate model IDs warn
+- `provider.name` / `providers[*].name` must be one of `anthropic`, `openai`, `openai-compatible`, `ollama`
+- `provider.models` / `providers[*].models` must not contain empty entries
+- In multi-provider configs, model IDs must be unique across providers and `agent.model` must belong to one configured provider catalog
 - Workspace directory must exist and contain at least SOUL.md
 - Memory prompt_index: limit > 0, max_tokens > 0, recent_days in 1..=30
 - Memory auto_capture: min_turn_messages >= 1
@@ -261,7 +280,7 @@ message = "run cleanup"
 - Cron `delivery` must be `always` or `as_needed`
 - Cron `review_prompt` must be non-empty if set
 - Cron with user but no `deliver`: warns if user has no non-terminal match patterns (cron will have no delivery targets)
-- API keys: if `provider.api_keys` is set, each entry must use `env:` prefix and the referenced env var must be set. Otherwise, `ANTHROPIC_API_KEY` must be set. Plus embedding provider key if configured
+- API keys: if `provider.api_keys` or `providers[*].api_keys` is set, each entry must use `env:` prefix and the referenced env var must be set. Otherwise, the provider's default env var must be set when required. Plus embedding provider key if configured
 - Sandbox: memory must be a valid size (e.g. `2g`, `512m`), pids_limit > 0
 - Sandbox: at most one user with `trust = "owner"`; warns if sandbox enabled but no owner configured
 - Prompt files: paths must be relative, no `..` or absolute paths, no duplicates

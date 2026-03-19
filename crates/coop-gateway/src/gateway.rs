@@ -3928,6 +3928,54 @@ models = ["anthropic/claude-opus-4-0-20250514"]
     }
 
     #[tokio::test]
+    async fn set_user_model_switches_across_configured_providers() {
+        let workspace = test_workspace();
+        let primary: Arc<dyn Provider> = Arc::new(FakeProvider::with_model(
+            "hello",
+            "anthropic/claude-sonnet-4-20250514",
+            200_000,
+        ));
+        let mut providers = registry(primary);
+        providers.register(
+            "gpt-5-codex".to_owned(),
+            Arc::new(FakeProvider::with_model("hello", "gpt-5-codex", 128_000)),
+        );
+        let config: Config = toml::from_str(
+            r#"
+[agent]
+id = "coop"
+model = "anthropic/claude-sonnet-4-20250514"
+
+[[providers]]
+name = "anthropic"
+models = ["anthropic/claude-sonnet-4-20250514"]
+
+[[providers]]
+name = "openai"
+models = ["gpt-5-codex"]
+"#,
+        )
+        .unwrap();
+        let gateway = Gateway::new(
+            shared_config(config),
+            workspace.path().to_path_buf(),
+            providers,
+            Arc::new(DefaultExecutor::new()),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let selection = gateway
+            .set_user_model(Some("alice"), "gpt-5-codex")
+            .unwrap();
+
+        assert_eq!(selection.model, "gpt-5-codex");
+        assert_eq!(selection.context_limit, 128_000);
+        assert_eq!(gateway.model_name_for_user(Some("alice")), "gpt-5-codex");
+    }
+
+    #[tokio::test]
     async fn set_user_model_clearing_default_removes_override() {
         let workspace = test_workspace();
         let primary: Arc<dyn Provider> =

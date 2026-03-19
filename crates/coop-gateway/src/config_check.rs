@@ -4,8 +4,10 @@ use std::path::Path;
 use coop_core::TrustLevel;
 use coop_core::prompt::{PromptBuilder, WorkspaceIndex};
 
-use crate::config::Config;
-use crate::model_catalog::normalize_model_key;
+use crate::config::{Config, ProviderConfig};
+use crate::model_catalog::{
+    normalize_model_key, provider_model_candidates, resolve_default_main_model,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Severity {
@@ -193,26 +195,6 @@ pub(crate) fn validate_config(config_path: &Path, config_dir: &Path) -> CheckRep
         }
     };
 
-    // 4. provider_known
-    let provider_name = config.provider.normalized_name();
-    let provider_ok = matches!(
-        provider_name.as_str(),
-        "anthropic" | "openai" | "openai-compatible" | "ollama"
-    );
-    report.push(CheckResult {
-        name: "provider_known",
-        severity: Severity::Error,
-        passed: provider_ok,
-        message: if provider_ok {
-            format!("provider: {}", config.provider.name)
-        } else {
-            format!(
-                "unknown provider '{}' (supported: anthropic, openai, openai-compatible, ollama)",
-                config.provider.name
-            )
-        },
-    });
-
     check_provider_config(&mut report, &config);
 
     // 6. memory config
@@ -278,10 +260,92 @@ pub(crate) fn validate_config(config_path: &Path, config_dir: &Path) -> CheckRep
 
 #[allow(clippy::too_many_lines)]
 fn check_provider_config(report: &mut CheckReport, config: &Config) {
-    let provider_name = config.provider.normalized_name();
+    if config.providers.is_empty() {
+        check_provider_entry(report, &config.provider, "provider");
+        return;
+    }
+
+    report.push(CheckResult {
+        name: "providers_configured",
+        severity: Severity::Info,
+        passed: true,
+        message: format!("providers: {} configured", config.providers.len()),
+    });
+
+    for (index, provider) in config.providers.iter().enumerate() {
+        check_provider_entry(report, provider, &format!("providers[{index}]"));
+    }
+
+    let mut seen = std::collections::HashMap::new();
+    let mut duplicates = Vec::new();
+    for (index, provider) in config.providers.iter().enumerate() {
+        for model in provider_model_candidates(provider) {
+            let key = normalize_model_key(&model.id);
+            if key.is_empty() {
+                continue;
+            }
+            let current = format!("providers[{index}] -> {}", model.id);
+            if let Some(previous) = seen.insert(key, current.clone()) {
+                duplicates.push(format!("{previous}, {current}"));
+            }
+        }
+    }
+    report.push(CheckResult {
+        name: "providers_models_unique",
+        severity: Severity::Error,
+        passed: duplicates.is_empty(),
+        message: if duplicates.is_empty() {
+            "providers: all model ids are unique across providers".to_owned()
+        } else {
+            format!(
+                "duplicate model ids across providers: {}",
+                duplicates.join("; ")
+            )
+        },
+    });
+
+    let default_model = resolve_default_main_model(config);
+    report.push(CheckResult {
+        name: "agent_model_provider",
+        severity: Severity::Error,
+        passed: default_model.is_some(),
+        message: if let Some(resolved) = default_model {
+            format!(
+                "agent.model '{}' resolved via provider '{}'",
+                resolved.model.id, resolved.provider.name
+            )
+        } else {
+            format!(
+                "agent.model '{}' must appear in one configured provider's model list or built-in catalog",
+                config.agent.model
+            )
+        },
+    });
+}
+
+#[allow(clippy::too_many_lines)]
+fn check_provider_entry(report: &mut CheckReport, provider: &ProviderConfig, path: &str) {
+    let provider_name = provider.normalized_name();
+    let provider_ok = matches!(
+        provider_name.as_str(),
+        "anthropic" | "openai" | "openai-compatible" | "ollama"
+    );
+    report.push(CheckResult {
+        name: "provider_known",
+        severity: Severity::Error,
+        passed: provider_ok,
+        message: if provider_ok {
+            format!("{path}.name: {}", provider.name)
+        } else {
+            format!(
+                "{path}.name '{}' is unsupported (supported: anthropic, openai, openai-compatible, ollama)",
+                provider.name
+            )
+        },
+    });
 
     if provider_name == "openai-compatible" {
-        let base_url_ok = config.provider.base_url.as_ref().is_some_and(|value| {
+        let base_url_ok = provider.base_url.as_ref().is_some_and(|value| {
             let trimmed = value.trim();
             !trimmed.is_empty()
                 && (trimmed.starts_with("http://") || trimmed.starts_with("https://"))
@@ -292,15 +356,14 @@ fn check_provider_config(report: &mut CheckReport, config: &Config) {
             passed: base_url_ok,
             message: if base_url_ok {
                 format!(
-                    "provider.base_url: {}",
-                    config.provider.base_url.as_deref().unwrap_or_default()
+                    "{path}.base_url: {}",
+                    provider.base_url.as_deref().unwrap_or_default()
                 )
             } else {
-                "openai-compatible provider requires provider.base_url with http:// or https://"
-                    .to_owned()
+                format!("{path} requires base_url with http:// or https:// for openai-compatible")
             },
         });
-    } else if let Some(base_url) = &config.provider.base_url {
+    } else if let Some(base_url) = &provider.base_url {
         let valid = {
             let trimmed = base_url.trim();
             !trimmed.is_empty()
@@ -311,52 +374,45 @@ fn check_provider_config(report: &mut CheckReport, config: &Config) {
             severity: Severity::Error,
             passed: valid,
             message: if valid {
-                format!("provider.base_url: {base_url}")
+                format!("{path}.base_url: {base_url}")
             } else {
-                "provider.base_url must start with http:// or https://".to_owned()
+                format!("{path}.base_url must start with http:// or https://")
             },
         });
     }
 
-    if let Some(api_key_env) = &config.provider.api_key_env {
+    if let Some(api_key_env) = &provider.api_key_env {
         let valid = !api_key_env.trim().is_empty();
         report.push(CheckResult {
             name: "provider_api_key_env",
             severity: Severity::Error,
             passed: valid,
             message: if valid {
-                format!("provider.api_key_env: {api_key_env}")
+                format!("{path}.api_key_env: {api_key_env}")
             } else {
-                "provider.api_key_env must not be empty".to_owned()
+                format!("{path}.api_key_env must not be empty")
             },
         });
     }
 
-    let empty_models = config
-        .provider
-        .models
-        .iter()
-        .any(|model| model.trim().is_empty());
+    let empty_models = provider.models.iter().any(|model| model.trim().is_empty());
     report.push(CheckResult {
         name: "provider_models_valid",
         severity: Severity::Error,
         passed: !empty_models,
         message: if empty_models {
-            "provider.models must not contain empty entries".to_owned()
-        } else if config.provider.models.is_empty() {
-            "provider.models: using built-in defaults".to_owned()
+            format!("{path}.models must not contain empty entries")
+        } else if provider.models.is_empty() {
+            format!("{path}.models: using built-in defaults")
         } else {
-            format!(
-                "provider.models: {} configured",
-                config.provider.models.len()
-            )
+            format!("{path}.models: {} configured", provider.models.len())
         },
     });
 
-    if !config.provider.models.is_empty() {
+    if !provider.models.is_empty() {
         let mut seen = HashSet::new();
         let mut duplicates = Vec::new();
-        for model in &config.provider.models {
+        for model in &provider.models {
             let key = normalize_model_key(model);
             if !key.is_empty() && !seen.insert(key) {
                 duplicates.push(model.clone());
@@ -367,10 +423,10 @@ fn check_provider_config(report: &mut CheckReport, config: &Config) {
             severity: Severity::Warning,
             passed: duplicates.is_empty(),
             message: if duplicates.is_empty() {
-                "provider.models: no duplicates".to_owned()
+                format!("{path}.models: no duplicates")
             } else {
                 format!(
-                    "provider.models contains duplicates: {}",
+                    "{path}.models contains duplicates: {}",
                     duplicates.join(", ")
                 )
             },
@@ -378,7 +434,7 @@ fn check_provider_config(report: &mut CheckReport, config: &Config) {
     }
 
     let mut all_env_refs_valid = true;
-    for entry in &config.provider.api_keys {
+    for entry in &provider.api_keys {
         if let Some(var_name) = entry.strip_prefix("env:") {
             let is_set = std::env::var(var_name).is_ok();
             if !is_set {
@@ -387,7 +443,7 @@ fn check_provider_config(report: &mut CheckReport, config: &Config) {
                     severity: Severity::Error,
                     passed: false,
                     message: format!(
-                        "{var_name} environment variable not set (from api_keys entry '{entry}')"
+                        "{var_name} environment variable not set (from {path}.api_keys entry '{entry}')"
                     ),
                 });
                 all_env_refs_valid = false;
@@ -398,31 +454,31 @@ fn check_provider_config(report: &mut CheckReport, config: &Config) {
                 severity: Severity::Error,
                 passed: false,
                 message: format!(
-                    "api_keys entry '{entry}' must use 'env:' prefix (e.g. env:ANTHROPIC_API_KEY)"
+                    "{path}.api_keys entry '{entry}' must use 'env:' prefix (e.g. env:ANTHROPIC_API_KEY)"
                 ),
             });
             all_env_refs_valid = false;
         }
     }
 
-    if !config.provider.api_keys.is_empty() {
+    if !provider.api_keys.is_empty() {
         if all_env_refs_valid {
             report.push(CheckResult {
                 name: "api_key_present",
                 severity: Severity::Info,
                 passed: true,
                 message: format!(
-                    "API keys: {} configured (rotation enabled)",
-                    config.provider.api_keys.len()
+                    "{path}: {} API keys configured (rotation enabled)",
+                    provider.api_keys.len()
                 ),
             });
         }
         return;
     }
 
-    let effective_env = config.provider.effective_api_key_env();
-    let key_required = matches!(provider_name.as_str(), "anthropic" | "openai")
-        || config.provider.api_key_env.is_some();
+    let effective_env = provider.effective_api_key_env();
+    let key_required =
+        matches!(provider_name.as_str(), "anthropic" | "openai") || provider.api_key_env.is_some();
 
     if let Some(env_name) = effective_env {
         let api_key_ok = std::env::var(&env_name).is_ok();
@@ -435,11 +491,11 @@ fn check_provider_config(report: &mut CheckReport, config: &Config) {
             },
             passed: api_key_ok || !key_required,
             message: if api_key_ok {
-                format!("{env_name}: present")
+                format!("{path}: {env_name} present")
             } else if key_required {
-                format!("{env_name} environment variable not set")
+                format!("{path}: {env_name} environment variable not set")
             } else {
-                format!("{env_name} environment variable not set (optional)")
+                format!("{path}: {env_name} environment variable not set (optional)")
             },
         });
     } else {
@@ -447,12 +503,12 @@ fn check_provider_config(report: &mut CheckReport, config: &Config) {
             name: "api_key_present",
             severity: Severity::Info,
             passed: true,
-            message: "provider authentication: not required".to_owned(),
+            message: format!("{path}: provider authentication not required"),
         });
     }
 
     let mut header_error = false;
-    for (name, value) in &config.provider.extra_headers {
+    for (name, value) in &provider.extra_headers {
         let valid = !name.trim().is_empty()
             && !name.contains(['\n', '\r'])
             && !value.contains(['\n', '\r']);
@@ -461,19 +517,19 @@ fn check_provider_config(report: &mut CheckReport, config: &Config) {
                 name: "provider_extra_headers",
                 severity: Severity::Error,
                 passed: false,
-                message: format!("provider.extra_headers contains invalid entry '{name}'"),
+                message: format!("{path}.extra_headers contains invalid entry '{name}'"),
             });
             header_error = true;
         }
     }
-    if !header_error && !config.provider.extra_headers.is_empty() {
+    if !header_error && !provider.extra_headers.is_empty() {
         report.push(CheckResult {
             name: "provider_extra_headers",
             severity: Severity::Info,
             passed: true,
             message: format!(
-                "provider.extra_headers: {} configured",
-                config.provider.extra_headers.len()
+                "{path}.extra_headers: {} configured",
+                provider.extra_headers.len()
             ),
         });
     }
@@ -1478,6 +1534,58 @@ mod tests {
     }
 
     #[test]
+    fn test_multiple_providers_require_agent_model_to_match_one_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        let config_path = dir.path().join("coop.toml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "[agent]\nid = \"test\"\nmodel = \"missing-model\"\nworkspace = \"{}\"\n\n[[providers]]\nname = \"anthropic\"\nmodels = [\"anthropic/claude-sonnet-4-20250514\"]\n\n[[providers]]\nname = \"openai\"\nmodels = [\"gpt-5-codex\"]\n",
+                workspace.display()
+            ),
+        )
+        .unwrap();
+
+        let report = validate_config(&config_path, dir.path());
+        let model_check = report
+            .results
+            .iter()
+            .find(|r| r.name == "agent_model_provider")
+            .unwrap();
+        assert!(!model_check.passed);
+        assert!(model_check.message.contains("missing-model"));
+    }
+
+    #[test]
+    fn test_multiple_providers_reject_duplicate_model_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        let config_path = dir.path().join("coop.toml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "[agent]\nid = \"test\"\nmodel = \"gpt-5-codex\"\nworkspace = \"{}\"\n\n[[providers]]\nname = \"openai\"\nmodels = [\"gpt-5-codex\"]\n\n[[providers]]\nname = \"openai-compatible\"\nbase_url = \"http://localhost:8000/v1\"\nmodels = [\"gpt-5-codex\"]\napi_key_env = \"HOME\"\n",
+                workspace.display()
+            ),
+        )
+        .unwrap();
+
+        let report = validate_config(&config_path, dir.path());
+        let duplicate_check = report
+            .results
+            .iter()
+            .find(|r| r.name == "providers_models_unique")
+            .unwrap();
+        assert!(!duplicate_check.passed);
+        assert!(duplicate_check.message.contains("gpt-5-codex"));
+    }
+
+    #[test]
     fn test_invalid_memory_embedding() {
         let dir = tempfile::tempdir().unwrap();
         let workspace = dir.path().join("workspace");
@@ -2147,7 +2255,7 @@ mod tests {
             .iter()
             .find(|r| r.name == "api_key_present" && r.passed);
         assert!(check.is_some(), "should pass when env var is set");
-        assert!(check.unwrap().message.contains("1 configured"));
+        assert!(check.unwrap().message.contains("1 API keys configured"));
         assert!(check.unwrap().message.contains("rotation enabled"));
     }
 

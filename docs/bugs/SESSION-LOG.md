@@ -93,3 +93,38 @@ This file is append-only. Never delete previous sessions.
 - The bundled `send-and-verify.sh` script reported `FAIL` for every scenario because BUG-006 injects `ERROR` traces on otherwise successful DM sends.
 - Anthropic completion verification could not be completed because the locally stored Claude OAuth token is expired; this was an environment issue, not a slash-command routing issue.
 - OpenAI Codex OAuth refresh worked: `gpt-5-codex` completed successfully after the model was switched back from the unsupported `gpt-5-mini`.
+
+---
+
+## 2026-03-19 Session
+
+**Duration:** ~35 minutes
+**Bugs found:** 0 new
+**Bugs fixed:** 0 (2 previously open)
+
+### Test Plan Results
+
+| # | Scenario | Result |
+|---|----------|--------|
+| — | Multi-provider `/models` | ✅ PASS — one config listed Anthropic, OpenAI, and Ollama models together |
+| — | `/model gpt-5-codex` | ✅ PASS — switched from Anthropic default to OpenAI provider |
+| — | `/status` after OpenAI switch | ✅ PASS — status showed `gpt-5-codex` |
+| — | OpenAI follow-up turn after cross-provider switch | ✅ PASS — replied `It equals four.` |
+| — | `/model llama3.2` | ✅ PASS — switched from OpenAI to Ollama provider |
+| — | `/status` after Ollama switch | ✅ PASS — status showed `llama3.2` |
+| — | `/model anthropic/claude-sonnet-4-20250514` | ✅ PASS — switched back to Anthropic provider |
+| — | `/status` after Anthropic switch | ✅ PASS — status showed `anthropic/claude-sonnet-4-20250514` |
+
+### Bugs
+
+| Bug | Status | Summary |
+|-----|--------|---------|
+| BUG-005 | Open | OpenAI built-in catalog advertises `gpt-5-mini` for Codex OAuth even though the backend rejects it |
+| BUG-006 | Open | Signal DM sends emit `could not create sync message from a direct message` errors despite successful replies |
+
+### Notes
+
+- This session verified the corrected scope: one `coop.toml` with multiple `[[providers]]` entries and `/model` switching across provider boundaries.
+- The multi-provider Signal e2e runs still show script-level `FAIL` because BUG-006 emits error-level trace noise on successful DM sends.
+- A real provider turn succeeded after switching providers at runtime (`anthropic` default → `/model gpt-5-codex` → reply `It equals four.`).
+- Local Ollama completion was not exercised because no backend is listening on `127.0.0.1:11434`, but command-level provider switching and status reporting worked.

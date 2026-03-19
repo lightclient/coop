@@ -891,14 +891,22 @@ where
     capture_keys.insert("ANTHROPIC_API_KEY".to_owned());
     capture_keys.insert("OPENAI_API_KEY".to_owned());
 
-    for key_ref in &config.provider.api_keys {
-        if let Some(variable) = key_ref.strip_prefix("env:") {
+    for provider in config.main_provider_configs() {
+        for key_ref in &provider.api_keys {
+            if let Some(variable) = key_ref.strip_prefix("env:") {
+                capture_keys.insert(variable.to_owned());
+            }
+        }
+
+        if let Some(env_name) = provider.effective_api_key_env() {
+            capture_keys.insert(env_name);
+        }
+
+        if let Some(refresh_token) = &provider.refresh_token
+            && let Some(variable) = refresh_token.strip_prefix("env:")
+        {
             capture_keys.insert(variable.to_owned());
         }
-    }
-
-    if let Some(env_name) = config.provider.effective_api_key_env() {
-        capture_keys.insert(env_name);
     }
 
     if let Some(embedding) = &config.memory.embedding
@@ -1708,6 +1716,7 @@ mod tests {
                 extra_headers: BTreeMap::new(),
                 refresh_token: None,
             },
+            providers: Vec::new(),
             prompt: crate::config::PromptConfig::default(),
             memory: crate::config::MemoryConfig::default(),
             tools: crate::config::ToolsConfig::default(),

@@ -146,8 +146,11 @@ fn check_restart_only_fields(current: &Config, new: &Config) -> Option<Vec<&'sta
     if new.agent.workspace != current.agent.workspace {
         reasons.push("agent.workspace");
     }
-    if new.provider.name != current.provider.name {
-        reasons.push("provider.name");
+    if new.providers != current.providers {
+        reasons.push("providers");
+    }
+    if provider_backend_settings_changed(&current.provider, &new.provider) {
+        reasons.push("provider");
     }
     if new.channels != current.channels {
         reasons.push("channels");
@@ -194,6 +197,18 @@ fn diff_sections(current: &Config, new: &Config) -> Vec<&'static str> {
         changed.push("cron");
     }
     changed
+}
+
+fn provider_backend_settings_changed(
+    current: &crate::config::ProviderConfig,
+    new: &crate::config::ProviderConfig,
+) -> bool {
+    current.name != new.name
+        || current.api_keys != new.api_keys
+        || current.api_key_env != new.api_key_env
+        || current.base_url != new.base_url
+        || current.extra_headers != new.extra_headers
+        || current.refresh_token != new.refresh_token
 }
 
 #[allow(clippy::unwrap_used)]
@@ -248,6 +263,33 @@ mod tests {
         let b: Config = toml::from_str(&minimal_toml("a", "m", "/ws2")).unwrap();
         let reasons = check_restart_only_fields(&a, &b).unwrap();
         assert!(reasons.contains(&"agent.workspace"));
+    }
+
+    #[test]
+    fn check_restart_only_rejects_provider_backend_change() {
+        let ws = "/tmp/ws";
+        let mut a: Config = toml::from_str(&minimal_toml("a", "m", ws)).unwrap();
+        let mut b: Config = toml::from_str(&minimal_toml("a", "m", ws)).unwrap();
+        b.provider.base_url = Some("http://localhost:8000/v1".to_owned());
+        let reasons = check_restart_only_fields(&a, &b).unwrap();
+        assert!(reasons.contains(&"provider"));
+
+        a.provider.base_url = Some("http://localhost:8000/v1".to_owned());
+        assert!(check_restart_only_fields(&a, &b).is_none());
+    }
+
+    #[test]
+    fn check_restart_only_rejects_multiple_provider_change() {
+        let a: Config = toml::from_str(
+            "[agent]\nid = \"a\"\nmodel = \"gpt-5-codex\"\n\n[[providers]]\nname = \"openai\"\nmodels = [\"gpt-5-codex\"]\n",
+        )
+        .unwrap();
+        let b: Config = toml::from_str(
+            "[agent]\nid = \"a\"\nmodel = \"gpt-5-codex\"\n\n[[providers]]\nname = \"openai\"\nmodels = [\"gpt-5-codex\"]\n\n[[providers]]\nname = \"anthropic\"\nmodels = [\"anthropic/claude-sonnet-4-20250514\"]\n",
+        )
+        .unwrap();
+        let reasons = check_restart_only_fields(&a, &b).unwrap();
+        assert!(reasons.contains(&"providers"));
     }
 
     #[test]

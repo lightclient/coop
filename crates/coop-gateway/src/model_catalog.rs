@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use crate::config::Config;
+use crate::config::{Config, ProviderConfig};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ModelCatalogEntry {
@@ -12,6 +12,12 @@ pub(crate) struct ModelCatalogEntry {
 pub(crate) struct AvailableModel {
     pub id: String,
     pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ResolvedAvailableModel<'a> {
+    pub provider: &'a ProviderConfig,
+    pub model: AvailableModel,
 }
 
 pub(crate) const ANTHROPIC_MODELS: &[ModelCatalogEntry] = &[
@@ -70,8 +76,8 @@ pub(crate) fn builtin_models(provider_name: &str) -> &'static [ModelCatalogEntry
     }
 }
 
-pub(crate) fn available_main_models(config: &Config) -> Vec<AvailableModel> {
-    let builtins = builtin_models(&config.provider.normalized_name());
+pub(crate) fn provider_model_candidates(provider: &ProviderConfig) -> Vec<AvailableModel> {
+    let builtins = builtin_models(&provider.normalized_name());
     let mut available = Vec::new();
     let mut seen = HashSet::new();
 
@@ -88,17 +94,12 @@ pub(crate) fn available_main_models(config: &Config) -> Vec<AvailableModel> {
         }
     };
 
-    push(
-        &config.agent.model,
-        builtin_description(builtins, &config.agent.model),
-    );
-
-    if config.provider.models.is_empty() {
+    if provider.models.is_empty() {
         for entry in builtins {
             push(entry.id, Some(entry.description));
         }
     } else {
-        for model in &config.provider.models {
+        for model in &provider.models {
             push(model, builtin_description(builtins, model));
         }
     }
@@ -106,11 +107,84 @@ pub(crate) fn available_main_models(config: &Config) -> Vec<AvailableModel> {
     available
 }
 
+pub(crate) fn available_main_models(config: &Config) -> Vec<AvailableModel> {
+    let mut available = Vec::new();
+    let mut seen = HashSet::new();
+
+    if let Some(resolved) = resolve_default_main_model(config) {
+        let key = normalize_model_key(&resolved.model.id);
+        seen.insert(key);
+        available.push(resolved.model);
+    }
+
+    for provider in config.main_provider_configs() {
+        for model in provider_model_candidates(provider) {
+            let key = normalize_model_key(&model.id);
+            if seen.insert(key) {
+                available.push(model);
+            }
+        }
+    }
+
+    available
+}
+
 pub(crate) fn find_available_model(config: &Config, requested: &str) -> Option<AvailableModel> {
+    resolve_available_model(config, requested).map(|resolved| resolved.model)
+}
+
+pub(crate) fn resolve_available_model<'a>(
+    config: &'a Config,
+    requested: &str,
+) -> Option<ResolvedAvailableModel<'a>> {
     let requested_key = normalize_model_key(requested);
-    available_main_models(config)
-        .into_iter()
-        .find(|model| normalize_model_key(&model.id) == requested_key)
+    let mut seen = HashSet::new();
+
+    if let Some(resolved) = resolve_default_main_model(config) {
+        let key = normalize_model_key(&resolved.model.id);
+        if seen.insert(key.clone()) && key == requested_key {
+            return Some(resolved);
+        }
+    }
+
+    for provider in config.main_provider_configs() {
+        for model in provider_model_candidates(provider) {
+            let key = normalize_model_key(&model.id);
+            if !seen.insert(key.clone()) {
+                continue;
+            }
+            if key == requested_key {
+                return Some(ResolvedAvailableModel { provider, model });
+            }
+        }
+    }
+
+    None
+}
+
+pub(crate) fn resolve_default_main_model(config: &Config) -> Option<ResolvedAvailableModel<'_>> {
+    if config.providers.is_empty() {
+        let builtins = builtin_models(&config.provider.normalized_name());
+        return Some(ResolvedAvailableModel {
+            provider: &config.provider,
+            model: AvailableModel {
+                id: config.agent.model.clone(),
+                description: builtin_description(builtins, &config.agent.model).map(str::to_owned),
+            },
+        });
+    }
+
+    let default_key = normalize_model_key(&config.agent.model);
+    for provider in &config.providers {
+        if let Some(model) = provider_model_candidates(provider)
+            .into_iter()
+            .find(|model| normalize_model_key(&model.id) == default_key)
+        {
+            return Some(ResolvedAvailableModel { provider, model });
+        }
+    }
+
+    None
 }
 
 fn builtin_description<'a>(builtins: &'a [ModelCatalogEntry], model: &str) -> Option<&'a str> {
@@ -203,6 +277,35 @@ models = ["anthropic/claude-sonnet-4-20250514"]
     }
 
     #[test]
+    fn available_main_models_aggregates_multiple_providers() {
+        let cfg = config(
+            r#"
+[agent]
+id = "test"
+model = "gpt-5-codex"
+
+[[providers]]
+name = "anthropic"
+models = ["anthropic/claude-sonnet-4-20250514"]
+
+[[providers]]
+name = "openai"
+models = ["gpt-5-codex", "gpt-5-mini"]
+
+[[providers]]
+name = "ollama"
+models = ["llama3.2"]
+"#,
+        );
+
+        let models = available_main_models(&cfg);
+        assert_eq!(models[0].id, "gpt-5-codex");
+        assert_eq!(models[1].id, "anthropic/claude-sonnet-4-20250514");
+        assert_eq!(models[2].id, "gpt-5-mini");
+        assert_eq!(models[3].id, "llama3.2");
+    }
+
+    #[test]
     fn find_available_model_matches_prefixed_and_unprefixed_variants() {
         let cfg = config(
             r#"
@@ -217,5 +320,28 @@ name = "anthropic"
 
         let found = find_available_model(&cfg, "claude-sonnet-4-20250514").unwrap();
         assert_eq!(found.id, "anthropic/claude-sonnet-4-20250514");
+    }
+
+    #[test]
+    fn resolve_available_model_returns_matching_provider() {
+        let cfg = config(
+            r#"
+[agent]
+id = "test"
+model = "gpt-5-codex"
+
+[[providers]]
+name = "anthropic"
+models = ["anthropic/claude-sonnet-4-20250514"]
+
+[[providers]]
+name = "openai"
+models = ["gpt-5-codex"]
+"#,
+        );
+
+        let resolved = resolve_available_model(&cfg, "gpt-5-codex").unwrap();
+        assert_eq!(resolved.provider.name, "openai");
+        assert_eq!(resolved.model.id, "gpt-5-codex");
     }
 }

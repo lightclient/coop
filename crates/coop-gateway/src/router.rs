@@ -1712,6 +1712,42 @@ models = ["anthropic/claude-sonnet-4-20250514", "anthropic/claude-opus-4-0-20250
     }
 
     #[tokio::test]
+    async fn slash_models_lists_models_across_providers() {
+        let config: Config = toml::from_str(
+            r#"
+[agent]
+id = "reid"
+model = "anthropic/claude-sonnet-4-20250514"
+
+[[users]]
+name = "alice"
+trust = "full"
+match = ["terminal:default", "signal:alice-uuid"]
+
+[[providers]]
+name = "anthropic"
+models = ["anthropic/claude-sonnet-4-20250514"]
+
+[[providers]]
+name = "openai"
+models = ["gpt-5-codex"]
+
+[[providers]]
+name = "ollama"
+models = ["llama3.2"]
+"#,
+        )
+        .unwrap();
+        let (router, _gw) = make_router_and_gateway(&config);
+        let msg = inbound_command("signal", "alice-uuid", "/models");
+        let (_decision, text) = dispatch_and_collect_text(&router, &msg).await;
+
+        assert!(text.contains("anthropic/claude-sonnet-4-20250514"));
+        assert!(text.contains("gpt-5-codex"));
+        assert!(text.contains("llama3.2"));
+    }
+
+    #[tokio::test]
     async fn slash_model_switches_current_user() {
         let config: Config = toml::from_str(
             r#"
@@ -1772,6 +1808,66 @@ models = ["anthropic/claude-opus-4-0-20250514"]
             gateway.model_name_for_user(Some("alice")),
             "anthropic/claude-opus-4-0-20250514"
         );
+    }
+
+    #[tokio::test]
+    async fn slash_model_switches_between_providers() {
+        let config: Config = toml::from_str(
+            r#"
+[agent]
+id = "reid"
+model = "anthropic/claude-sonnet-4-20250514"
+
+[[users]]
+name = "alice"
+trust = "full"
+match = ["terminal:default", "signal:alice-uuid"]
+
+[[providers]]
+name = "anthropic"
+models = ["anthropic/claude-sonnet-4-20250514"]
+
+[[providers]]
+name = "openai"
+models = ["gpt-5-codex"]
+"#,
+        )
+        .unwrap();
+        let workspace = test_workspace();
+        let primary: Arc<dyn Provider> = Arc::new(FakeProvider::with_model(
+            "should not reach LLM",
+            "anthropic/claude-sonnet-4-20250514",
+            200_000,
+        ));
+        let mut providers = ProviderRegistry::new(primary);
+        providers.register(
+            "gpt-5-codex".to_owned(),
+            Arc::new(FakeProvider::with_model(
+                "should not reach LLM",
+                "gpt-5-codex",
+                128_000,
+            )),
+        );
+        let executor = Arc::new(DefaultExecutor::new());
+        let shared = shared_config(config);
+        let gateway = Arc::new(
+            Gateway::new(
+                Arc::clone(&shared),
+                workspace.path().to_path_buf(),
+                providers,
+                executor,
+                None,
+                None,
+            )
+            .unwrap(),
+        );
+        let router = MessageRouter::new(shared, Arc::clone(&gateway));
+
+        let msg = inbound_command("signal", "alice-uuid", "/model gpt-5-codex");
+        let (_decision, text) = dispatch_and_collect_text(&router, &msg).await;
+
+        assert!(text.contains("Model set to gpt-5-codex"));
+        assert_eq!(gateway.model_name_for_user(Some("alice")), "gpt-5-codex");
     }
 
     #[tokio::test]
