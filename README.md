@@ -64,6 +64,10 @@ coop gateway status
 coop attach
 ```
 
+Inside the TUI, use `/status` to inspect the current session, `/models` to list
+available main models, and `/model <id>` to switch the current user's main
+model.
+
 The gateway install step persists the resolved runtime environment (including
 API key variables) in a per-agent env file with mode `0600`, so restarts and
 reboots don't depend on your current shell exports.
@@ -129,17 +133,36 @@ match = ["signal:bob-uuid"]
 
 
 # ---------------------------------------------------------------------------
-# Provider — LLM backend (currently only "anthropic")
+# Provider — LLM backend
 # ---------------------------------------------------------------------------
 [provider]
-name = "anthropic"
+name = "anthropic"                  # Supported: anthropic, openai, openai-compatible, ollama
+
+# Optional: list of user-selectable main models for /models and /model <id>.
+# When omitted, Coop falls back to a small built-in catalog for anthropic,
+# openai, and ollama. For custom openai-compatible or local setups, set this
+# explicitly to the models you want users to pick from.
+#
+# models = [
+#   "anthropic/claude-sonnet-4-20250514",
+#   "anthropic/claude-opus-4-0-20250514",
+#   "anthropic/claude-haiku-3-5-20241022",
+# ]
 
 # Optional: multiple API keys for automatic rotation on rate limits.
 # Each entry references an environment variable with the "env:" prefix.
 # Keys rotate proactively at 90% utilization and reactively on 429 errors.
-# When omitted, falls back to the ANTHROPIC_API_KEY environment variable.
+# When omitted, falls back to the provider's default env var
+# (for example ANTHROPIC_API_KEY or OPENAI_API_KEY).
 #
 # api_keys = ["env:ANTHROPIC_API_KEY", "env:ANTHROPIC_API_KEY_2"]
+
+# For openai-compatible endpoints:
+# base_url = "https://your-endpoint/v1"
+# api_key_env = "OPENAI_COMPAT_API_KEY"
+
+# For OpenAI Codex OAuth, optionally provide a refresh token:
+# refresh_token = "env:OPENAI_REFRESH_TOKEN"
 
 
 # ---------------------------------------------------------------------------
@@ -316,9 +339,9 @@ match = ["terminal:default", "signal:<your-uuid>"]
 
 The config file is watched for changes. These fields take effect immediately without a restart:
 
-- `agent.model`, `users`, `cron`, `memory.prompt_index`, `memory.retention`
+- `agent.model`, `provider.models`, `users`, `cron`, `memory.prompt_index`, `memory.retention`
 
-These require a restart: `agent.id`, `agent.workspace`, `provider`, `channels`, `memory.db_path`, `memory.embedding`
+These require a restart: `agent.id`, `agent.workspace`, provider backend settings (`provider.name`, `provider.base_url`, `provider.api_key_env`, `provider.extra_headers`, `provider.refresh_token`), `channels`, `memory.db_path`, `memory.embedding`
 
 ## Workspace
 
@@ -340,7 +363,7 @@ Channel-specific formatting instructions can be added as `channels/<name>.md` (e
 ```
 crates/
 ├── coop-core       # Shared types, traits, prompt builder, test fakes
-├── coop-agent      # LLM provider integration (Anthropic API)
+├── coop-agent      # LLM provider integrations (Anthropic, OpenAI, OpenAI-compatible, Ollama)
 ├── coop-memory     # Structured memory store (SQLite + FTS5)
 ├── coop-gateway    # CLI entry point, daemon, gateway routing, config
 ├── coop-ipc        # Unix socket IPC protocol
