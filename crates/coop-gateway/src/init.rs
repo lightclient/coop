@@ -151,10 +151,12 @@ fn validate_name(name: &str) -> Result<(), String> {
 // Config generation
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn generate_config(
     agent_name: &str,
     provider: InitProvider,
     model_id: &str,
+    model_ids: &[String],
     user_name: &str,
     base_url: Option<&str>,
     api_key_env: Option<&str>,
@@ -165,6 +167,14 @@ fn generate_config(
     };
 
     let mut provider_block = format!("[provider]\nname = \"{}\"\n", provider.provider_name());
+    if !model_ids.is_empty() {
+        let rendered = model_ids
+            .iter()
+            .map(|model| format!("\"{model}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let _ = writeln!(provider_block, "models = [{rendered}]");
+    }
     if let Some(base_url) = base_url.filter(|value| !value.trim().is_empty()) {
         let _ = writeln!(provider_block, "base_url = \"{}\"", base_url.trim());
     }
@@ -196,6 +206,20 @@ db_path = "./db/memory.db"
 # trust_ceiling = {{ fixed = "familiar" }}
 "#
     )
+}
+
+fn default_provider_models(provider: InitProvider, selected_model: &str) -> Vec<String> {
+    match provider {
+        InitProvider::Anthropic => ANTHROPIC_MODELS
+            .iter()
+            .map(|(model, _)| format!("anthropic/{model}"))
+            .collect(),
+        InitProvider::OpenAi => OPENAI_MODELS
+            .iter()
+            .map(|(model, _)| (*model).to_owned())
+            .collect(),
+        InitProvider::OpenAiCompatible | InitProvider::Ollama => vec![selected_model.to_owned()],
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -455,10 +479,12 @@ pub(crate) fn cmd_init(dir_arg: Option<&str>) -> anyhow::Result<()> {
     };
 
     // Step 7: Write config
+    let model_ids = default_provider_models(provider, &model_id);
     let config_content = generate_config(
         &agent_name,
         provider,
         &model_id,
+        &model_ids,
         &user_name,
         provider_base_url.as_deref(),
         provider_api_key_env.as_deref(),
@@ -618,6 +644,7 @@ mod tests {
             "cooper",
             InitProvider::Anthropic,
             "claude-sonnet-4-20250514",
+            &default_provider_models(InitProvider::Anthropic, "claude-sonnet-4-20250514"),
             "alice",
             None,
             None,
@@ -627,6 +654,7 @@ mod tests {
         assert!(config.contains("name = \"alice\""));
         assert!(config.contains("workspace = \"./workspace\""));
         assert!(config.contains("[provider]"));
+        assert!(config.contains("models = ["));
         assert!(config.contains("[memory]"));
     }
 
@@ -636,6 +664,7 @@ mod tests {
             "cooper",
             InitProvider::Anthropic,
             "claude-sonnet-4-20250514",
+            &default_provider_models(InitProvider::Anthropic, "claude-sonnet-4-20250514"),
             "alice",
             None,
             None,
@@ -648,6 +677,7 @@ mod tests {
         assert_eq!(config.users[0].name, "alice");
         assert_eq!(config.users[0].trust, coop_core::TrustLevel::Full);
         assert_eq!(config.provider.name, "anthropic");
+        assert_eq!(config.provider.models.len(), 3);
         assert_eq!(config.memory.db_path, "./db/memory.db");
     }
 
@@ -657,6 +687,7 @@ mod tests {
             "cooper",
             InitProvider::OpenAiCompatible,
             "gpt-4o-mini",
+            &default_provider_models(InitProvider::OpenAiCompatible, "gpt-4o-mini"),
             "alice",
             Some("http://localhost:8000/v1"),
             Some("OPENAI_COMPAT_API_KEY"),
@@ -672,6 +703,7 @@ mod tests {
             Some("OPENAI_COMPAT_API_KEY")
         );
         assert_eq!(config.agent.model, "gpt-4o-mini");
+        assert_eq!(config.provider.models, vec!["gpt-4o-mini"]);
     }
 
     #[test]

@@ -32,13 +32,8 @@ impl ProviderRegistry {
         self.by_model.get(model).unwrap_or(&self.primary)
     }
 
-    #[cfg(test)]
     pub(crate) fn get_exact(&self, model: &str) -> Option<&Arc<dyn Provider>> {
         self.by_model.get(model)
-    }
-
-    pub(crate) fn sync_primary_model(&self, model: &str) {
-        self.primary.set_model(model);
     }
 }
 

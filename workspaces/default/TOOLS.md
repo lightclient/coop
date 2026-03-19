@@ -27,6 +27,7 @@ Non-owner callers can still change non-security config: model, cron messages/sch
 Changes to these fields take effect immediately (hot-reload):
 
 - `agent.model` — switch models on the fly
+- `provider.models` — update the selectable model list
 - `users` — add/remove users, change trust levels or match patterns
 - `cron` — add/remove/edit scheduled tasks
 - `memory.prompt_index` — toggle prompt index, change limits
@@ -124,9 +125,17 @@ pids_limit = 512                   # max PIDs per command (default: 512)
 [channels.signal]
 db_path = "./db/signal.db"         # path to signal-cli database (restart-required)
 
-# Provider (only "anthropic" supported currently)
+# Provider
 [provider]
-name = "anthropic"                 # restart-required
+name = "anthropic"                 # restart-required; supported: anthropic, openai, openai-compatible, ollama
+# Optional list of user-selectable main models. When omitted, Coop falls back
+# to a small built-in catalog for supported hosted providers. Add custom model
+# IDs here for local or openai-compatible backends.
+# models = [
+#   "anthropic/claude-sonnet-4-20250514",
+#   "anthropic/claude-opus-4-0-20250514",
+#   "anthropic/claude-haiku-3-5-20241022",
+# ]
 # Multiple API keys for automatic rotation on rate limits (optional).
 # Each entry is an env: reference. Keys rotate proactively at 90%
 # utilization and reactively on 429 errors. Omit for single-key mode.
@@ -238,7 +247,8 @@ message = "run cleanup"
 ### Validation constraints
 
 - `agent.id` and `agent.model` must be non-empty
-- `provider.name` must be `anthropic`
+- `provider.name` must be one of `anthropic`, `openai`, `openai-compatible`, `ollama`
+- `provider.models` must not contain empty entries; duplicate model IDs warn
 - Workspace directory must exist and contain at least SOUL.md
 - Memory prompt_index: limit > 0, max_tokens > 0, recent_days in 1..=30
 - Memory auto_capture: min_turn_messages >= 1

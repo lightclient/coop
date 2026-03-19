@@ -1698,6 +1698,7 @@ mod tests {
             channels: crate::config::ChannelsConfig::default(),
             provider: crate::config::ProviderConfig {
                 name: "anthropic".to_owned(),
+                models: Vec::new(),
                 api_keys: vec![
                     "env:ANTHROPIC_API_KEY".to_owned(),
                     "env:SECONDARY_KEY".to_owned(),

@@ -193,6 +193,8 @@ pub(crate) struct SignalChannelConfig {
 pub(crate) struct ProviderConfig {
     #[serde(default = "default_provider")]
     pub name: String,
+    #[serde(default)]
+    pub models: Vec<String>,
     /// Key references with `env:` prefix (e.g. `env:ANTHROPIC_API_KEY`).
     /// Enables key rotation. When empty/omitted, falls back to `api_key_env`
     /// or the provider default environment variable.
@@ -1376,6 +1378,23 @@ name = "anthropic"
     }
 
     #[test]
+    fn parse_config_with_provider_models() {
+        let toml_str = r#"
+[agent]
+id = "test"
+model = "llama3.2"
+
+[provider]
+name = "ollama"
+models = ["llama3.2", "qwen2.5-coder:14b"]
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.provider.models.len(), 2);
+        assert_eq!(config.provider.models[0], "llama3.2");
+        assert_eq!(config.provider.models[1], "qwen2.5-coder:14b");
+    }
+
+    #[test]
     fn parse_provider_with_base_url_and_api_key_env() {
         let toml_str = r#"
 [agent]
@@ -1413,6 +1432,7 @@ X-Test = "1"
     fn provider_effective_api_key_env_prefers_explicit_value() {
         let provider = ProviderConfig {
             name: "openai".to_owned(),
+            models: Vec::new(),
             api_keys: Vec::new(),
             api_key_env: Some("CUSTOM_OPENAI_KEY".to_owned()),
             base_url: None,
@@ -1429,6 +1449,7 @@ X-Test = "1"
     fn provider_effective_api_key_env_uses_provider_default() {
         let provider = ProviderConfig {
             name: "anthropic".to_owned(),
+            models: Vec::new(),
             api_keys: Vec::new(),
             api_key_env: None,
             base_url: None,

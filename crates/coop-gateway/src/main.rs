@@ -1,6 +1,7 @@
 #![allow(clippy::print_stdout, clippy::print_stderr)] // CLI binary — stdout/stderr is the UI
 
 mod cli;
+mod commands;
 mod compaction;
 mod compaction_store;
 mod config;
@@ -23,6 +24,7 @@ mod memory_embedding;
 mod memory_prompt_index;
 mod memory_reconcile;
 mod memory_tools;
+mod model_catalog;
 mod overflow_recovery;
 mod provider_factory;
 mod provider_registry;
@@ -38,6 +40,7 @@ mod signal_loop;
 mod tracing_setup;
 mod trust;
 mod tui_helpers;
+mod user_model_store;
 mod web_cache;
 mod web_fetch;
 mod web_search;
@@ -810,6 +813,11 @@ async fn handle_send(
     session: String,
     content: String,
 ) -> Result<()> {
+    let kind = if content.trim_start().starts_with('/') {
+        InboundKind::Command
+    } else {
+        InboundKind::Text
+    };
     let inbound = InboundMessage {
         channel: "terminal:default".to_owned(),
         sender: "tui".to_owned(),
@@ -818,7 +826,7 @@ async fn handle_send(
         is_group: false,
         timestamp: Utc::now(),
         reply_to: Some(session.clone()),
-        kind: InboundKind::Text,
+        kind,
         message_timestamp: None,
         group_revision: None,
     };
@@ -894,7 +902,6 @@ async fn cmd_chat(config_path: Option<&str>, user_flag: Option<&str>) -> Result<
     ]));
 
     let agent_id = config.agent.id.clone();
-    let agent_model = config.agent.model.clone();
     let shared = shared_config(config);
 
     let gateway = Arc::new(Gateway::new(
@@ -916,9 +923,15 @@ async fn cmd_chat(config_path: Option<&str>, user_flag: Option<&str>) -> Result<
 
     let session_key = gateway.default_session_key();
     let working_dir = resolve_working_dir();
+    let resolved_model = gateway.resolve_main_model(Some(&tui_user))?;
 
-    let (mut tui, mut app, mut tool_names) =
-        build_tui(&agent_id, &agent_model, "main", &working_dir, 200_000);
+    let (mut tui, mut app, mut tool_names) = build_tui(
+        &agent_id,
+        &resolved_model.model,
+        "main",
+        &working_dir,
+        context_limit_u32(resolved_model.context_limit),
+    );
 
     tui.start()?;
     tui.request_render();
@@ -953,6 +966,19 @@ async fn cmd_chat(config_path: Option<&str>, user_flag: Option<&str>) -> Result<
                             app.cursor_pos = app.input.len();
                             app.set_error("Cannot send while agent is responding");
                             set_status_error(&mut tui, app.error_message.clone());
+                        } else if input.trim_start().starts_with('/') {
+                            let response = commands::handle_slash_command(
+                                &gateway,
+                                &input,
+                                &session_key,
+                                Some(&tui_user),
+                            )
+                            .unwrap_or_else(|| {
+                                format!("Unknown command: {}\nType /help for a list.", input.trim())
+                            });
+                            app.push_message(DisplayMessage::system(response));
+                            sync_model_display(&mut tui, &mut app, &gateway, Some(&tui_user));
+                            update_chat_messages(&mut tui, &app, CHAT_IDX);
                         } else {
                             clear_editor(&mut tui);
                             app.push_message(DisplayMessage::user(&input));
@@ -1489,6 +1515,26 @@ fn set_footer_usage(tui: &mut Tui, tokens: u32) {
         .and_then(|a| a.downcast_mut::<Footer>());
     if let Some(f) = footer {
         f.set_usage(0, 0, 0, 0, tokens);
+    }
+}
+
+fn context_limit_u32(limit: usize) -> u32 {
+    u32::try_from(limit).unwrap_or(u32::MAX)
+}
+
+fn sync_model_display(tui: &mut Tui, app: &mut App, gateway: &Gateway, user_name: Option<&str>) {
+    if let Ok(selection) = gateway.resolve_main_model(user_name) {
+        let model = selection.model;
+        let context_limit = context_limit_u32(selection.context_limit);
+        app.model_name.clone_from(&model);
+        app.context_limit = context_limit;
+
+        let footer = tui.root_mut().children_mut()[FOOTER_IDX]
+            .as_any_mut()
+            .and_then(|a| a.downcast_mut::<Footer>());
+        if let Some(f) = footer {
+            f.set_model(model, context_limit);
+        }
     }
 }
 

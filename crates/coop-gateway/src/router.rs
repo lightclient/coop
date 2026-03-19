@@ -7,6 +7,7 @@ use tracing::{Instrument, debug, info, info_span};
 
 use std::sync::Arc;
 
+use crate::commands;
 use crate::config::{
     Config, CronDeliveryMode, GroupConfig, GroupTrigger, SharedConfig, TrustCeiling,
 };
@@ -192,9 +193,13 @@ impl MessageRouter {
             }
 
             let cmd = msg.content.trim();
-            let response = self
-                .handle_channel_command(cmd, &decision)
-                .unwrap_or_else(|| format!("Unknown command: {cmd}\nType /help for a list."));
+            let response = commands::handle_slash_command(
+                &self.gateway,
+                cmd,
+                &decision.session_key,
+                decision.user_name.as_deref(),
+            )
+            .unwrap_or_else(|| format!("Unknown command: {cmd}\nType /help for a list."));
             info!(
                 session = %decision.session_key,
                 command = cmd,
@@ -344,62 +349,6 @@ impl MessageRouter {
             &msg.content,
             history_context.as_deref(),
         ))
-    }
-
-    /// Handle slash commands from non-TUI channels (Signal, IPC, etc.).
-    /// Returns `Some(response_text)` if the input was a command, `None` otherwise.
-    fn handle_channel_command(&self, input: &str, decision: &RouteDecision) -> Option<String> {
-        match input {
-            "/new" | "/clear" | "/reset" => {
-                self.gateway.clear_session(&decision.session_key);
-                Some("New session ✅".to_owned())
-            }
-            "/stop" => {
-                if self.gateway.cancel_active_turn(&decision.session_key) {
-                    Some("Stopping agent…".to_owned())
-                } else {
-                    Some("No active turn to stop.".to_owned())
-                }
-            }
-            "/status" => {
-                let count = self.gateway.session_message_count(&decision.session_key);
-                let usage = self.gateway.session_usage(&decision.session_key);
-                let context_limit = self.gateway.context_limit();
-                #[allow(clippy::cast_precision_loss)]
-                let context_pct = if context_limit > 0 {
-                    f64::from(usage.last_input_tokens) / (context_limit as f64) * 100.0
-                } else {
-                    0.0
-                };
-                let active = if self.gateway.has_active_turn(&decision.session_key) {
-                    " (running)"
-                } else {
-                    ""
-                };
-                let status = format!(
-                    "Session: {}{active}\nAgent: {}\nModel: {}\nMessages: {}\nContext: {} / {} tokens ({:.1}%)\nTotal tokens used: {} in / {} out",
-                    decision.session_key,
-                    self.gateway.agent_id(),
-                    self.gateway.model_name(),
-                    count,
-                    usage.last_input_tokens,
-                    context_limit,
-                    context_pct,
-                    usage.cumulative.input_tokens.unwrap_or(0),
-                    usage.cumulative.output_tokens.unwrap_or(0),
-                );
-                Some(status)
-            }
-            "/help" | "/?" => Some(
-                "Available commands:\n\
-                     /new, /clear  — Start a new session (clears history)\n\
-                     /stop         — Stop the current agent turn\n\
-                     /status       — Show session info\n\
-                     /help, /?     — Show this help"
-                    .to_owned(),
-            ),
-            _ => None,
-        }
     }
 
     #[cfg(test)]
@@ -1718,6 +1667,111 @@ match = ["signal:bob-uuid"]
         let (_decision, text) = dispatch_and_collect_text(&router, &msg).await;
 
         assert!(text.contains("/stop"), "help should list /stop command");
+    }
+
+    #[tokio::test]
+    async fn slash_help_includes_model_commands() {
+        let config = test_config();
+        let (router, _gw) = make_router_and_gateway(&config);
+        let msg = inbound_command("signal", "alice-uuid", "/help");
+        let (_decision, text) = dispatch_and_collect_text(&router, &msg).await;
+
+        assert!(text.contains("/models"), "help should list /models command");
+        assert!(
+            text.contains("/model <id>"),
+            "help should list /model command"
+        );
+    }
+
+    #[tokio::test]
+    async fn slash_models_lists_configured_models() {
+        let config: Config = toml::from_str(
+            r#"
+[agent]
+id = "reid"
+model = "test"
+
+[[users]]
+name = "alice"
+trust = "full"
+match = ["terminal:default", "signal:alice-uuid"]
+
+[provider]
+name = "anthropic"
+models = ["anthropic/claude-sonnet-4-20250514", "anthropic/claude-opus-4-0-20250514"]
+"#,
+        )
+        .unwrap();
+        let (router, _gw) = make_router_and_gateway(&config);
+        let msg = inbound_command("signal", "alice-uuid", "/models");
+        let (_decision, text) = dispatch_and_collect_text(&router, &msg).await;
+
+        assert!(text.contains("Available models:"));
+        assert!(text.contains("anthropic/claude-sonnet-4-20250514"));
+        assert!(text.contains("anthropic/claude-opus-4-0-20250514"));
+    }
+
+    #[tokio::test]
+    async fn slash_model_switches_current_user() {
+        let config: Config = toml::from_str(
+            r#"
+[agent]
+id = "reid"
+model = "test"
+
+[[users]]
+name = "alice"
+trust = "full"
+match = ["terminal:default", "signal:alice-uuid"]
+
+[provider]
+name = "anthropic"
+models = ["anthropic/claude-opus-4-0-20250514"]
+"#,
+        )
+        .unwrap();
+        let workspace = test_workspace();
+        let primary: Arc<dyn Provider> = Arc::new(FakeProvider::with_model(
+            "should not reach LLM",
+            "test",
+            128_000,
+        ));
+        let mut providers = ProviderRegistry::new(primary);
+        providers.register(
+            "anthropic/claude-opus-4-0-20250514".to_owned(),
+            Arc::new(FakeProvider::with_model(
+                "should not reach LLM",
+                "anthropic/claude-opus-4-0-20250514",
+                200_000,
+            )),
+        );
+        let executor = Arc::new(DefaultExecutor::new());
+        let shared = shared_config(config);
+        let gateway = Arc::new(
+            Gateway::new(
+                Arc::clone(&shared),
+                workspace.path().to_path_buf(),
+                providers,
+                executor,
+                None,
+                None,
+            )
+            .unwrap(),
+        );
+        let router = MessageRouter::new(shared, Arc::clone(&gateway));
+
+        let msg = inbound_command(
+            "signal",
+            "alice-uuid",
+            "/model anthropic/claude-opus-4-0-20250514",
+        );
+        let (_decision, text) = dispatch_and_collect_text(&router, &msg).await;
+
+        assert!(text.contains("Model set to anthropic/claude-opus-4-0-20250514"));
+        assert_eq!(
+            gateway.model_name_for_user(Some("alice")),
+            "anthropic/claude-opus-4-0-20250514"
+        );
     }
 
     #[tokio::test]

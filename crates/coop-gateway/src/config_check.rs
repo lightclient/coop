@@ -5,6 +5,7 @@ use coop_core::TrustLevel;
 use coop_core::prompt::{PromptBuilder, WorkspaceIndex};
 
 use crate::config::Config;
+use crate::model_catalog::normalize_model_key;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Severity {
@@ -327,6 +328,51 @@ fn check_provider_config(report: &mut CheckReport, config: &Config) {
                 format!("provider.api_key_env: {api_key_env}")
             } else {
                 "provider.api_key_env must not be empty".to_owned()
+            },
+        });
+    }
+
+    let empty_models = config
+        .provider
+        .models
+        .iter()
+        .any(|model| model.trim().is_empty());
+    report.push(CheckResult {
+        name: "provider_models_valid",
+        severity: Severity::Error,
+        passed: !empty_models,
+        message: if empty_models {
+            "provider.models must not contain empty entries".to_owned()
+        } else if config.provider.models.is_empty() {
+            "provider.models: using built-in defaults".to_owned()
+        } else {
+            format!(
+                "provider.models: {} configured",
+                config.provider.models.len()
+            )
+        },
+    });
+
+    if !config.provider.models.is_empty() {
+        let mut seen = HashSet::new();
+        let mut duplicates = Vec::new();
+        for model in &config.provider.models {
+            let key = normalize_model_key(model);
+            if !key.is_empty() && !seen.insert(key) {
+                duplicates.push(model.clone());
+            }
+        }
+        report.push(CheckResult {
+            name: "provider_models_unique",
+            severity: Severity::Warning,
+            passed: duplicates.is_empty(),
+            message: if duplicates.is_empty() {
+                "provider.models: no duplicates".to_owned()
+            } else {
+                format!(
+                    "provider.models contains duplicates: {}",
+                    duplicates.join(", ")
+                )
             },
         });
     }

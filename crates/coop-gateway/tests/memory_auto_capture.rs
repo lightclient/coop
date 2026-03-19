@@ -34,8 +34,12 @@ mod group_trigger;
 mod memory_auto_capture;
 #[path = "../src/memory_prompt_index.rs"]
 mod memory_prompt_index;
+#[path = "../src/model_catalog.rs"]
+mod model_catalog;
 #[path = "../src/overflow_recovery.rs"]
 mod overflow_recovery;
+#[path = "../src/provider_factory.rs"]
+mod provider_factory;
 #[allow(dead_code)]
 #[path = "../src/provider_registry.rs"]
 mod provider_registry;
@@ -44,6 +48,8 @@ mod provider_registry;
 mod session_search;
 #[path = "../src/session_store.rs"]
 mod session_store;
+#[path = "../src/user_model_store.rs"]
+mod user_model_store;
 
 use config::{Config, shared_config};
 use gateway::Gateway;

@@ -47,6 +47,11 @@ impl Footer {
         self.context_tokens = context_tokens;
     }
 
+    pub fn set_model(&mut self, model_name: impl Into<String>, context_window: u32) {
+        self.model_name = model_name.into();
+        self.context_window = context_window;
+    }
+
     pub fn set_git_branch(&mut self, branch: Option<String>) {
         self.git_branch = branch;
     }

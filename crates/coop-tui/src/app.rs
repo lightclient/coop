@@ -479,6 +479,8 @@ Available commands:
   /new, /clear, /reset  — Start a new session (clears history)
   /stop                 — Stop the current agent turn
   /status               — Show session info (model, tokens, context)
+  /models               — List available models
+  /model <id>           — Switch your current model
   /verbose, /v          — Toggle tool call output
   /help, /?             — Show this help
   /quit, /exit, /q      — Exit

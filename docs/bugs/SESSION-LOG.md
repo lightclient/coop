@@ -51,3 +51,45 @@ This file is append-only. Never delete previous sessions.
 - Remote signal-cli on macOS/homebrew via SSH worked well with ControlMaster connection reuse.
 - All 446 workspace tests pass after fix.
 - Compaction triggered naturally at 126,492 tokens during Scenario 19, summary was 3,966 chars, post-compaction input dropped to 60 tokens.
+
+---
+
+## 2026-03-18 Session
+
+**Duration:** ~50 minutes
+**Bugs found:** 2
+**Bugs fixed:** 0 (2 open)
+
+### Test Plan Results
+
+| # | Scenario | Result |
+|---|----------|--------|
+| — | Anthropic `/models` | ✅ PASS — reply listed Sonnet/Opus/Haiku with current/default tags |
+| — | Anthropic `/model claude-opus-4-0-20250514` | ✅ PASS — switch acknowledged |
+| — | Anthropic `/status` after switch | ✅ PASS — status showed `anthropic/claude-opus-4-0-20250514` |
+| — | Anthropic follow-up turn | ⚠️ ENV BLOCKED — local Anthropic OAuth token on this host is expired |
+| — | OpenAI `/models` | ✅ PASS — reply listed `gpt-5-codex`, `gpt-5-mini`, `gpt-4o-mini` |
+| — | OpenAI `/model gpt-5-mini` | ✅ PASS — switch acknowledged |
+| — | OpenAI `/status` after `gpt-5-mini` | ✅ PASS — status showed `gpt-5-mini` |
+| — | OpenAI follow-up turn on `gpt-5-mini` | ❌ FAIL — provider rejected built-in catalog model for Codex OAuth (BUG-005) |
+| — | OpenAI `/model gpt-5-codex` | ✅ PASS — switch acknowledged |
+| — | OpenAI `/status` after `gpt-5-codex` | ✅ PASS — status showed `gpt-5-codex` |
+| — | OpenAI follow-up turn on `gpt-5-codex` | ✅ PASS — replied `Four` |
+| — | Local `/models` | ✅ PASS — reply listed `llama3.2` and `qwen2.5-coder:14b` |
+| — | Local `/model qwen2.5-coder:14b` | ✅ PASS — switch acknowledged |
+| — | Local `/status` after switch | ✅ PASS — status showed `qwen2.5-coder:14b` |
+| — | Local follow-up turn | ⚠️ SKIPPED — no local Ollama backend detected on `127.0.0.1:11434` |
+
+### Bugs
+
+| Bug | Status | Summary |
+|-----|--------|---------|
+| BUG-005 | Open | OpenAI built-in catalog advertises `gpt-5-mini` for Codex OAuth even though the backend rejects it |
+| BUG-006 | Open | Signal DM sends emit `could not create sync message from a direct message` errors despite successful replies |
+
+### Notes
+
+- The slash-command feature itself worked end-to-end over Signal for Anthropic, OpenAI, and local-model configs: `/models` replied, `/model` switched, and `/status` reflected the new per-user selection.
+- The bundled `send-and-verify.sh` script reported `FAIL` for every scenario because BUG-006 injects `ERROR` traces on otherwise successful DM sends.
+- Anthropic completion verification could not be completed because the locally stored Claude OAuth token is expired; this was an environment issue, not a slash-command routing issue.
+- OpenAI Codex OAuth refresh worked: `gpt-5-codex` completed successfully after the model was switched back from the unsupported `gpt-5-mini`.
