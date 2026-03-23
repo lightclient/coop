@@ -11,6 +11,7 @@ mod config_watcher;
 mod config_write;
 mod cron_delivery;
 mod cron_timezone;
+mod final_reply;
 mod gateway;
 mod group_history;
 mod group_trigger;

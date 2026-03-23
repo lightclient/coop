@@ -411,6 +411,12 @@ pub fn default_channel_prompt(channel: &str) -> Option<&'static str> {
             "reply is delivered. Do not narrate each tool call; just do the work ",
             "and share the result.\n",
             "\n",
+            "Final reply requirement: Unless higher-priority runtime instructions ",
+            "explicitly tell you to use a suppression token such as NO_REPLY or ",
+            "NO_ACTION_NEEDED, you must end every Signal turn with exactly one ",
+            "non-empty final reply for the user. After tool use, always send a ",
+            "brief outcome message. Never end the turn silently.\n",
+            "\n",
             "Proactive updates (signal_send): For tasks that take a long time ",
             "(multi-step builds, complex research, spawning sub-agents), use ",
             "signal_send to notify the user BEFORE starting the long work. ",
@@ -2244,6 +2250,10 @@ mod tests {
         let text = prompt.unwrap();
         assert!(text.contains("Signal"), "should mention Signal");
         assert!(text.contains("plain text"), "should mention plain text");
+        assert!(
+            text.contains("non-empty final reply"),
+            "should require a non-empty final reply"
+        );
     }
 
     #[test]
@@ -2277,6 +2287,10 @@ mod tests {
         assert!(
             flat.contains("plain text"),
             "should contain Signal formatting instructions"
+        );
+        assert!(
+            flat.contains("non-empty final reply"),
+            "should contain Signal final-reply instructions"
         );
 
         let layer_names: Vec<&str> = prompt.layers.iter().map(|l| l.name).collect();

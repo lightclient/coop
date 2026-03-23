@@ -690,12 +690,76 @@ mod tests {
     };
     use crate::injection::{InjectionSource, SessionInjection};
     use crate::provider_registry::ProviderRegistry;
+    use async_trait::async_trait;
     use chrono::Utc;
     use coop_core::Provider;
-    use coop_core::fakes::FakeProvider;
+    use coop_core::fakes::{FakeProvider, FakeTool, SimpleExecutor};
     use coop_core::tools::DefaultExecutor;
-    use std::sync::Arc;
+    use coop_core::{Message, ModelInfo, ProviderStream, ToolDef, Usage};
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
     use tokio::sync::mpsc;
+
+    #[derive(Debug)]
+    struct SequencedProvider {
+        model: ModelInfo,
+        responses: Mutex<VecDeque<Message>>,
+    }
+
+    impl SequencedProvider {
+        fn new(responses: Vec<Message>) -> Self {
+            Self {
+                model: ModelInfo {
+                    name: "sequenced-model".to_owned(),
+                    context_limit: 128_000,
+                },
+                responses: Mutex::new(VecDeque::from(responses)),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Provider for SequencedProvider {
+        fn name(&self) -> &'static str {
+            "sequenced"
+        }
+
+        fn model_info(&self) -> ModelInfo {
+            self.model.clone()
+        }
+
+        async fn complete(
+            &self,
+            _system: &[String],
+            _messages: &[Message],
+            _tools: &[ToolDef],
+        ) -> Result<(Message, Usage)> {
+            let response = self
+                .responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or_else(|| anyhow::anyhow!("script exhausted"))?;
+
+            Ok((
+                response,
+                Usage {
+                    input_tokens: Some(1),
+                    output_tokens: Some(1),
+                    ..Default::default()
+                },
+            ))
+        }
+
+        async fn stream(
+            &self,
+            _system: &[String],
+            _messages: &[Message],
+            _tools: &[ToolDef],
+        ) -> Result<ProviderStream> {
+            anyhow::bail!("streaming not supported")
+        }
+    }
 
     fn test_config() -> Config {
         toml::from_str(
@@ -1155,17 +1219,45 @@ match = ["signal:bob-uuid"]
         );
     }
 
+    #[tokio::test]
+    async fn cron_collect_text_uses_repaired_final_reply_not_intermediate_text() {
+        let config = test_config();
+        let provider: Arc<dyn Provider> = Arc::new(SequencedProvider::new(vec![
+            Message::assistant()
+                .with_text("Checking status...")
+                .with_tool_request("tool_1", "fake_tool", serde_json::json!({})),
+            Message::assistant().with_text(""),
+            Message::assistant().with_text("Scheduled update ready."),
+        ]));
+        let mut executor = SimpleExecutor::new();
+        executor.add(Box::new(FakeTool::new("fake_tool", "ok")));
+        let (router, _gw) =
+            make_router_with_provider_and_executor(&config, provider, Arc::new(executor));
+
+        let msg = inbound("cron", "cron:briefing:alice", None, false, None);
+        let (_decision, text) = router
+            .dispatch_collect_text_with_channel_and_cron_delivery(
+                &msg,
+                Some("signal".to_owned()),
+                Some(CronDeliveryMode::Always),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(text, "Scheduled update ready.");
+    }
+
     /// Provider that always fails — used to test error handling paths.
     #[derive(Debug)]
     struct FailingProvider {
-        model: coop_core::ModelInfo,
+        model: ModelInfo,
         error_msg: String,
     }
 
     impl FailingProvider {
         fn new(msg: &str) -> Self {
             Self {
-                model: coop_core::ModelInfo {
+                model: ModelInfo {
                     name: "fail-model".into(),
                     context_limit: 128_000,
                 },
@@ -1179,23 +1271,23 @@ match = ["signal:bob-uuid"]
         fn name(&self) -> &'static str {
             "failing"
         }
-        fn model_info(&self) -> coop_core::ModelInfo {
+        fn model_info(&self) -> ModelInfo {
             self.model.clone()
         }
         async fn complete(
             &self,
             _s: &[String],
-            _m: &[coop_core::Message],
-            _t: &[coop_core::ToolDef],
-        ) -> Result<(coop_core::Message, Usage)> {
+            _m: &[Message],
+            _t: &[ToolDef],
+        ) -> Result<(Message, Usage)> {
             anyhow::bail!("{}", self.error_msg)
         }
         async fn stream(
             &self,
             _s: &[String],
-            _m: &[coop_core::Message],
-            _t: &[coop_core::ToolDef],
-        ) -> Result<coop_core::traits::ProviderStream> {
+            _m: &[Message],
+            _t: &[ToolDef],
+        ) -> Result<ProviderStream> {
             anyhow::bail!("{}", self.error_msg)
         }
     }
@@ -1464,10 +1556,12 @@ match = ["signal:bob-uuid"]
         assert!(err.contains("injection failed"), "unexpected error: {err}");
     }
 
-    fn make_router_and_gateway(config: &Config) -> (MessageRouter, Arc<Gateway>) {
+    fn make_router_with_provider_and_executor(
+        config: &Config,
+        provider: Arc<dyn Provider>,
+        executor: Arc<dyn coop_core::ToolExecutor>,
+    ) -> (MessageRouter, Arc<Gateway>) {
         let workspace = test_workspace();
-        let provider: Arc<dyn Provider> = Arc::new(FakeProvider::new("should not reach LLM"));
-        let executor = Arc::new(DefaultExecutor::new());
         let shared = shared_config(config.clone());
         let gateway = Arc::new(
             Gateway::new(
@@ -1482,6 +1576,14 @@ match = ["signal:bob-uuid"]
         );
         let router = MessageRouter::new(shared, Arc::clone(&gateway));
         (router, gateway)
+    }
+
+    fn make_router_and_gateway(config: &Config) -> (MessageRouter, Arc<Gateway>) {
+        make_router_with_provider_and_executor(
+            config,
+            Arc::new(FakeProvider::new("should not reach LLM")),
+            Arc::new(DefaultExecutor::new()),
+        )
     }
 
     fn inbound_with_content(channel: &str, sender: &str, content: &str) -> InboundMessage {

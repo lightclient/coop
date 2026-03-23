@@ -1550,7 +1550,9 @@ mod tests {
             timezone: None,
             message: "Morning briefing".to_owned(),
             user: None,
-            delivery: None,
+            // as_needed has no fallback, so a persistently-empty provider
+            // results in no delivery (always would fall back to "Completed.")
+            delivery: Some(CronDeliveryMode::AsNeeded),
             deliver: Some(CronDelivery {
                 channel: "signal".to_owned(),
                 target: "alice-uuid".to_owned(),
@@ -1718,7 +1720,9 @@ mod tests {
             timezone: None,
             message: "Morning briefing".to_owned(),
             user: None,
-            delivery: None,
+            // as_needed has no fallback, so a persistently-empty provider
+            // results in no delivery and no DM injection
+            delivery: Some(CronDeliveryMode::AsNeeded),
             deliver: Some(CronDelivery {
                 channel: "signal".to_owned(),
                 target: "alice-uuid".to_owned(),

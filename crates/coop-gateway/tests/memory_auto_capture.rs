@@ -22,6 +22,8 @@ mod compaction_store;
 mod config;
 #[path = "../src/cron_delivery.rs"]
 mod cron_delivery;
+#[path = "../src/final_reply.rs"]
+mod final_reply;
 #[path = "../src/gateway.rs"]
 mod gateway;
 #[allow(dead_code)]

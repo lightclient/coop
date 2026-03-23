@@ -19,6 +19,7 @@ use crate::compaction::{self, CompactionState};
 use crate::compaction_store::CompactionStore;
 use crate::config::{CronDeliveryMode, SharedConfig, find_group_config_by_session};
 use crate::cron_delivery;
+use crate::final_reply::FinalReplyPolicy;
 use crate::group_history::{GroupHistoryBuffer, GroupHistoryEntry};
 use crate::group_trigger::{self, SILENT_REPLY_TOKEN};
 use crate::memory_auto_capture;
@@ -554,6 +555,7 @@ impl Gateway {
             };
             let ctx = Self::tool_context(session_key, trust, user_name, &workspace_scope);
             let turn_config = TurnConfig::default();
+            let final_reply_policy = FinalReplyPolicy::for_turn(channel, cron_delivery_mode);
 
             let mut total_usage = Usage::default();
             let mut new_messages = Vec::new();
@@ -613,6 +615,31 @@ impl Gateway {
 
                                 self.update_last_input_tokens(session_key, &usage);
                                 total_usage += usage;
+
+                                let mut response = response;
+                                if !response.has_tool_requests()
+                                    && final_reply_policy.needs_repair(&response.text())
+                                {
+                                    let (repaired_response, repair_usage) = self
+                                        .repair_terminal_reply(
+                                            provider.as_ref(),
+                                            &selected_model,
+                                            &system_prompt,
+                                            &messages,
+                                            response.clone(),
+                                            final_reply_policy,
+                                        )
+                                        .await;
+                                    if repair_usage.context_input_tokens() > 0
+                                        || repair_usage.output_tokens.unwrap_or(0) > 0
+                                        || repair_usage.stop_reason.is_some()
+                                    {
+                                        self.update_last_input_tokens(session_key, &repair_usage);
+                                        total_usage += repair_usage;
+                                    }
+                                    response = repaired_response;
+                                }
+
                                 self.append_message(session_key, response.clone());
                                 new_messages.push(response.clone());
 
@@ -1869,6 +1896,82 @@ impl Gateway {
     }
 
     #[allow(clippy::too_many_arguments)]
+    async fn repair_terminal_reply(
+        &self,
+        provider: &dyn Provider,
+        model: &str,
+        system_prompt: &[String],
+        messages: &[Message],
+        original_response: Message,
+        policy: FinalReplyPolicy,
+    ) -> (Message, Usage) {
+        let Some(repair_prompt) = policy.repair_prompt() else {
+            return (original_response, Usage::default());
+        };
+
+        let span = info_span!(
+            "final_reply_repair",
+            model = %model,
+            policy = %policy.as_str(),
+            message_count = messages.len(),
+        );
+
+        async {
+            warn!(
+                policy = %policy.as_str(),
+                original_response_text_len = original_response.text().len(),
+                "terminal reply was empty; requesting repaired final reply"
+            );
+
+            let mut repair_messages = messages.to_vec();
+            repair_messages.push(Message::user().with_text(repair_prompt));
+
+            match provider
+                .complete_fast(system_prompt, &repair_messages, &[])
+                .await
+            {
+                Ok((response, usage))
+                    if !response.has_tool_requests() && !response.text().trim().is_empty() =>
+                {
+                    debug!(
+                        policy = %policy.as_str(),
+                        repaired_response_text_len = response.text().len(),
+                        "repaired final reply generated"
+                    );
+                    (response, usage)
+                }
+                Ok((_response, usage)) => {
+                    warn!(
+                        policy = %policy.as_str(),
+                        "repair call returned empty again"
+                    );
+                    if let Some(fallback) = policy.fallback_text() {
+                        info!(policy = %policy.as_str(), fallback, "using fallback final reply");
+                        (Message::assistant().with_text(fallback), usage)
+                    } else {
+                        (original_response, usage)
+                    }
+                }
+                Err(error) => {
+                    warn!(
+                        policy = %policy.as_str(),
+                        error = %error,
+                        "repair request failed"
+                    );
+                    if let Some(fallback) = policy.fallback_text() {
+                        info!(policy = %policy.as_str(), fallback, "using fallback final reply");
+                        (Message::assistant().with_text(fallback), Usage::default())
+                    } else {
+                        (original_response, Usage::default())
+                    }
+                }
+            }
+        }
+        .instrument(span)
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
     async fn assistant_response(
         &self,
         provider: &dyn Provider,
@@ -2006,10 +2109,10 @@ fn build_cron_delivery_prompt_block(
     let channel = channel.unwrap_or("messaging");
     match delivery_mode {
         CronDeliveryMode::Always => format!(
-            "## Scheduled Delivery\n- This scheduled response will be delivered to the user via {channel}.\n- This cron uses delivery = \"always\". Always reply with the content to deliver.\n- Do not reply with NO_ACTION_NEEDED."
+            "## Scheduled Delivery\n- This scheduled response will be delivered to the user via {channel}.\n- This cron uses delivery = \"always\". Always reply with the content to deliver.\n- End the turn with exactly one non-empty final message to deliver.\n- After any tool use, you must still send that final message. Never end silently.\n- Do not reply with NO_ACTION_NEEDED."
         ),
         CronDeliveryMode::AsNeeded => format!(
-            "## Scheduled Delivery\n- This scheduled response will be delivered to the user via {channel}.\n- This cron uses delivery = \"as_needed\". Be highly selective: only send a message when the user would likely want the interruption now.\n- Routine status, unchanged conditions, low-confidence guesses, or information that can wait should be treated as no action needed.\n- If nothing needs attention, reply with exactly NO_ACTION_NEEDED.\n- If something truly needs attention, reply with only the content to deliver.\n- Never include NO_ACTION_NEEDED alongside real content."
+            "## Scheduled Delivery\n- This scheduled response will be delivered to the user via {channel}.\n- This cron uses delivery = \"as_needed\". Be highly selective: only send a message when the user would likely want the interruption now.\n- Routine status, unchanged conditions, low-confidence guesses, or information that can wait should be treated as no action needed.\n- If nothing needs attention, reply with exactly NO_ACTION_NEEDED.\n- If something truly needs attention, reply with only the content to deliver.\n- End the turn with exactly one final output: either NO_ACTION_NEEDED, or the non-empty message to deliver.\n- After any tool use, you must still send one of those final outputs. Never end silently.\n- Never include NO_ACTION_NEEDED alongside real content."
         ),
     }
 }
@@ -2304,6 +2407,7 @@ model = "test-model"
         assert!(prompt.contains("delivery = \"as_needed\""));
         assert!(prompt.contains("Be highly selective"));
         assert!(prompt.contains("NO_ACTION_NEEDED"));
+        assert!(prompt.contains("Never end silently"));
     }
 
     #[tokio::test]
@@ -2342,6 +2446,7 @@ model = "test-model"
 
         assert!(prompt.contains("delivery = \"always\""));
         assert!(prompt.contains("Do not reply with NO_ACTION_NEEDED"));
+        assert!(prompt.contains("Never end silently"));
     }
 
     async fn trace_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
@@ -3655,6 +3760,124 @@ model = "test-model"
             "Done should only return the terminal assistant reply"
         );
         assert_eq!(done_messages[0].text(), "after tool");
+    }
+
+    #[tokio::test]
+    async fn signal_turn_repairs_empty_terminal_reply_after_tool_use() {
+        let workspace = test_workspace();
+        let provider: Arc<dyn Provider> = Arc::new(SequencedProvider::new(vec![
+            Message::assistant()
+                .with_text("before tool")
+                .with_tool_request("tool_1", "fake_tool", serde_json::json!({})),
+            Message::assistant().with_text("   "),
+            Message::assistant().with_text("All set."),
+        ]));
+        let mut executor = SimpleExecutor::new();
+        executor.add(Box::new(FakeTool::new("fake_tool", "ok")));
+        let gateway = Arc::new(
+            Gateway::new(
+                shared_config(test_config()),
+                workspace.path().to_path_buf(),
+                registry(provider),
+                Arc::new(executor),
+                None,
+                None,
+            )
+            .unwrap(),
+        );
+
+        let session_key = gateway.default_session_key();
+        let (event_tx, mut event_rx) = mpsc::channel(256);
+
+        gateway
+            .run_turn_with_trust(
+                &session_key,
+                "hello",
+                TrustLevel::Full,
+                Some("alice"),
+                Some("signal"),
+                event_tx,
+            )
+            .await
+            .unwrap();
+
+        let mut assistant_messages = Vec::new();
+        let mut done_messages = None;
+        while let Ok(event) = event_rx.try_recv() {
+            match event {
+                TurnEvent::AssistantMessage(message) => assistant_messages.push(message),
+                TurnEvent::Done(result) => done_messages = Some(result.messages),
+                _ => {}
+            }
+        }
+
+        assert_eq!(assistant_messages.len(), 1);
+        assert_eq!(assistant_messages[0].text(), "All set.");
+
+        let done_messages = done_messages.expect("turn should emit Done");
+        assert_eq!(done_messages.len(), 1);
+        assert_eq!(done_messages[0].text(), "All set.");
+    }
+
+    #[tokio::test]
+    async fn cron_always_turn_repairs_empty_terminal_reply_after_tool_use() {
+        let workspace = test_workspace();
+        let provider: Arc<dyn Provider> = Arc::new(SequencedProvider::new(vec![
+            Message::assistant()
+                .with_text("checking status")
+                .with_tool_request("tool_1", "fake_tool", serde_json::json!({})),
+            Message::assistant().with_text(""),
+            Message::assistant().with_text("Scheduled update ready."),
+        ]));
+        let mut executor = SimpleExecutor::new();
+        executor.add(Box::new(FakeTool::new("fake_tool", "ok")));
+        let gateway = Arc::new(
+            Gateway::new(
+                shared_config(test_config()),
+                workspace.path().to_path_buf(),
+                registry(provider),
+                Arc::new(executor),
+                None,
+                None,
+            )
+            .unwrap(),
+        );
+
+        let session_key = SessionKey {
+            agent_id: "coop".to_owned(),
+            kind: SessionKind::Cron("briefing".to_owned()),
+        };
+        let (event_tx, mut event_rx) = mpsc::channel(256);
+
+        gateway
+            .run_turn_with_trust_and_cron_delivery(
+                &session_key,
+                "check status",
+                TrustLevel::Full,
+                Some("alice"),
+                Some("signal"),
+                Some(CronDeliveryMode::Always),
+                event_tx,
+            )
+            .await
+            .unwrap();
+
+        let mut assistant_messages = Vec::new();
+        let mut done_messages = None;
+        while let Ok(event) = event_rx.try_recv() {
+            match event {
+                TurnEvent::AssistantMessage(message) => assistant_messages.push(message),
+                TurnEvent::Done(result) => done_messages = Some(result.messages),
+                _ => {}
+            }
+        }
+
+        assert_eq!(assistant_messages.len(), 1);
+        assert_eq!(assistant_messages[0].text(), "Scheduled update ready.");
+
+        let done_messages = done_messages.expect("turn should emit Done");
+        assert_eq!(done_messages.len(), 1);
+        assert_eq!(done_messages[0].text(), "Scheduled update ready.");
     }
 
     #[tokio::test]

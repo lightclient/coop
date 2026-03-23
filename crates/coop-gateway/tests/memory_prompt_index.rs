@@ -41,6 +41,8 @@ mod group_trigger;
 #[path = "../src/provider_registry.rs"]
 mod provider_registry;
 
+#[path = "../src/final_reply.rs"]
+mod final_reply;
 #[path = "../src/gateway.rs"]
 mod gateway;
 #[path = "../src/memory_auto_capture.rs"]

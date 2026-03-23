@@ -456,7 +456,7 @@ async fn handle_signal_inbound_once_sends_non_empty_response() {
 }
 
 #[tokio::test]
-async fn handle_signal_inbound_once_does_not_send_empty_response() {
+async fn handle_signal_inbound_once_sends_fallback_on_empty_response() {
     let provider: Arc<dyn Provider> = Arc::new(FakeProvider::new("   "));
     let router = build_router(provider, Arc::new(DefaultExecutor::new()), None);
 
@@ -476,7 +476,9 @@ async fn handle_signal_inbound_once_does_not_send_empty_response() {
         .await
         .unwrap();
 
-    assert!(channel.take_outbound().is_empty());
+    let outbound = channel.take_outbound();
+    assert_eq!(outbound.len(), 1);
+    assert_eq!(outbound[0].content, "Done.");
 }
 
 #[tokio::test]
@@ -1257,16 +1259,16 @@ async fn previously_dropped_messages_are_now_preserved() {
     );
 }
 
-/// Regression test: quiet mode must not fall back to intermediate assistant
-/// narration when the terminal reply is empty. If the agent wants to send a
-/// message mid-turn, it should use `signal_send` explicitly.
+/// Regression test: quiet mode should request a repaired final reply instead
+/// of falling back to intermediate assistant narration.
 #[tokio::test]
-async fn quiet_mode_does_not_fall_back_to_intermediate_text_when_final_reply_is_empty() {
+async fn quiet_mode_repairs_empty_terminal_reply_without_using_intermediate_text() {
     let provider: Arc<dyn Provider> = Arc::new(ScriptedProvider::new(vec![
         Message::assistant()
             .with_text("Status update one.")
             .with_tool_request("t1", "fake_tool", serde_json::json!({})),
         Message::assistant().with_text(""),
+        Message::assistant().with_text("Finished the task."),
     ]));
     let router = build_router(
         provider,
@@ -1291,9 +1293,6 @@ async fn quiet_mode_does_not_fall_back_to_intermediate_text_when_final_reply_is_
         .unwrap();
 
     let outbound = channel.take_outbound();
-    assert!(
-        outbound.is_empty(),
-        "quiet mode should send nothing when the final assistant reply is empty, got: {:?}",
-        outbound.iter().map(|m| &m.content).collect::<Vec<_>>()
-    );
+    assert_eq!(outbound.len(), 1);
+    assert_eq!(outbound[0].content, "Finished the task.");
 }
