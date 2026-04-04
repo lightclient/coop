@@ -99,6 +99,8 @@ impl GenAiProvider {
                 genai::resolver::AuthData::from_single(value.to_owned()),
                 Some(key_index),
             )
+        } else if self.kind == ProviderKind::OpenAiCompatible {
+            (genai::resolver::AuthData::from_single(String::new()), None)
         } else {
             (genai::resolver::AuthData::None, None)
         };

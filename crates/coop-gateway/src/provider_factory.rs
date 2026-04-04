@@ -260,4 +260,25 @@ mod tests {
         assert!(trace.contains("openai-compatible"));
         assert!(trace.contains("genai complete response"));
     }
+
+    #[tokio::test]
+    async fn openai_compatible_provider_succeeds_without_api_key() {
+        let base_url = spawn_openai_compatible_server().await;
+        let config: Config = toml::from_str(&format!(
+            "[agent]\nid = \"test\"\nmodel = \"demo-model\"\nworkspace = \".\"\n\n[provider]\nname = \"openai-compatible\"\nbase_url = \"{base_url}\"\n",
+        ))
+        .expect("config parses");
+        let provider = create_primary_provider(&config).expect("provider creates");
+
+        let (response, usage) = provider
+            .complete(
+                &["Answer tersely".to_owned()],
+                &[Message::user().with_text("Reply with TRACE_OK")],
+                &[],
+            )
+            .await
+            .expect("provider request succeeds");
+        assert_eq!(response.text(), "TRACE_OK");
+        assert_eq!(usage.input_tokens, Some(12));
+    }
 }

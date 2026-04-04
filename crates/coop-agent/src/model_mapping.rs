@@ -81,6 +81,7 @@ fn openai_like_model(model: &str) -> (AdapterKind, String) {
 
 fn openai_compatible_model(model: &str) -> (AdapterKind, String) {
     let normalized = strip_prefix(model, "openai-compatible/");
+    let normalized = strip_prefix(&normalized, "openai/");
     if let Some((namespace, name)) = normalized.split_once("::") {
         return match namespace {
             "openai_resp" => (AdapterKind::OpenAIResp, name.to_owned()),
@@ -163,6 +164,17 @@ mod tests {
         );
         let resolved = ResolvedModel::from_spec(&spec, &spec.model, AuthData::None);
         assert_eq!(resolved.target_model.adapter_kind, AdapterKind::OpenAI);
+    }
+
+    #[test]
+    fn openai_compatible_strips_openai_prefix_alias() {
+        let spec = ProviderSpec::new(
+            ProviderKind::OpenAiCompatible,
+            "openai/gemma-4-31B-it-UD-Q8_K_XL.gguf",
+        );
+        let resolved = ResolvedModel::from_spec(&spec, &spec.model, AuthData::None);
+        assert_eq!(resolved.target_model.adapter_kind, AdapterKind::OpenAI);
+        assert_eq!(resolved.model_info_name, "gemma-4-31B-it-UD-Q8_K_XL.gguf");
     }
 
     #[test]
