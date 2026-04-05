@@ -2154,9 +2154,7 @@ impl Gateway {
                         return Err(error);
                     }
 
-                    if is_transient_stream_transport_error(&error)
-                        && attempt < MAX_EARLY_STREAM_RETRIES
-                    {
+                    if is_transient_transport_error(&error) && attempt < MAX_EARLY_STREAM_RETRIES {
                         let backoff = early_stream_retry_backoff(attempt);
                         let model = provider.model_info();
                         warn!(
@@ -2229,7 +2227,7 @@ impl Gateway {
                             return Err(error);
                         }
 
-                        if is_transient_stream_transport_error(&error)
+                        if is_transient_transport_error(&error)
                             && attempt < MAX_EARLY_STREAM_RETRIES
                         {
                             let backoff = early_stream_retry_backoff(attempt);
@@ -2296,30 +2294,62 @@ impl Gateway {
         tool_defs: &[ToolDef],
         event_tx: &mpsc::Sender<TurnEvent>,
     ) -> Result<(Message, Usage)> {
-        let (response, usage) = provider
-            .complete(system_prompt, messages, tool_defs)
-            .await?;
+        for attempt in 0..=MAX_EARLY_NON_STREAM_RETRIES {
+            let (response, usage) =
+                match provider.complete(system_prompt, messages, tool_defs).await {
+                    Ok(result) => result,
+                    Err(error) => {
+                        if overflow_recovery::should_force_compact_after_error(&error) {
+                            return Err(error);
+                        }
 
-        let text = response.text();
-        if !text.is_empty() {
-            let _ = event_tx.send(TurnEvent::TextDelta(text)).await;
+                        if is_transient_transport_error(&error)
+                            && attempt < MAX_EARLY_NON_STREAM_RETRIES
+                        {
+                            let backoff = early_non_stream_retry_backoff(attempt);
+                            let model = provider.model_info();
+                            warn!(
+                                provider = provider.name(),
+                                model = %model.name,
+                                attempt = attempt + 1,
+                                max_attempts = MAX_EARLY_NON_STREAM_RETRIES + 1,
+                                backoff_ms = duration_to_millis_u64(backoff),
+                                error = %error,
+                                "non-streaming provider request failed before output, retrying"
+                            );
+                            tokio::time::sleep(backoff).await;
+                            continue;
+                        }
+
+                        return Err(error);
+                    }
+                };
+
+            let text = response.text();
+            if !text.is_empty() {
+                let _ = event_tx.send(TurnEvent::TextDelta(text)).await;
+            }
+
+            debug!(
+                input_tokens = usage.input_tokens,
+                output_tokens = usage.output_tokens,
+                cache_read_tokens = usage.cache_read_tokens,
+                cache_write_tokens = usage.cache_write_tokens,
+                stop_reason = %usage.stop_reason.as_deref().unwrap_or("unknown"),
+                "provider response complete"
+            );
+
+            return Ok((response, usage));
         }
 
-        debug!(
-            input_tokens = usage.input_tokens,
-            output_tokens = usage.output_tokens,
-            cache_read_tokens = usage.cache_read_tokens,
-            cache_write_tokens = usage.cache_write_tokens,
-            stop_reason = %usage.stop_reason.as_deref().unwrap_or("unknown"),
-            "provider response complete"
-        );
-
-        Ok((response, usage))
+        unreachable!("non-stream attempt loop always returns or retries")
     }
 }
 
 const MAX_EARLY_STREAM_RETRIES: u32 = 2;
 const EARLY_STREAM_RETRY_BASE_BACKOFF_MS: u64 = 200;
+const MAX_EARLY_NON_STREAM_RETRIES: u32 = 3;
+const EARLY_NON_STREAM_RETRY_BASE_BACKOFF_MS: u64 = 200;
 
 fn early_stream_retry_backoff(attempt: u32) -> Duration {
     Duration::from_millis(
@@ -2327,11 +2357,17 @@ fn early_stream_retry_backoff(attempt: u32) -> Duration {
     )
 }
 
+fn early_non_stream_retry_backoff(attempt: u32) -> Duration {
+    Duration::from_millis(
+        EARLY_NON_STREAM_RETRY_BASE_BACKOFF_MS.saturating_mul(1_u64 << attempt.min(8)),
+    )
+}
+
 fn duration_to_millis_u64(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
-fn is_transient_stream_transport_error(error: &anyhow::Error) -> bool {
+fn is_transient_transport_error(error: &anyhow::Error) -> bool {
     let text = error.to_string().to_ascii_lowercase();
     [
         "error sending request for url",
@@ -5595,6 +5631,12 @@ models = ["gemma-4-31B-it-UD-Q8_K_XL.gguf"]
         complete_calls: Arc<std::sync::atomic::AtomicUsize>,
     }
 
+    #[derive(Debug)]
+    struct CompleteTransientThenSuccessProvider {
+        model: ModelInfo,
+        complete_calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
     impl ToolUseStopWithoutToolRequestStreamingProvider {
         fn new() -> Self {
             Self {
@@ -5633,6 +5675,18 @@ models = ["gemma-4-31B-it-UD-Q8_K_XL.gguf"]
                     context_limit: 128_000,
                 },
                 stream_calls,
+                complete_calls,
+            }
+        }
+    }
+
+    impl CompleteTransientThenSuccessProvider {
+        fn new(complete_calls: Arc<std::sync::atomic::AtomicUsize>) -> Self {
+            Self {
+                model: ModelInfo {
+                    name: "complete-transient-then-success".into(),
+                    context_limit: 128_000,
+                },
                 complete_calls,
             }
         }
@@ -5838,6 +5892,58 @@ models = ["gemma-4-31B-it-UD-Q8_K_XL.gguf"]
         }
     }
 
+    #[async_trait]
+    impl Provider for CompleteTransientThenSuccessProvider {
+        fn name(&self) -> &'static str {
+            "complete-transient-then-success"
+        }
+
+        fn model_info(&self) -> ModelInfo {
+            self.model.clone()
+        }
+
+        async fn complete(
+            &self,
+            _system: &[String],
+            _messages: &[Message],
+            _tools: &[ToolDef],
+        ) -> Result<(Message, Usage)> {
+            let call = self
+                .complete_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+
+            if call < 4 {
+                anyhow::bail!(
+                    "Web call failed for model 'complete-transient-then-success'.\nCause: Reqwest error: error sending request for url (http://10.0.0.7:11434/v1/chat/completions)"
+                );
+            }
+
+            Ok((
+                Message::assistant().with_text("complete recovered after retry"),
+                Usage {
+                    input_tokens: Some(12),
+                    output_tokens: Some(4),
+                    stop_reason: Some("stop".into()),
+                    ..Default::default()
+                },
+            ))
+        }
+
+        async fn stream(
+            &self,
+            _system: &[String],
+            _messages: &[Message],
+            _tools: &[ToolDef],
+        ) -> Result<ProviderStream> {
+            anyhow::bail!("streaming disabled for this provider")
+        }
+
+        fn supports_streaming(&self) -> bool {
+            false
+        }
+    }
+
     #[tokio::test]
     async fn retries_non_streaming_when_stream_fails_before_first_output() {
         let workspace = test_workspace();
@@ -6038,6 +6144,121 @@ models = ["gemma-4-31B-it-UD-Q8_K_XL.gguf"]
         assert_eq!(
             messages.last().map(Message::text),
             Some("fallback response".to_owned())
+        );
+    }
+
+    #[tokio::test]
+    async fn retries_transient_non_stream_failures_before_erroring() {
+        let workspace = test_workspace();
+        let complete_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider: Arc<dyn Provider> = Arc::new(CompleteTransientThenSuccessProvider::new(
+            Arc::clone(&complete_calls),
+        ));
+        let gateway = Gateway::new(
+            shared_config(test_config_with_stream_policy(StreamPolicy::Disable)),
+            workspace.path().to_path_buf(),
+            registry(provider),
+            Arc::new(DefaultExecutor::new()),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let session_key = gateway.default_session_key();
+        let (event_tx, _event_rx) = mpsc::channel(32);
+
+        gateway
+            .run_turn_with_trust(
+                &session_key,
+                "hello",
+                TrustLevel::Full,
+                Some("alice"),
+                None,
+                event_tx,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(complete_calls.load(std::sync::atomic::Ordering::SeqCst), 4);
+        let messages = gateway.messages(&session_key);
+        assert_eq!(
+            messages.last().map(Message::text),
+            Some("complete recovered after retry".to_owned())
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn trace_records_non_stream_retry_before_success() {
+        use tracing_subscriber::fmt::format::FmtSpan;
+        use tracing_subscriber::prelude::*;
+
+        let _trace_guard = trace_test_guard().await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let trace_file = dir.path().join("traces.jsonl");
+
+        let file_appender = tracing_appender::rolling::never(dir.path(), "traces.jsonl");
+        let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+
+        let jsonl_layer = tracing_subscriber::fmt::layer()
+            .json()
+            .with_writer(non_blocking)
+            .with_span_list(true)
+            .with_file(true)
+            .with_line_number(true)
+            .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
+            .with_filter(tracing_subscriber::EnvFilter::new("debug"));
+
+        let subscriber = tracing_subscriber::Registry::default().with(jsonl_layer);
+        let dispatch = tracing::dispatcher::Dispatch::new(subscriber);
+        let default_guard = tracing::dispatcher::set_default(&dispatch);
+
+        let workspace = test_workspace();
+        let complete_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider: Arc<dyn Provider> = Arc::new(CompleteTransientThenSuccessProvider::new(
+            Arc::clone(&complete_calls),
+        ));
+        let gateway = Gateway::new(
+            shared_config(test_config_with_stream_policy(StreamPolicy::Disable)),
+            workspace.path().to_path_buf(),
+            registry(provider),
+            Arc::new(DefaultExecutor::new()),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let session_key = gateway.default_session_key();
+        let (event_tx, _event_rx) = mpsc::channel(32);
+
+        gateway
+            .run_turn_with_trust(
+                &session_key,
+                "hello",
+                TrustLevel::Full,
+                Some("alice"),
+                None,
+                event_tx,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(complete_calls.load(std::sync::atomic::Ordering::SeqCst), 4);
+
+        drop(default_guard);
+        drop(guard);
+
+        let trace = read_trace_file_with_retry(
+            &trace_file,
+            "non-streaming provider request failed before output, retrying",
+        );
+        assert!(
+            trace.contains("non-streaming provider request failed before output, retrying"),
+            "expected non-stream retry trace"
+        );
+        assert!(
+            trace.contains("\"backoff_ms\":"),
+            "expected non-stream retry backoff field"
         );
     }
 
