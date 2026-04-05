@@ -690,6 +690,11 @@ fn parse_explicit_session_kind(session: &str, agent_id: &str) -> Option<SessionK
         return Some(SessionKind::Group(group.to_owned()));
     }
 
+    if let Some(subagent) = rest.strip_prefix("subagent:") {
+        let uuid = uuid::Uuid::parse_str(subagent).ok()?;
+        return Some(SessionKind::Subagent(uuid));
+    }
+
     None
 }
 
@@ -1794,6 +1799,23 @@ match = ["signal:bob-uuid"]
         assert!(
             text.contains("/model <id>"),
             "help should list /model command"
+        );
+        assert!(
+            text.contains("/subagents"),
+            "help should list /subagents commands"
+        );
+    }
+
+    #[tokio::test]
+    async fn slash_subagents_lists_runs() {
+        let config = test_config();
+        let (router, _gw) = make_router_and_gateway(&config);
+        let msg = inbound_command("signal", "alice-uuid", "/subagents");
+        let (_decision, text) = dispatch_and_collect_text(&router, &msg).await;
+
+        assert!(
+            text.contains("No subagent runs yet.") || text.contains("Subagent runs:"),
+            "subagents command should render a response"
         );
     }
 

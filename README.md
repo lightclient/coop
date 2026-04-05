@@ -154,8 +154,9 @@ match = ["signal:bob-uuid"]
 # Supported provider kinds: anthropic, gemini, openai, openai-compatible, ollama
 #
 # For /model switching across multiple backends, use [[providers]]. Each entry
-# contributes models to /models, and /model <id> switches to whichever provider
-# owns that model.
+# contributes models to /models, and /model <id> switches the primary session
+# to whichever provider owns that model. For specialized side work on a
+# different model, prefer subagent profiles over changing the main session.
 
 [[providers]]
 name = "anthropic"

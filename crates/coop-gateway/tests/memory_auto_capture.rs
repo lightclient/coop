@@ -50,6 +50,8 @@ mod provider_registry;
 mod session_search;
 #[path = "../src/session_store.rs"]
 mod session_store;
+#[path = "../src/subagents/mod.rs"]
+mod subagents;
 #[path = "../src/user_model_store.rs"]
 mod user_model_store;
 

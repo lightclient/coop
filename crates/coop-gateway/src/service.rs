@@ -1701,6 +1701,7 @@ mod tests {
                 model: "anthropic/test".to_owned(),
                 context_limit: None,
                 workspace: "./workspaces/default".to_owned(),
+                subagents: crate::config::SubagentsConfig::default(),
             },
             users: Vec::new(),
             groups: Vec::new(),

@@ -63,6 +63,29 @@ id = "coop"                                    # agent name (restart-required)
 model = "anthropic/claude-sonnet-4-20250514"   # model identifier (hot-reload)
 workspace = "./workspaces/default"             # path to workspace dir (restart-required)
 
+# Subagents — explicit child sessions for delegated work.
+# Keep normal turns on agent.model. Use subagent profiles when you need a
+# different model, a narrower tool set, or a fresh isolated child context.
+[agent.subagents]
+enabled = true
+# model = "gpt-5-mini"
+max_spawn_depth = 2
+max_active_children = 5
+max_concurrent = 4
+default_timeout_seconds = 900
+default_max_turns = 25
+prompt_mode = "minimal"           # minimal | full
+inherit_memory = false
+
+# Example profile:
+# [agent.subagents.profiles.code]
+# model = "gpt-5-codex"
+# tools = ["bash", "read_file", "edit_file", "write_file"]
+# prompt_mode = "minimal"
+# default_timeout_seconds = 900
+# default_max_turns = 25
+# allow_spawn = false
+
 # Users and trust levels
 # Trust levels: owner > full > inner > familiar > public
 # - owner: bypasses sandbox, full host access (the person running coop)
@@ -377,6 +400,11 @@ Memory tools operate on three trust-gated stores:
 Users can send these directly on any channel:
 
 - `/new`, `/clear`, `/reset` — clear session history
-- `/stop` — cancel the current agent turn
+- `/stop` — cancel the current agent turn and any active child runs
 - `/status` — show session info (model, context usage, token counts)
+- `/models` — list available primary session models
+- `/model <id>` — switch the primary session model
+- `/subagents` — list active and recent subagent runs
+- `/subagents inspect <run_id>` — inspect one child run
+- `/subagents kill <run_id>` — cancel an active child run
 - `/help`, `/?` — list available commands

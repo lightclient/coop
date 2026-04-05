@@ -468,6 +468,7 @@ impl fmt::Display for SessionKey {
             SessionKind::Dm(who) => write!(f, "{}:dm:{who}", self.agent_id),
             SessionKind::Group(id) => write!(f, "{}:group:{id}", self.agent_id),
             SessionKind::Isolated(uuid) => write!(f, "{}:isolated:{uuid}", self.agent_id),
+            SessionKind::Subagent(uuid) => write!(f, "{}:subagent:{uuid}", self.agent_id),
             SessionKind::Cron(name) => write!(f, "{}:cron:{name}", self.agent_id),
         }
     }
@@ -480,6 +481,7 @@ pub enum SessionKind {
     Dm(String),
     Group(String),
     Isolated(Uuid),
+    Subagent(Uuid),
     Cron(String),
 }
 
@@ -803,5 +805,18 @@ mod tests {
             kind: SessionKind::Cron("heartbeat".into()),
         };
         assert_eq!(key.to_string(), "coop:cron:heartbeat");
+    }
+
+    #[test]
+    fn session_key_display_subagent() {
+        let id = Uuid::parse_str("123e4567-e89b-12d3-a456-426614174000").unwrap();
+        let key = SessionKey {
+            agent_id: "coop".into(),
+            kind: SessionKind::Subagent(id),
+        };
+        assert_eq!(
+            key.to_string(),
+            "coop:subagent:123e4567-e89b-12d3-a456-426614174000"
+        );
     }
 }

@@ -199,6 +199,9 @@ fn diff_sections(current: &Config, new: &Config) -> Vec<&'static str> {
     if new.prompt != current.prompt {
         changed.push("prompt");
     }
+    if new.agent.subagents != current.agent.subagents {
+        changed.push("agent.subagents");
+    }
     if new.cron != current.cron {
         changed.push("cron");
     }

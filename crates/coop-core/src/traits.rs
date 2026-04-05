@@ -120,6 +120,8 @@ pub struct ToolContext {
     pub workspace: PathBuf,
     pub workspace_scope: WorkspaceScope,
     pub user_name: Option<String>,
+    pub model: Option<String>,
+    pub visible_tools: Vec<String>,
 }
 
 impl ToolContext {
@@ -142,7 +144,25 @@ impl ToolContext {
             workspace,
             workspace_scope,
             user_name: user_name.map(str::to_owned),
+            model: None,
+            visible_tools: Vec::new(),
         }
+    }
+
+    #[must_use]
+    pub fn with_model(mut self, model: impl Into<String>) -> Self {
+        self.model = Some(model.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_visible_tools<I, S>(mut self, visible_tools: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.visible_tools = visible_tools.into_iter().map(Into::into).collect();
+        self
     }
 }
 

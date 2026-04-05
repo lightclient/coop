@@ -33,6 +33,7 @@ pub(crate) const TOOLS_MD_INIT: &str = "\
 <!-- Built-in defaults are prepended automatically by coop. -->
 <!-- Add your custom tool notes below. They extend the defaults. -->
 <!-- The built-in tool notes include workflow guidance for config changes, cron_trigger, and diagnostics. -->
+<!-- Use agent.subagents profiles for specialized models and delegated child work. -->
 <!-- To fully replace the defaults, put <!-- override --> on the first line. -->
 ";
 

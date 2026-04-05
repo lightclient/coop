@@ -75,10 +75,105 @@ pub(crate) struct AgentConfig {
     pub context_limit: Option<usize>,
     #[serde(default = "default_workspace")]
     pub workspace: String,
+    #[serde(default)]
+    pub subagents: SubagentsConfig,
 }
 
 fn default_workspace() -> String {
     "./workspaces/default".to_owned()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum SubagentPromptMode {
+    #[default]
+    Minimal,
+    Full,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct SubagentProfileConfig {
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub tools: Option<Vec<String>>,
+    #[serde(default)]
+    pub prompt_mode: Option<SubagentPromptMode>,
+    #[serde(default)]
+    pub default_timeout_seconds: Option<u64>,
+    #[serde(default)]
+    pub default_max_turns: Option<u32>,
+    #[serde(default)]
+    pub allow_spawn: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct SubagentsConfig {
+    #[serde(default = "default_subagents_enabled")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default = "default_subagents_max_spawn_depth")]
+    pub max_spawn_depth: u32,
+    #[serde(default = "default_subagents_max_active_children")]
+    pub max_active_children: usize,
+    #[serde(default = "default_subagents_max_concurrent")]
+    pub max_concurrent: usize,
+    #[serde(default = "default_subagents_default_timeout_seconds")]
+    pub default_timeout_seconds: u64,
+    #[serde(default = "default_subagents_default_max_turns")]
+    pub default_max_turns: u32,
+    #[serde(default)]
+    pub prompt_mode: SubagentPromptMode,
+    #[serde(default = "default_subagents_inherit_memory")]
+    pub inherit_memory: bool,
+    #[serde(default)]
+    pub profiles: BTreeMap<String, SubagentProfileConfig>,
+}
+
+impl Default for SubagentsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_subagents_enabled(),
+            model: None,
+            max_spawn_depth: default_subagents_max_spawn_depth(),
+            max_active_children: default_subagents_max_active_children(),
+            max_concurrent: default_subagents_max_concurrent(),
+            default_timeout_seconds: default_subagents_default_timeout_seconds(),
+            default_max_turns: default_subagents_default_max_turns(),
+            prompt_mode: SubagentPromptMode::default(),
+            inherit_memory: default_subagents_inherit_memory(),
+            profiles: BTreeMap::new(),
+        }
+    }
+}
+
+const fn default_subagents_enabled() -> bool {
+    true
+}
+
+const fn default_subagents_max_spawn_depth() -> u32 {
+    2
+}
+
+const fn default_subagents_max_active_children() -> usize {
+    5
+}
+
+const fn default_subagents_max_concurrent() -> usize {
+    4
+}
+
+const fn default_subagents_default_timeout_seconds() -> u64 {
+    900
+}
+
+const fn default_subagents_default_max_turns() -> u32 {
+    25
+}
+
+const fn default_subagents_inherit_memory() -> bool {
+    false
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -928,6 +1023,17 @@ model = "anthropic/claude-sonnet-4-20250514"
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.agent.id, "test");
         assert_eq!(config.agent.model, "anthropic/claude-sonnet-4-20250514");
+        assert!(config.agent.subagents.enabled);
+        assert_eq!(config.agent.subagents.max_spawn_depth, 2);
+        assert_eq!(config.agent.subagents.max_active_children, 5);
+        assert_eq!(config.agent.subagents.max_concurrent, 4);
+        assert_eq!(config.agent.subagents.default_timeout_seconds, 900);
+        assert_eq!(config.agent.subagents.default_max_turns, 25);
+        assert_eq!(
+            config.agent.subagents.prompt_mode,
+            SubagentPromptMode::Minimal
+        );
+        assert!(!config.agent.subagents.inherit_memory);
         assert!(config.users.is_empty());
         assert!(config.channels.signal.is_none());
         assert_eq!(config.memory.db_path, "./db/memory.db");
@@ -945,6 +1051,62 @@ model = "anthropic/claude-sonnet-4-20250514"
         assert_eq!(config.memory.retention.compression_min_cluster_size, 3);
         assert_eq!(config.memory.retention.max_rows_per_run, 200);
         assert!(config.cron.is_empty());
+    }
+
+    #[test]
+    fn parse_config_with_subagent_profiles() {
+        let toml_str = r#"
+[agent]
+id = "coop"
+model = "gpt-5-codex"
+
+[agent.subagents]
+enabled = true
+model = "gpt-4o-mini"
+max_spawn_depth = 3
+max_active_children = 7
+max_concurrent = 2
+default_timeout_seconds = 1200
+default_max_turns = 12
+prompt_mode = "full"
+inherit_memory = true
+
+[agent.subagents.profiles.code]
+model = "gpt-5-codex"
+tools = ["bash", "read_file", "edit_file", "write_file"]
+prompt_mode = "minimal"
+default_timeout_seconds = 600
+default_max_turns = 8
+allow_spawn = true
+
+[agent.subagents.profiles.research]
+tools = ["read_file", "web_fetch", "session_search"]
+"#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let subagents = &config.agent.subagents;
+        assert!(subagents.enabled);
+        assert_eq!(subagents.model.as_deref(), Some("gpt-4o-mini"));
+        assert_eq!(subagents.max_spawn_depth, 3);
+        assert_eq!(subagents.max_active_children, 7);
+        assert_eq!(subagents.max_concurrent, 2);
+        assert_eq!(subagents.default_timeout_seconds, 1200);
+        assert_eq!(subagents.default_max_turns, 12);
+        assert_eq!(subagents.prompt_mode, SubagentPromptMode::Full);
+        assert!(subagents.inherit_memory);
+
+        let code = subagents.profiles.get("code").unwrap();
+        assert_eq!(code.model.as_deref(), Some("gpt-5-codex"));
+        assert_eq!(code.tools.as_ref().unwrap().len(), 4);
+        assert_eq!(code.prompt_mode, Some(SubagentPromptMode::Minimal));
+        assert_eq!(code.default_timeout_seconds, Some(600));
+        assert_eq!(code.default_max_turns, Some(8));
+        assert!(code.allow_spawn);
+
+        let research = subagents.profiles.get("research").unwrap();
+        assert_eq!(research.tools.as_ref().unwrap().len(), 3);
+        assert_eq!(research.prompt_mode, None);
+        assert!(!research.allow_spawn);
     }
 
     #[test]

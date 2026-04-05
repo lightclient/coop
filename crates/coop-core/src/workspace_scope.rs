@@ -67,6 +67,7 @@ impl WorkspaceScope {
             SessionKind::Main
             | SessionKind::Dm(_)
             | SessionKind::Isolated(_)
+            | SessionKind::Subagent(_)
             | SessionKind::Cron(_)
                 if trust <= TrustLevel::Full =>
             {
@@ -75,6 +76,7 @@ impl WorkspaceScope {
             SessionKind::Main
             | SessionKind::Dm(_)
             | SessionKind::Isolated(_)
+            | SessionKind::Subagent(_)
             | SessionKind::Cron(_) => match user_name.as_deref() {
                 Some(user) => {
                     let dir_name = user_workspace_dir_name(user);

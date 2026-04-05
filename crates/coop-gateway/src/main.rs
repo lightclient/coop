@@ -40,6 +40,7 @@ mod session_search;
 mod session_store;
 #[cfg(feature = "signal")]
 mod signal_loop;
+mod subagents;
 mod tracing_setup;
 mod trust;
 mod tui_helpers;
@@ -83,6 +84,7 @@ use crate::memory_tools::MemoryToolExecutor;
 use crate::router::MessageRouter;
 #[cfg(feature = "signal")]
 use crate::signal_loop::run_signal_loop;
+use crate::subagents::{SubagentManager, SubagentToolExecutor};
 use crate::tui_helpers::{
     build_tui, extract_tool_result, format_tui_welcome, resolve_working_dir, sync_editor_from_app,
     update_chat_messages,
@@ -507,6 +509,10 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
     let web_tool_config = config.tools.web.clone();
 
     let shared = shared_config(config);
+    let subagents = Arc::new(SubagentManager::new(
+        Arc::clone(&shared),
+        workspace.clone(),
+    )?);
 
     // Build the delivery sender early so both the send_message tool and the
     // scheduler can use it.
@@ -517,6 +523,12 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
 
     #[cfg(not(feature = "signal"))]
     let deliver_tx: Option<cron_runner::DeliverySender> = None;
+
+    subagents.bind_delivery(
+        deliver_tx
+            .as_ref()
+            .map(cron_runner::DeliverySender::channel_sender),
+    );
 
     let reminder_store = reminder::ReminderStore::new(workspace.join("sessions"))?;
     let scheduler_notify = Arc::new(tokio::sync::Notify::new());
@@ -534,6 +546,7 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
     let web_executor = web_tools::WebToolExecutor::new(&web_tool_config);
     let session_search_executor =
         session_search::SessionSearchExecutor::new(Arc::clone(&memory), Arc::clone(&provider));
+    let subagent_executor = SubagentToolExecutor::new(Arc::clone(&subagents));
 
     #[allow(unused_mut)]
     let mut executors: Vec<Box<dyn coop_core::ToolExecutor>> = vec![
@@ -544,6 +557,7 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
         Box::new(reminder_executor),
         Box::new(web_executor),
         Box::new(session_search_executor),
+        Box::new(subagent_executor),
     ];
 
     #[cfg(feature = "signal")]
@@ -595,14 +609,16 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
 
     let maintenance_memory = Arc::clone(&memory);
 
-    let gateway = Arc::new(Gateway::new(
+    let gateway = Arc::new(Gateway::new_with_subagents(
         Arc::clone(&shared),
         workspace,
         providers,
         executor,
         typing_notifier,
         Some(memory),
+        Arc::clone(&subagents),
     )?);
+    subagents.bind_gateway(&gateway);
     let router = Arc::new(MessageRouter::new(
         Arc::clone(&shared),
         Arc::clone(&gateway),
@@ -896,31 +912,41 @@ async fn cmd_chat(config_path: Option<&str>, user_flag: Option<&str>) -> Result<
 
     let memory = init_memory_store(&config, &config_dir, Arc::clone(&provider))?;
 
+    let agent_id = config.agent.id.clone();
+    let web_tool_config = config.tools.web.clone();
+    let shared = shared_config(config);
+    let subagents = Arc::new(SubagentManager::new(
+        Arc::clone(&shared),
+        workspace.clone(),
+    )?);
+    subagents.bind_delivery(None);
+
     let default_executor = DefaultExecutor::new();
     let config_executor = config_tool::ConfigToolExecutor::new(config_file.clone());
     let memory_executor = MemoryToolExecutor::new(Arc::clone(&memory));
-    let web_executor = web_tools::WebToolExecutor::new(&config.tools.web);
+    let web_executor = web_tools::WebToolExecutor::new(&web_tool_config);
     let session_search_executor =
         session_search::SessionSearchExecutor::new(Arc::clone(&memory), Arc::clone(&provider));
+    let subagent_executor = SubagentToolExecutor::new(Arc::clone(&subagents));
     let executor: Arc<dyn coop_core::ToolExecutor> = Arc::new(CompositeExecutor::new(vec![
         Box::new(default_executor),
         Box::new(config_executor),
         Box::new(memory_executor),
         Box::new(web_executor),
         Box::new(session_search_executor),
+        Box::new(subagent_executor),
     ]));
 
-    let agent_id = config.agent.id.clone();
-    let shared = shared_config(config);
-
-    let gateway = Arc::new(Gateway::new(
+    let gateway = Arc::new(Gateway::new_with_subagents(
         Arc::clone(&shared),
         workspace,
         providers,
         executor,
         None,
         Some(memory),
+        Arc::clone(&subagents),
     )?);
+    subagents.bind_gateway(&gateway);
 
     let shutdown_token = CancellationToken::new();
     let _config_watcher = config_watcher::spawn_config_watcher(

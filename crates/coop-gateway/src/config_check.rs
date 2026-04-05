@@ -221,6 +221,9 @@ pub(crate) fn validate_config(config_path: &Path, config_dir: &Path) -> CheckRep
     // 6b. prompt config
     check_prompt(&mut report, &config);
 
+    // 6c. subagent config
+    check_subagents(&mut report, &config);
+
     // 7-8 depend on workspace
     if let Some(ref ws) = workspace {
         check_workspace_files(&mut report, ws, &config);
@@ -913,6 +916,124 @@ fn check_prompt(report: &mut CheckReport, config: &Config) {
                 config.prompt.user_files.len(),
             ),
         });
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn check_subagents(report: &mut CheckReport, config: &Config) {
+    let subagents = &config.agent.subagents;
+    let enabled = subagents.enabled;
+    let valid = subagents.max_spawn_depth >= 1
+        && subagents.max_active_children > 0
+        && subagents.max_concurrent > 0
+        && subagents.default_timeout_seconds > 0
+        && subagents.default_max_turns > 0;
+
+    report.push(CheckResult {
+        name: "subagents_config",
+        severity: Severity::Error,
+        passed: valid,
+        message: if valid {
+            format!(
+                "subagents: enabled={enabled}, max_spawn_depth={}, max_active_children={}, max_concurrent={}, default_timeout_seconds={}, default_max_turns={}",
+                subagents.max_spawn_depth,
+                subagents.max_active_children,
+                subagents.max_concurrent,
+                subagents.default_timeout_seconds,
+                subagents.default_max_turns,
+            )
+        } else {
+            "agent.subagents requires max_spawn_depth >= 1, max_active_children > 0, max_concurrent > 0, default_timeout_seconds > 0, and default_max_turns > 0".to_owned()
+        },
+    });
+
+    if let Some(model) = &subagents.model {
+        let model_ok = resolve_available_model(config, model).is_some();
+        report.push(CheckResult {
+            name: "subagents_model",
+            severity: Severity::Error,
+            passed: model_ok,
+            message: if model_ok {
+                format!("agent.subagents.model '{model}' is available")
+            } else {
+                format!(
+                    "agent.subagents.model '{model}' must appear in one configured provider's model list or built-in catalog"
+                )
+            },
+        });
+    }
+
+    for (name, profile) in &subagents.profiles {
+        let tools = profile.tools.as_deref().unwrap_or(&[]);
+        let has_empty_tool = tools.iter().any(|tool| tool.trim().is_empty());
+        let mut seen = HashSet::new();
+        let duplicate_tools: Vec<&str> = tools
+            .iter()
+            .map(String::as_str)
+            .filter(|tool| !seen.insert(*tool))
+            .collect();
+        let timeouts_ok = profile
+            .default_timeout_seconds
+            .is_none_or(|value| value > 0);
+        let turns_ok = profile.default_max_turns.is_none_or(|value| value > 0);
+        let profile_ok = !has_empty_tool && duplicate_tools.is_empty() && timeouts_ok && turns_ok;
+
+        report.push(CheckResult {
+            name: "subagents_profiles",
+            severity: Severity::Error,
+            passed: profile_ok,
+            message: if profile_ok {
+                format!(
+                    "subagent profile '{name}': {} tools{}{}",
+                    tools.len(),
+                    profile
+                        .default_timeout_seconds
+                        .map_or_else(String::new, |value| format!(", timeout={value}")),
+                    profile
+                        .default_max_turns
+                        .map_or_else(String::new, |value| format!(", max_turns={value}")),
+                )
+            } else if has_empty_tool {
+                format!("subagent profile '{name}' contains an empty tool name")
+            } else if !duplicate_tools.is_empty() {
+                format!(
+                    "subagent profile '{name}' contains duplicate tools: {}",
+                    duplicate_tools.join(", ")
+                )
+            } else if !timeouts_ok {
+                format!("subagent profile '{name}' requires default_timeout_seconds > 0 when set")
+            } else {
+                format!("subagent profile '{name}' requires default_max_turns > 0 when set")
+            },
+        });
+
+        if let Some(model) = &profile.model {
+            let model_ok = resolve_available_model(config, model).is_some();
+            report.push(CheckResult {
+                name: "subagents_profile_model",
+                severity: Severity::Error,
+                passed: model_ok,
+                message: if model_ok {
+                    format!("subagent profile '{name}' model '{model}' is available")
+                } else {
+                    format!(
+                        "subagent profile '{name}' model '{model}' must appear in one configured provider's model list or built-in catalog"
+                    )
+                },
+            });
+        }
+
+        if profile.allow_spawn && subagents.max_spawn_depth < 2 {
+            report.push(CheckResult {
+                name: "subagents_profile_allow_spawn",
+                severity: Severity::Warning,
+                passed: false,
+                message: format!(
+                    "subagent profile '{name}' sets allow_spawn=true but max_spawn_depth={} prevents child subagents",
+                    subagents.max_spawn_depth
+                ),
+            });
+        }
     }
 }
 
@@ -2891,5 +3012,58 @@ mod tests {
             .iter()
             .find(|r| r.name == "groups" && r.message.contains("duplicate"));
         assert!(check.is_some(), "duplicate match should warn");
+    }
+
+    #[test]
+    fn test_invalid_subagent_defaults_fail_validation() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(workspace.join("SOUL.md"), "test soul").unwrap();
+
+        let config_path = dir.path().join("coop.toml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "[agent]\nid = \"test\"\nmodel = \"test-model\"\nworkspace = \"{}\"\n\n[agent.subagents]\nmax_spawn_depth = 0\ndefault_timeout_seconds = 0\ndefault_max_turns = 0\n",
+                workspace.display()
+            ),
+        )
+        .unwrap();
+
+        let report = validate_config(&config_path, dir.path());
+        let check = report
+            .results
+            .iter()
+            .find(|result| result.name == "subagents_config")
+            .unwrap();
+        assert!(!check.passed);
+    }
+
+    #[test]
+    fn test_unknown_subagent_profile_model_fails_validation() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(workspace.join("SOUL.md"), "test soul").unwrap();
+
+        let config_path = dir.path().join("coop.toml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "[agent]\nid = \"test\"\nmodel = \"test-model\"\nworkspace = \"{}\"\n\n[agent.subagents.profiles.code]\nmodel = \"missing-model\"\n",
+                workspace.display()
+            ),
+        )
+        .unwrap();
+
+        let report = validate_config(&config_path, dir.path());
+        let check = report
+            .results
+            .iter()
+            .find(|result| result.name == "subagents_profile_model")
+            .unwrap();
+        assert!(!check.passed);
+        assert!(check.message.contains("missing-model"));
     }
 }

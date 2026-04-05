@@ -1313,6 +1313,7 @@ fn describe_session_kind(kind: &SessionKind) -> String {
         SessionKind::Dm(identity) => format!("dm ({identity})"),
         SessionKind::Group(group) => format!("group ({group})"),
         SessionKind::Isolated(id) => format!("isolated ({id})"),
+        SessionKind::Subagent(id) => format!("subagent ({id})"),
         SessionKind::Cron(name) => format!("cron ({name})"),
     }
 }

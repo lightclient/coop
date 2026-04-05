@@ -150,7 +150,10 @@ impl TypingNotifier for SignalTypingNotifier {
                     Err(_) => return,
                 }
             }
-            SessionKind::Main | SessionKind::Isolated(_) | SessionKind::Cron(_) => return,
+            SessionKind::Main
+            | SessionKind::Isolated(_)
+            | SessionKind::Cron(_)
+            | SessionKind::Subagent(_) => return,
         };
 
         let _ = self

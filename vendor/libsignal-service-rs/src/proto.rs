@@ -1,0 +1,195 @@
+#![allow(clippy::all)]
+
+use libsignal_core::{Aci, ServiceId};
+use rand::{CryptoRng, Rng};
+use reqwest::StatusCode;
+include!(concat!(env!("OUT_DIR"), "/signalservice.rs"));
+include!(concat!(env!("OUT_DIR"), "/signal.rs"));
+
+impl WebSocketRequestMessage {
+    /// Equivalent of
+    /// `SignalServiceMessagePipe::isSignalServiceEnvelope(WebSocketMessage)`.
+    pub fn is_signal_service_envelope(&self) -> bool {
+        self.verb.as_deref() == Some("PUT")
+            && self.path.as_deref() == Some("/api/v1/message")
+    }
+
+    pub fn is_queue_empty(&self) -> bool {
+        self.verb.as_deref() == Some("PUT")
+            && self.path.as_deref() == Some("/api/v1/queue/empty")
+    }
+}
+
+impl WebSocketResponseMessage {
+    /// Equivalent of
+    /// `SignalServiceMessagePipe::isSignalServiceEnvelope(WebSocketMessage)`.
+    pub fn from_request(msg: &WebSocketRequestMessage) -> Self {
+        if msg.is_signal_service_envelope() || msg.is_queue_empty() {
+            WebSocketResponseMessage {
+                id: msg.id,
+                status: Some(200),
+                message: Some("OK".to_string()),
+                ..Default::default()
+            }
+        } else {
+            WebSocketResponseMessage {
+                id: msg.id,
+                status: Some(400),
+                message: Some("Unknown".to_string()),
+                ..Default::default()
+            }
+        }
+    }
+
+    pub fn status_code(&self) -> Option<reqwest::StatusCode> {
+        StatusCode::from_u16(self.status().try_into().ok()?).ok()
+    }
+}
+
+impl SyncMessage {
+    pub fn with_padding<R: Rng + CryptoRng>(csprng: &mut R) -> Self {
+        let random_size = csprng.random_range(1..=512);
+        let mut padding: Vec<u8> = vec![0; random_size];
+        csprng.fill_bytes(&mut padding);
+
+        Self {
+            padding: Some(padding),
+            ..Default::default()
+        }
+    }
+}
+
+impl sync_message::Sent {
+    pub fn parse_destination_service_id(&self) -> Option<ServiceId> {
+        crate::utils::parse_service_id_with_fallback(
+            self.destination_service_id_binary.as_deref(),
+            self.destination_service_id.as_deref(),
+        )
+    }
+}
+
+impl data_message::Reaction {
+    pub fn parse_target_author_aci(&self) -> Option<Aci> {
+        crate::utils::parse_aci_with_fallback(
+            self.target_author_aci_binary.as_deref(),
+            self.target_author_aci.as_deref(),
+        )
+    }
+}
+
+impl data_message::Quote {
+    pub fn parse_author_aci(&self) -> Option<Aci> {
+        crate::utils::parse_aci_with_fallback(
+            self.author_aci_binary.as_deref(),
+            self.author_aci.as_deref(),
+        )
+    }
+}
+
+impl data_message::StoryContext {
+    pub fn parse_author_aci(&self) -> Option<Aci> {
+        crate::utils::parse_aci_with_fallback(
+            self.author_aci_binary.as_deref(),
+            self.author_aci.as_deref(),
+        )
+    }
+}
+
+impl data_message::PollVote {
+    pub fn parse_target_author_aci(&self) -> Option<Aci> {
+        crate::utils::parse_aci_with_fallback(
+            self.target_author_aci_binary.as_deref(),
+            None,
+        )
+    }
+}
+
+impl data_message::PinMessage {
+    pub fn parse_target_author_aci(&self) -> Option<Aci> {
+        crate::utils::parse_aci_with_fallback(
+            self.target_author_aci_binary.as_deref(),
+            None,
+        )
+    }
+}
+
+impl data_message::UnpinMessage {
+    pub fn parse_target_author_aci(&self) -> Option<Aci> {
+        crate::utils::parse_aci_with_fallback(
+            self.target_author_aci_binary.as_deref(),
+            None,
+        )
+    }
+}
+
+impl Verified {
+    pub fn parse_destination_aci(&self) -> Option<Aci> {
+        crate::utils::parse_aci_with_fallback(
+            self.destination_aci_binary.as_deref(),
+            self.destination_aci.as_deref(),
+        )
+    }
+}
+
+impl sync_message::sent::UnidentifiedDeliveryStatus {
+    pub fn parse_destination_service_id(&self) -> Option<ServiceId> {
+        crate::utils::parse_service_id_with_fallback(
+            self.destination_service_id_binary.as_deref(),
+            self.destination_service_id.as_deref(),
+        )
+    }
+}
+
+impl sync_message::sent::StoryMessageRecipient {
+    pub fn parse_destination_service_id(&self) -> Option<ServiceId> {
+        crate::utils::parse_service_id_with_fallback(
+            self.destination_service_id_binary.as_deref(),
+            self.destination_service_id.as_deref(),
+        )
+    }
+}
+
+impl sync_message::Read {
+    pub fn parse_sender_aci(&self) -> Option<Aci> {
+        crate::utils::parse_aci_with_fallback(
+            self.sender_aci_binary.as_deref(),
+            self.sender_aci.as_deref(),
+        )
+    }
+}
+
+impl sync_message::Viewed {
+    pub fn parse_sender_aci(&self) -> Option<Aci> {
+        crate::utils::parse_aci_with_fallback(
+            self.sender_aci_binary.as_deref(),
+            self.sender_aci.as_deref(),
+        )
+    }
+}
+
+impl sync_message::ViewOnceOpen {
+    pub fn parse_sender_aci(&self) -> Option<Aci> {
+        crate::utils::parse_aci_with_fallback(
+            self.sender_aci_binary.as_deref(),
+            self.sender_aci.as_deref(),
+        )
+    }
+}
+
+impl sync_message::MessageRequestResponse {
+    pub fn parse_thread_aci(&self) -> Option<Aci> {
+        crate::utils::parse_aci_with_fallback(
+            self.thread_aci_binary.as_deref(),
+            self.thread_aci.as_deref(),
+        )
+    }
+}
+
+impl ContactDetails {
+    pub fn parse_aci(&self) -> Option<Aci> {
+        crate::utils::parse_aci_with_fallback(
+            self.aci_binary.as_deref(),
+            self.aci.as_deref(),
+        )
+    }
+}

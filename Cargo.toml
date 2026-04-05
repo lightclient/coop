@@ -89,4 +89,4 @@ presage = { git = "https://github.com/lightclient/presage", rev = "acbae5f8577b8
 presage-store-sqlite = { git = "https://github.com/lightclient/presage", rev = "acbae5f8577b8b9fce4d40261ac69d54471d893f" }
 
 [patch."https://github.com/whisperfish/libsignal-service-rs"]
-libsignal-service = { git = "https://github.com/lightclient/libsignal-service-rs", rev = "f76673c8de9e890399862c83ca7205bdecf3e09c" }
+libsignal-service = { path = "vendor/libsignal-service-rs" }

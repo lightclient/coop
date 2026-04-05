@@ -40,6 +40,7 @@ use crate::overflow_recovery;
 use crate::provider_factory;
 use crate::provider_registry::ProviderRegistry;
 use crate::session_store::DiskSessionStore;
+use crate::subagents::{SubagentManager, TurnOverrides};
 use crate::user_model_store::UserModelStore;
 
 pub(crate) struct Gateway {
@@ -50,6 +51,7 @@ pub(crate) struct Gateway {
     providers: ProviderRegistry,
     main_providers: Mutex<HashMap<String, Arc<dyn Provider>>>,
     user_models: UserModelStore,
+    subagents: Arc<SubagentManager>,
     executor: Arc<dyn ToolExecutor>,
     memory: Option<Arc<dyn Memory>>,
     typing_notifier: Option<Arc<dyn TypingNotifier>>,
@@ -174,11 +176,15 @@ fn signal_target_from_session(session_key: &SessionKey) -> Option<(&'static str,
             };
             Some(("group", target))
         }
-        SessionKind::Main | SessionKind::Isolated(_) | SessionKind::Cron(_) => None,
+        SessionKind::Main
+        | SessionKind::Isolated(_)
+        | SessionKind::Subagent(_)
+        | SessionKind::Cron(_) => None,
     }
 }
 
 impl Gateway {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn new(
         config: SharedConfig,
         workspace: PathBuf,
@@ -186,6 +192,31 @@ impl Gateway {
         executor: Arc<dyn ToolExecutor>,
         typing_notifier: Option<Arc<dyn TypingNotifier>>,
         memory: Option<Arc<dyn Memory>>,
+    ) -> Result<Self> {
+        let subagents = Arc::new(SubagentManager::new(
+            Arc::clone(&config),
+            workspace.clone(),
+        )?);
+        Self::new_with_subagents(
+            config,
+            workspace,
+            providers,
+            executor,
+            typing_notifier,
+            memory,
+            subagents,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_with_subagents(
+        config: SharedConfig,
+        workspace: PathBuf,
+        providers: ProviderRegistry,
+        executor: Arc<dyn ToolExecutor>,
+        typing_notifier: Option<Arc<dyn TypingNotifier>>,
+        memory: Option<Arc<dyn Memory>>,
+        subagents: Arc<SubagentManager>,
     ) -> Result<Self> {
         let file_configs = config.load().prompt.shared_core_configs();
         let workspace_index = WorkspaceIndex::scan(&workspace, &file_configs)?;
@@ -217,6 +248,7 @@ impl Gateway {
             providers,
             main_providers: Mutex::new(main_providers),
             user_models,
+            subagents,
             executor,
             memory,
             typing_notifier,
@@ -387,6 +419,14 @@ impl Gateway {
         parse_session_key(session, &self.config.load().agent.id)
     }
 
+    pub(crate) fn all_tool_defs(&self) -> Vec<ToolDef> {
+        self.executor.tools()
+    }
+
+    pub(crate) fn subagents(&self) -> &Arc<SubagentManager> {
+        &self.subagents
+    }
+
     fn turn_workspace_scope(
         &self,
         session_key: &SessionKey,
@@ -401,6 +441,8 @@ impl Gateway {
         trust: TrustLevel,
         user_name: Option<&str>,
         scope: &coop_core::WorkspaceScope,
+        model_name: &str,
+        tool_defs: &[ToolDef],
     ) -> ToolContext {
         let _ = scope.ensure_scope_root_exists();
         ToolContext::new(
@@ -410,6 +452,33 @@ impl Gateway {
             scope.workspace_root(),
             user_name,
         )
+        .with_model(model_name)
+        .with_visible_tools(tool_defs.iter().map(|tool| tool.name.clone()))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn run_turn_with_options(
+        &self,
+        session_key: &SessionKey,
+        user_input: &str,
+        trust: TrustLevel,
+        user_name: Option<&str>,
+        channel: Option<&str>,
+        cron_delivery_mode: Option<CronDeliveryMode>,
+        overrides: TurnOverrides,
+        event_tx: mpsc::Sender<TurnEvent>,
+    ) -> Result<()> {
+        self.run_turn_inner(
+            session_key,
+            user_input,
+            trust,
+            user_name,
+            channel,
+            cron_delivery_mode,
+            overrides,
+            event_tx,
+        )
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -434,7 +503,7 @@ impl Gateway {
         .await
     }
 
-    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn run_turn_with_trust_and_cron_delivery(
         &self,
         session_key: &SessionKey,
@@ -443,6 +512,31 @@ impl Gateway {
         user_name: Option<&str>,
         channel: Option<&str>,
         cron_delivery_mode: Option<CronDeliveryMode>,
+        event_tx: mpsc::Sender<TurnEvent>,
+    ) -> Result<()> {
+        self.run_turn_inner(
+            session_key,
+            user_input,
+            trust,
+            user_name,
+            channel,
+            cron_delivery_mode,
+            TurnOverrides::default(),
+            event_tx,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+    async fn run_turn_inner(
+        &self,
+        session_key: &SessionKey,
+        user_input: &str,
+        trust: TrustLevel,
+        user_name: Option<&str>,
+        channel: Option<&str>,
+        cron_delivery_mode: Option<CronDeliveryMode>,
+        overrides: TurnOverrides,
         event_tx: mpsc::Sender<TurnEvent>,
     ) -> Result<()> {
         let span = info_span!(
@@ -492,7 +586,10 @@ impl Gateway {
                 None
             };
 
-            let selected_model = self.model_name_for_user(user_name);
+            let selected_model = overrides
+                .model
+                .clone()
+                .unwrap_or_else(|| self.model_name_for_user(user_name));
             tracing::Span::current().record("model", tracing::field::display(&selected_model));
             let provider = self.main_provider_for_model(&selected_model)?;
             let context_limit = provider.model_info().context_limit;
@@ -513,8 +610,10 @@ impl Gateway {
             }
 
             let workspace_scope = self.turn_workspace_scope(session_key, trust, user_name);
-            let mut system_prompt = self
-                .build_prompt(
+            let mut system_prompt = if let Some(prompt_blocks) = overrides.prompt_blocks.clone() {
+                prompt_blocks
+            } else {
+                self.build_prompt(
                     session_key,
                     trust,
                     user_name,
@@ -523,7 +622,8 @@ impl Gateway {
                     user_input,
                     cron_delivery_mode,
                 )
-                .await?;
+                .await?
+            };
 
             // Inject group-specific intro when this is a group session.
             // Append to the last block to avoid exceeding the cache_control block limit.
@@ -561,11 +661,37 @@ impl Gateway {
             .await?;
 
             let session_len_before = self.messages(session_key).len();
-            self.append_message(session_key, Message::user().with_text(user_input));
+            if let Some(initial_message) = overrides.initial_message.clone() {
+                self.append_message(session_key, initial_message);
+            } else {
+                self.append_message(session_key, Message::user().with_text(user_input));
+            }
 
             let tool_defs = self.tool_defs_for_session(session_key);
-            let ctx = Self::tool_context(session_key, trust, user_name, &workspace_scope);
-            let turn_config = TurnConfig::default();
+            let tool_defs = if let Some(tool_names) = &overrides.tool_names {
+                let allowed: HashSet<&str> = tool_names
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<HashSet<_>>();
+                tool_defs
+                    .into_iter()
+                    .filter(|tool| allowed.contains(tool.name.as_str()))
+                    .collect()
+            } else {
+                tool_defs
+            };
+            let ctx = Self::tool_context(
+                session_key,
+                trust,
+                user_name,
+                &workspace_scope,
+                &selected_model,
+                &tool_defs,
+            );
+            let mut turn_config = TurnConfig::default();
+            if let Some(max_iterations) = overrides.max_iterations {
+                turn_config.max_iterations = max_iterations;
+            }
             let final_reply_policy = FinalReplyPolicy::for_turn(channel, cron_delivery_mode);
 
             let mut total_usage = Usage::default();
@@ -762,6 +888,12 @@ impl Gateway {
 
                     let output = async {
                         debug!(arguments = %req.arguments, "tool arguments");
+                        if !tool_defs.iter().any(|tool| tool.name == req.name) {
+                            return coop_core::ToolOutput::error(format!(
+                                "tool not available in this session: {}",
+                                req.name
+                            ));
+                        }
                         match self
                             .executor
                             .execute(&req.name, req.arguments.clone(), &ctx)
@@ -1170,6 +1302,7 @@ impl Gateway {
     /// Cancel the active turn for a session, if one is running.
     /// Returns `true` if a turn was cancelled.
     pub(crate) fn cancel_active_turn(&self, session_key: &SessionKey) -> bool {
+        let cancelled_children = self.subagents.cancel_for_parent_session(session_key);
         let tokens = self
             .active_turns
             .lock()
@@ -1179,7 +1312,7 @@ impl Gateway {
             info!(session = %session_key, "active turn cancelled via /stop");
             true
         } else {
-            false
+            cancelled_children
         }
     }
 
@@ -1599,7 +1732,6 @@ impl Gateway {
     ///
     /// The message is appended to the session at the next safe point
     /// (between turn iterations, after tool results are committed).
-    #[cfg(any(feature = "signal", test))]
     pub(crate) fn inject_pending_inbound(&self, session_key: &SessionKey, content: String) {
         let mut pending = self
             .pending_inbound
@@ -2640,6 +2772,14 @@ fn parse_session_key(session: &str, agent_id: &str) -> Option<SessionKey> {
         });
     }
 
+    if let Some(subagent) = rest.strip_prefix("subagent:") {
+        let uuid = Uuid::parse_str(subagent).ok()?;
+        return Some(SessionKey {
+            agent_id: agent_id.to_owned(),
+            kind: SessionKind::Subagent(uuid),
+        });
+    }
+
     if let Some(cron_name) = rest.strip_prefix("cron:")
         && !cron_name.is_empty()
     {
@@ -2794,6 +2934,21 @@ model = "test-model"
             SessionKey {
                 agent_id: "coop".to_owned(),
                 kind: SessionKind::Cron("heartbeat".to_owned()),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_subagent_session() {
+        let key = parse_session_key("coop:subagent:123e4567-e89b-12d3-a456-426614174000", "coop")
+            .unwrap();
+        assert_eq!(
+            key,
+            SessionKey {
+                agent_id: "coop".to_owned(),
+                kind: SessionKind::Subagent(
+                    Uuid::parse_str("123e4567-e89b-12d3-a456-426614174000").unwrap(),
+                ),
             }
         );
     }

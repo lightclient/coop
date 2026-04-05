@@ -29,6 +29,10 @@ impl DeliverySender {
         Self { tx }
     }
 
+    pub(crate) fn channel_sender(&self) -> mpsc::Sender<OutboundMessage> {
+        self.tx.clone()
+    }
+
     pub(crate) async fn send(&self, channel: &str, target: &str, content: &str) -> Result<()> {
         let outbound = OutboundMessage {
             channel: channel.to_owned(),

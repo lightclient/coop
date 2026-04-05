@@ -1,25 +1,26 @@
 # BUG-006: Signal direct-message replies emit `could not create sync message from a direct message`
 
-**Status:** Open
+**Status:** Fixed
 **Found:** 2026-03-18
 **Scenario:** Signal e2e verification of `/models`, `/model`, `/status`, and follow-up turns
 
 ## Symptom
 
-Every outbound Signal DM action in this environment emits one or more `ERROR` trace entries with:
+Outbound Signal DM actions emitted `ERROR` trace entries like:
 
 ```text
 could not create sync message from a direct message
 ```
 
-The visible user action still succeeds — commands are handled and replies are sent — but the e2e verifier reports failure because it requires zero `ERROR` entries in the new trace segment.
+The visible user action still succeeded — commands were handled and replies were sent — but the e2e verifier reported failure because it requires zero `ERROR` entries in the new trace segment.
 
-Observed patterns:
-
+Observed patterns before the fix:
 - command replies: 2 errors per interaction (delivery + read receipt path)
 - normal turns: 4+ errors (receipts, typing start/stop, and/or final reply path)
 
 ## Trace Evidence
+
+Before the fix:
 
 ```text
 2026-03-18T13:31:13Z ERROR signal_action_send:send_message
@@ -29,47 +30,33 @@ Observed patterns:
 2026-03-18T13:31:13Z DEBUG signal_action_send
   signal.action="delivery_receipt"
   message="signal action sent"
-
-2026-03-18T13:31:13Z ERROR signal_action_send:send_message
-  message="could not create sync message from a direct message"
-  recipient="[redacted-id]"
-
-2026-03-18T13:31:13Z DEBUG signal_action_send
-  signal.action="read_receipt"
-  message="signal action sent"
 ```
 
-And during a normal turn:
+After the fix, the same flows produce only debug-level trace noise for unsupported sync-transcript content:
 
 ```text
-2026-03-18T13:38:03Z DEBUG codex_request message="Codex response complete"
-2026-03-18T13:38:03Z ERROR signal_action_send:send_message
-  message="could not create sync message from a direct message"
-2026-03-18T13:38:03Z DEBUG signal_action_send
-  signal.action="send_text"
-  signal.raw_content="Four"
-  message="signal action sent"
+DEBUG sending multi-device sync message
+DEBUG skipping direct sync message for content without sent-transcript support content="ReceiptMessage"
+DEBUG signal action sent
 ```
 
 ## Root Cause
 
-Not root-caused in this session.
+`vendor/libsignal-service-rs/src/sender.rs` tried to create sent-transcript sync messages for content types that do not have a sent-transcript representation, such as delivery receipts, read receipts, and typing messages.
 
-The failure appears to come from the Signal/presage/libsignal send path when it attempts to create a multi-device sync message for a direct message. The actual outward action still completes, so this looks like error-level trace noise or an avoidable sync-message path rather than a hard delivery failure.
+The helper `create_multi_device_sent_transcript_content` correctly returned `None` for those content types, but the caller treated that as an `ERROR` even though the original Signal action had already been sent successfully and no user-visible failure occurred.
 
 ## Fix
 
-Not fixed in this session.
+Fixed in `vendor/libsignal-service-rs/src/sender.rs` by downgrading those cases from error-level logging to debug-level logging when the content type does not support a sent transcript.
 
-Likely follow-up areas:
-
-1. Inspect the presage/libsignal direct-message send path used by `SignalAction::{SendText,Typing,...}`
-2. Determine whether sync-message creation should be skipped for this target/session type
-3. Downgrade known-benign failures if they do not affect user-visible delivery
-4. Update the e2e verifier expectations only if the error is truly harmless and unavoidable
+Real failures to create sync messages for normal message/edit content still log as errors.
 
 ## Test Coverage
 
-No regression test added yet.
+Verification performed with live Signal e2e:
 
-A good follow-up test would assert that successful direct-message replies do not emit `ERROR` trace entries during receipt/typing/reply sends.
+- `bash .claude/skills/signal-e2e-test/scripts/send-and-verify.sh "/status" --trace-file traces.jsonl`
+- result now passes with `✅ No errors`
+
+Additional regression coverage comes from the Signal-enabled build/tests and the manual trace verification of receipt and typing send paths.

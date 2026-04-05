@@ -45,6 +45,7 @@ pub(crate) async fn handle_slash_command(
         "/model" => Some(
             handle_model_command(gateway, trimmed, session_key, trust, channel, user_name).await,
         ),
+        "/subagents" => Some(handle_subagents_command(gateway, trimmed)),
         "/help" | "/?" => Some(help_text().to_owned()),
         _ => None,
     }
@@ -69,8 +70,14 @@ fn format_status(gateway: &Gateway, session_key: &SessionKey, user_name: Option<
     } else {
         ""
     };
+    let active_subagents = gateway
+        .subagents()
+        .list_runs()
+        .into_iter()
+        .filter(|run| run.parent_session_key == *session_key && run.status.is_active())
+        .count();
     format!(
-        "Session: {}{active}\nAgent: {}\nModel: {}\nMessages: {}\nContext: {} / {} tokens ({:.1}%)\nTotal tokens used: {} in / {} out",
+        "Session: {}{active}\nAgent: {}\nModel: {}\nMessages: {}\nContext: {} / {} tokens ({:.1}%)\nTotal tokens used: {} in / {} out\nActive subagents: {}",
         session_key,
         gateway.agent_id(),
         model,
@@ -80,6 +87,7 @@ fn format_status(gateway: &Gateway, session_key: &SessionKey, user_name: Option<
         context_pct,
         format_number(u64::from(usage.cumulative.input_tokens.unwrap_or(0))),
         format_number(u64::from(usage.cumulative.output_tokens.unwrap_or(0))),
+        active_subagents,
     )
 }
 
@@ -133,7 +141,10 @@ fn format_models(gateway: &Gateway, user_name: Option<&str>) -> String {
         lines.push(line);
     }
 
-    lines.push("Use /model <id> to switch.".to_owned());
+    lines.push("Use /model <id> to switch the primary session model.".to_owned());
+    lines.push(
+        "Use subagent profiles for specialized models and bounded delegated work.".to_owned(),
+    );
     lines.join("\n")
 }
 
@@ -176,12 +187,100 @@ async fn handle_model_command(
     }
 }
 
+fn handle_subagents_command(gateway: &Gateway, input: &str) -> String {
+    let mut parts = input.split_whitespace();
+    let _command = parts.next();
+    let action = parts.next().unwrap_or("list");
+
+    match action {
+        "list" => {
+            let runs = gateway.subagents().list_runs();
+            if runs.is_empty() {
+                return "No subagent runs yet.".to_owned();
+            }
+            let mut lines = vec!["Subagent runs:".to_owned()];
+            for run in runs.into_iter().take(10) {
+                lines.push(format!(
+                    "- {}  {}  {}  {}",
+                    run.run_id,
+                    run.status.as_str(),
+                    run.model,
+                    run.task.lines().next().unwrap_or_default()
+                ));
+            }
+            lines.join("\n")
+        }
+        "inspect" => {
+            let Some(run_id) = parts.next() else {
+                return "Usage: /subagents inspect <run_id>".to_owned();
+            };
+            match gateway.subagents().inspect_run(run_id) {
+                Ok(run) => {
+                    let mut lines = vec![
+                        format!("Run: {}", run.run_id),
+                        format!("Status: {}", run.status.as_str()),
+                        format!("Model: {}", run.model),
+                        format!("Child session: {}", run.child_session_key),
+                        format!("Parent session: {}", run.parent_session_key),
+                        format!("Depth: {}", run.depth),
+                        format!("Timeout: {}s", run.timeout_seconds),
+                        format!("Max turns: {}", run.max_turns),
+                        format!("Task: {}", run.task),
+                    ];
+                    if let Some(profile) = run.profile {
+                        lines.push(format!("Profile: {profile}"));
+                    }
+                    if !run.tool_names.is_empty() {
+                        lines.push(format!("Tools: {}", run.tool_names.join(", ")));
+                    }
+                    if !run.paths.is_empty() {
+                        lines.push(format!("Paths: {}", run.paths.join(", ")));
+                    }
+                    if !run.artifact_paths.is_empty() {
+                        lines.push(format!("Artifacts: {}", run.artifact_paths.join(", ")));
+                    }
+                    if let Some(summary) = run.summary {
+                        lines.push(String::new());
+                        lines.push("Summary:".to_owned());
+                        lines.push(summary);
+                    }
+                    if let Some(error) = run.error {
+                        lines.push(format!("Error: {error}"));
+                    }
+                    lines.join("\n")
+                }
+                Err(error) => format!("Could not inspect subagent run: {error}"),
+            }
+        }
+        "kill" => {
+            let Some(run_id) = parts.next() else {
+                return "Usage: /subagents kill <run_id>".to_owned();
+            };
+            match uuid::Uuid::parse_str(run_id) {
+                Ok(run_id) => match gateway
+                    .subagents()
+                    .cancel_run(run_id, "stopped via /subagents kill")
+                {
+                    Ok(true) => format!("Stopped subagent {run_id} ✅"),
+                    Ok(false) => format!("No active subagent found for {run_id}."),
+                    Err(error) => format!("Could not stop subagent: {error}"),
+                },
+                Err(error) => format!("Invalid subagent run id: {error}"),
+            }
+        }
+        _ => "Usage: /subagents [list|inspect <run_id>|kill <run_id>]".to_owned(),
+    }
+}
+
 fn help_text() -> &'static str {
     "Available commands:\n\
-         /new, /clear  — Start a new session (clears history)\n\
-         /stop         — Stop the current agent turn\n\
-         /status       — Show session info\n\
-         /models       — List available models\n\
-         /model <id>   — Switch your current model\n\
-         /help, /?     — Show this help"
+         /new, /clear        — Start a new session (clears history)\n\
+         /stop               — Stop the current agent turn and any active child runs\n\
+         /status             — Show session info\n\
+         /models             — List available primary models\n\
+         /model <id>         — Switch your current primary model\n\
+         /subagents          — List active and recent subagent runs\n\
+         /subagents inspect <run_id> — Show subagent run details\n\
+         /subagents kill <run_id>    — Stop an active subagent run\n\
+         /help, /?           — Show this help"
 }
