@@ -5,9 +5,10 @@ use coop_core::TrustLevel;
 use coop_core::prompt::{PromptBuilder, WorkspaceIndex};
 
 use crate::config::{Config, ProviderConfig};
+use crate::model_capabilities::{model_capabilities, provider_model_capabilities};
 use crate::model_catalog::{
     normalize_model_key, provider_model_candidates, resolve_available_model,
-    resolve_available_model_direct, resolve_default_main_model, resolve_model_reference,
+    resolve_configured_model, resolve_default_main_model, resolve_model_reference,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -353,6 +354,22 @@ fn check_provider_config(report: &mut CheckReport, config: &Config) {
             )
         },
     });
+
+    let main_model_visible = model_capabilities(config, &config.agent.model)
+        .is_some_and(|caps| caps.visible_in_main_models());
+    report.push(CheckResult {
+        name: "agent_model_main_safe",
+        severity: Severity::Error,
+        passed: main_model_visible,
+        message: if main_model_visible {
+            format!("agent.model '{}' is available for main sessions", config.agent.model)
+        } else {
+            format!(
+                "agent.model '{}' is hidden or subagent-only; choose a main-session model and keep specialist models in subagent profiles",
+                config.agent.model
+            )
+        },
+    });
 }
 
 fn check_model_aliases(report: &mut CheckReport, config: &Config) {
@@ -409,7 +426,7 @@ fn check_model_aliases(report: &mut CheckReport, config: &Config) {
             continue;
         }
 
-        if resolve_available_model_direct(config, target).is_none() {
+        if resolve_configured_model(config, target).is_none() {
             alias_errors.push(format!(
                 "alias '{alias}' target '{target}' does not resolve to a configured model"
             ));
@@ -518,6 +535,51 @@ fn check_provider_entry(report: &mut CheckReport, provider: &ProviderConfig, pat
             format!("{path}.models: using built-in defaults")
         } else {
             format!("{path}.models: {} configured", provider.models.len())
+        },
+    });
+
+    let mut capability_errors = Vec::new();
+    let mut capability_keys = HashSet::new();
+    for (model, caps) in &provider.model_capabilities {
+        let key = normalize_model_key(model);
+        if key.is_empty() {
+            capability_errors.push("empty model capability key".to_owned());
+            continue;
+        }
+        if !capability_keys.insert(key) {
+            capability_errors.push(format!("duplicate normalized capability key: {model}"));
+        }
+        if caps.input_modalities.as_ref().is_some_and(Vec::is_empty) {
+            capability_errors.push(format!("{model} input_modalities must not be empty"));
+        }
+        if caps.output_modalities.as_ref().is_some_and(Vec::is_empty) {
+            capability_errors.push(format!("{model} output_modalities must not be empty"));
+        }
+
+        let effective = provider_model_capabilities(provider, model);
+        if !effective.supports_input(crate::config::ModelModality::Text) {
+            capability_errors.push(format!("{model} must support text input"));
+        }
+        if !effective.supports_output(crate::config::ModelModality::Text)
+            && !effective.supports_output(crate::config::ModelModality::Image)
+        {
+            capability_errors.push(format!("{model} must support text or image output"));
+        }
+    }
+    report.push(CheckResult {
+        name: "provider_model_capabilities",
+        severity: Severity::Error,
+        passed: capability_errors.is_empty(),
+        message: if capability_errors.is_empty() {
+            format!(
+                "{path}.model_capabilities: {} configured",
+                provider.model_capabilities.len()
+            )
+        } else {
+            format!(
+                "{path}.model_capabilities contains invalid entries: {}",
+                capability_errors.join(", ")
+            )
         },
     });
 
@@ -948,7 +1010,7 @@ fn check_subagents(report: &mut CheckReport, config: &Config) {
     });
 
     if let Some(model) = &subagents.model {
-        let model_ok = resolve_available_model(config, model).is_some();
+        let model_ok = resolve_configured_model(config, model).is_some();
         report.push(CheckResult {
             name: "subagents_model",
             severity: Severity::Error,
@@ -1008,7 +1070,7 @@ fn check_subagents(report: &mut CheckReport, config: &Config) {
         });
 
         if let Some(model) = &profile.model {
-            let model_ok = resolve_available_model(config, model).is_some();
+            let model_ok = resolve_configured_model(config, model).is_some();
             report.push(CheckResult {
                 name: "subagents_profile_model",
                 severity: Severity::Error,

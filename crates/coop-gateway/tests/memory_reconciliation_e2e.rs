@@ -52,6 +52,8 @@ mod memory_prompt_index;
 mod memory_reconcile;
 #[path = "../src/memory_tools.rs"]
 mod memory_tools;
+#[path = "../src/model_capabilities.rs"]
+mod model_capabilities;
 #[path = "../src/model_catalog.rs"]
 mod model_catalog;
 #[path = "../src/overflow_recovery.rs"]

@@ -1709,6 +1709,7 @@ mod tests {
             provider: crate::config::ProviderConfig {
                 name: "anthropic".to_owned(),
                 models: Vec::new(),
+                model_capabilities: BTreeMap::new(),
                 model_context_limits: BTreeMap::new(),
                 api_keys: vec![
                     "env:ANTHROPIC_API_KEY".to_owned(),

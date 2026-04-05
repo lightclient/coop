@@ -32,6 +32,7 @@ use crate::group_history::{GroupHistoryBuffer, GroupHistoryEntry};
 use crate::group_trigger::{self, SILENT_REPLY_TOKEN};
 use crate::memory_auto_capture;
 use crate::memory_prompt_index;
+use crate::model_capabilities::{EffectiveModelCapabilities, model_capabilities};
 use crate::model_catalog::{
     AvailableModel, find_available_model, model_aliases_for, normalize_model_key,
     resolve_available_model, resolve_model_reference,
@@ -456,6 +457,10 @@ impl Gateway {
         .with_visible_tools(tool_defs.iter().map(|tool| tool.name.clone()))
     }
 
+    fn model_capabilities_for(&self, model: &str) -> EffectiveModelCapabilities {
+        model_capabilities(&self.config.load(), model).unwrap_or_default()
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn run_turn_with_options(
         &self,
@@ -592,12 +597,23 @@ impl Gateway {
                 .unwrap_or_else(|| self.model_name_for_user(user_name));
             tracing::Span::current().record("model", tracing::field::display(&selected_model));
             let provider = self.main_provider_for_model(&selected_model)?;
+            let selected_capabilities = self.model_capabilities_for(&selected_model);
+            if selected_capabilities.subagent_only
+                && !matches!(session_key.kind, SessionKind::Subagent(_))
+            {
+                bail!(
+                    "model '{selected_model}' is configured as subagent-only; use a subagent profile instead"
+                );
+            }
             let context_limit = provider.model_info().context_limit;
             debug!(
                 session = %session_key,
                 user = ?user_name,
                 model = %selected_model,
                 context_limit,
+                supports_tools = selected_capabilities.supports_tools,
+                supports_image_input = selected_capabilities.supports_input(crate::config::ModelModality::Image),
+                subagent_only = selected_capabilities.subagent_only,
                 "resolved main model for turn"
             );
 
@@ -680,6 +696,11 @@ impl Gateway {
             } else {
                 tool_defs
             };
+            let tool_defs = if selected_capabilities.supports_tools {
+                tool_defs
+            } else {
+                Vec::new()
+            };
             let ctx = Self::tool_context(
                 session_key,
                 trust,
@@ -729,9 +750,10 @@ impl Gateway {
                             ),
                             None => all_messages,
                         };
-                        let messages = coop_core::images::inject_images_for_provider(
+                        let messages = prepare_messages_for_provider(
                             &messages,
                             &workspace_scope,
+                            &selected_capabilities,
                         );
 
                         match self
@@ -1025,8 +1047,11 @@ impl Gateway {
                         ),
                         None => all_messages,
                     };
-                    let messages =
-                        coop_core::images::inject_images_for_provider(&messages, &workspace_scope);
+                    let messages = prepare_messages_for_provider(
+                        &messages,
+                        &workspace_scope,
+                        &selected_capabilities,
+                    );
 
                     let (response, usage) = self
                         .assistant_response(
@@ -1767,6 +1792,10 @@ impl Gateway {
 
     pub(crate) fn configured_model_name_for_user(&self, user_name: Option<&str>) -> String {
         Self::configured_model_name_from_config(&self.config.load(), user_name)
+    }
+
+    pub(crate) fn configured_model_capabilities(&self, model: &str) -> EffectiveModelCapabilities {
+        self.model_capabilities_for(model)
     }
 
     pub(crate) fn available_main_models(&self) -> Vec<AvailableModel> {
@@ -2635,6 +2664,37 @@ fn is_transient_transport_error(error: &anyhow::Error) -> bool {
     .any(|needle| text.contains(needle))
 }
 
+fn prepare_messages_for_provider(
+    messages: &[Message],
+    scope: &coop_core::WorkspaceScope,
+    capabilities: &EffectiveModelCapabilities,
+) -> Vec<Message> {
+    let messages = if capabilities.supports_input(crate::config::ModelModality::Image) {
+        coop_core::images::inject_images_for_provider(messages, scope)
+    } else {
+        messages.to_vec()
+    };
+
+    if capabilities.supports_input(crate::config::ModelModality::Image) {
+        messages
+    } else {
+        strip_images_from_messages(&messages)
+    }
+}
+
+fn strip_images_from_messages(messages: &[Message]) -> Vec<Message> {
+    messages
+        .iter()
+        .cloned()
+        .map(|mut message| {
+            message
+                .content
+                .retain(|content| !matches!(content, Content::Image { .. }));
+            message
+        })
+        .collect()
+}
+
 fn terminal_turn_messages(messages: &[Message]) -> Vec<Message> {
     messages
         .iter()
@@ -2852,6 +2912,87 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct RecordingProvider {
+        model: ModelInfo,
+        tools: Mutex<Vec<Vec<ToolDef>>>,
+        messages: Mutex<Vec<Vec<Message>>>,
+        response: String,
+    }
+
+    impl RecordingProvider {
+        fn new(model: &str, response: &str) -> Self {
+            Self {
+                model: ModelInfo {
+                    name: model.to_owned(),
+                    context_limit: 128_000,
+                },
+                tools: Mutex::new(Vec::new()),
+                messages: Mutex::new(Vec::new()),
+                response: response.to_owned(),
+            }
+        }
+
+        fn last_tool_names(&self) -> Vec<String> {
+            self.tools
+                .lock()
+                .unwrap()
+                .last()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|tool| tool.name)
+                .collect()
+        }
+
+        fn last_messages(&self) -> Vec<Message> {
+            self.messages
+                .lock()
+                .unwrap()
+                .last()
+                .cloned()
+                .unwrap_or_default()
+        }
+    }
+
+    #[async_trait]
+    impl Provider for RecordingProvider {
+        fn name(&self) -> &'static str {
+            "recording"
+        }
+
+        fn model_info(&self) -> ModelInfo {
+            self.model.clone()
+        }
+
+        async fn complete(
+            &self,
+            _system: &[String],
+            messages: &[Message],
+            tools: &[ToolDef],
+        ) -> Result<(Message, Usage)> {
+            self.tools.lock().unwrap().push(tools.to_vec());
+            self.messages.lock().unwrap().push(messages.to_vec());
+            Ok((
+                Message::assistant().with_text(self.response.clone()),
+                Usage {
+                    input_tokens: Some(10),
+                    output_tokens: Some(5),
+                    ..Default::default()
+                },
+            ))
+        }
+
+        async fn stream(
+            &self,
+            _system: &[String],
+            _messages: &[Message],
+            _tools: &[ToolDef],
+        ) -> Result<ProviderStream> {
+            anyhow::bail!("RecordingProvider does not support streaming")
+        }
+    }
+
     fn test_config() -> Config {
         toml::from_str(
             r#"
@@ -2880,12 +3021,12 @@ model = "test-model"
     }
 
     fn read_trace_file_with_retry(path: &std::path::Path, needle: &str) -> String {
-        for _ in 0..20 {
+        for _ in 0..400 {
             let text = read_trace_file(path);
             if text.contains(needle) {
                 return text;
             }
-            std::thread::sleep(Duration::from_millis(25));
+            std::thread::sleep(Duration::from_millis(50));
         }
         read_trace_file(path)
     }
@@ -4835,6 +4976,144 @@ models = ["gpt-5-codex"]
         assert_eq!(selection.model, "gpt-5-codex");
         assert_eq!(selection.context_limit, 128_000);
         assert_eq!(gateway.model_name_for_user(Some("alice")), "gpt-5-codex");
+    }
+
+    #[tokio::test]
+    async fn set_user_model_rejects_non_tool_model_when_session_has_tool_history() {
+        let workspace = test_workspace();
+        let primary: Arc<dyn Provider> =
+            Arc::new(FakeProvider::with_model("hello", "gpt-5.4", 128_000));
+        let mut providers = registry(primary);
+        providers.register(
+            "gemini-specialist".to_owned(),
+            Arc::new(FakeProvider::with_model(
+                "hello",
+                "gemini-specialist",
+                128_000,
+            )),
+        );
+        let config: Config = toml::from_str(
+            r#"
+[agent]
+id = "coop"
+model = "gpt-5.4"
+
+[[providers]]
+name = "openai"
+models = ["gpt-5.4"]
+
+[[providers]]
+name = "gemini"
+models = ["gemini-specialist"]
+
+[providers.model_capabilities."gemini-specialist"]
+supports_tools = false
+"#,
+        )
+        .unwrap();
+        let gateway = Gateway::new(
+            shared_config(config),
+            workspace.path().to_path_buf(),
+            providers,
+            Arc::new(DefaultExecutor::new()),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let session_key = gateway.default_session_key();
+        gateway.append_message(&session_key, Message::user().with_text("do work"));
+        gateway.append_message(
+            &session_key,
+            Message::assistant().with_tool_request("call_1", "bash", serde_json::json!({})),
+        );
+        gateway.append_message(
+            &session_key,
+            Message::user().with_tool_result("call_1", "ok", false),
+        );
+
+        let error = gateway
+            .set_user_model_for_session(
+                &session_key,
+                TrustLevel::Full,
+                Some("alice"),
+                None,
+                "gemini-specialist",
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cannot switch this session to non-tool-capable model")
+        );
+    }
+
+    #[tokio::test]
+    async fn run_turn_omits_tools_and_images_for_model_capabilities() {
+        let workspace = test_workspace();
+        let image_path = workspace.path().join("input.png");
+        std::fs::write(
+            &image_path,
+            [
+                0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+                0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x04, 0x00, 0x00,
+                0x00, 0xB5, 0x1C, 0x0C, 0x02, 0x00, 0x00, 0x00, 0x0B, 0x49, 0x44, 0x41, 0x54, 0x78,
+                0x9C, 0x63, 0x60, 0x00, 0x00, 0x00, 0x03, 0x00, 0x01, 0x2B, 0x09, 0x4D, 0x84, 0x00,
+                0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+            ],
+        )
+        .unwrap();
+
+        let recording = Arc::new(RecordingProvider::new("test-model", "done"));
+        let provider = Arc::clone(&recording) as Arc<dyn Provider>;
+        let config: Config = toml::from_str(
+            r#"
+[agent]
+id = "coop"
+model = "test-model"
+
+[provider]
+name = "openai"
+models = ["test-model"]
+
+[provider.model_capabilities."test-model"]
+supports_tools = false
+input_modalities = ["text"]
+"#,
+        )
+        .unwrap();
+        let gateway = Gateway::new(
+            shared_config(config),
+            workspace.path().to_path_buf(),
+            registry(provider),
+            Arc::new(DefaultExecutor::new()),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let session_key = gateway.default_session_key();
+        let (event_tx, _event_rx) = mpsc::channel(32);
+        gateway
+            .run_turn_with_trust(
+                &session_key,
+                &format!("please inspect {}", image_path.display()),
+                TrustLevel::Full,
+                Some("alice"),
+                None,
+                event_tx,
+            )
+            .await
+            .unwrap();
+
+        assert!(recording.last_tool_names().is_empty());
+        assert!(recording.last_messages().iter().all(|message| {
+            message
+                .content
+                .iter()
+                .all(|content| !matches!(content, Content::Image { .. }))
+        }));
     }
 
     #[tokio::test]

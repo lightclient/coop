@@ -69,6 +69,22 @@ impl Gateway {
         let current_context_limit = current_provider.model_info().context_limit;
         let (selected_model, default_model) =
             self.resolve_user_model_selection(user_name, requested_model)?;
+        let selected_capabilities = self.configured_model_capabilities(&selected_model);
+        if selected_capabilities.subagent_only {
+            bail!(
+                "model '{selected_model}' is configured as subagent-only; use a subagent profile instead"
+            );
+        }
+        if !selected_capabilities.supports_tools
+            && self
+                .messages(session_key)
+                .iter()
+                .any(|message| message.has_tool_requests() || message.has_tool_results())
+        {
+            bail!(
+                "cannot switch this session to non-tool-capable model '{selected_model}' because the existing history contains tool calls; start a new session or use a subagent profile instead"
+            );
+        }
         let selected_provider = self.main_provider_for_model(&selected_model)?;
         let selected_context_limit = selected_provider.model_info().context_limit;
 

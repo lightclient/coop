@@ -1,5 +1,6 @@
 mod anthropic_provider;
 mod codex_provider;
+mod gemini_images;
 mod genai_provider;
 mod image_prep;
 mod key_pool;
@@ -8,6 +9,7 @@ mod model_context;
 mod model_mapping;
 mod models_dev;
 mod openai_codex;
+mod openai_compatible_images;
 mod openai_refresh;
 mod provider_spec;
 mod request_trace;
@@ -22,7 +24,11 @@ use std::sync::Arc;
 use coop_core::Provider;
 
 pub use anthropic_provider::AnthropicProvider;
+pub use gemini_images::{
+    GeminiImageGenerationResult, GeneratedImage, InputImage, generate_gemini_image,
+};
 pub use key_pool::{KeyPool, resolve_key_refs};
+pub use openai_compatible_images::generate_openai_compatible_image;
 pub use provider_spec::{ProviderKind, ProviderSpec};
 
 use codex_provider::CodexProvider;

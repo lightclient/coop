@@ -6,7 +6,7 @@ use coop_agent::{ProviderKind, ProviderSpec, create_provider};
 use coop_core::Provider;
 
 use crate::config::Config;
-use crate::model_catalog::{resolve_available_model, resolve_model_reference};
+use crate::model_catalog::{resolve_configured_model, resolve_model_reference};
 use crate::provider_registry::ProviderRegistry;
 
 pub(crate) fn create_primary_provider(config: &Config) -> Result<Arc<dyn Provider>> {
@@ -55,13 +55,13 @@ pub(crate) fn build_provider_registry(
     registry
 }
 
-fn provider_spec(config: &Config, model: &str) -> Result<ProviderSpec> {
+pub(crate) fn provider_spec(config: &Config, model: &str) -> Result<ProviderSpec> {
     let requested_model = resolve_model_reference(config, model);
     let default_model = resolve_model_reference(config, &config.agent.model);
     let provider = if config.providers.is_empty() {
         &config.provider
     } else {
-        resolve_available_model(config, &requested_model.resolved)
+        resolve_configured_model(config, &requested_model.resolved)
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "model '{}' is not configured in any provider",

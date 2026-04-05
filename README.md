@@ -182,6 +182,14 @@ name = "gemini"
 models = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.5-flash-lite"]
 # Optional: multiple API keys for automatic rotation on rate limits.
 # api_keys = ["env:GEMINI_API_KEY", "env:GEMINI_API_KEY_2"]
+# Optional per-model capability metadata. Use this to hide specialist models
+# from /models, disable tool use, or mark them subagent-only.
+# [providers.model_capabilities."gemini-2.0-flash-preview-image-generation"]
+# supports_tools = false
+# input_modalities = ["text", "image"]
+# output_modalities = ["text", "image"]
+# subagent_only = true
+# hide_from_models = true
 
 [[providers]]
 name = "openai"
@@ -205,6 +213,13 @@ models = ["llama3.2", "qwen2.5-coder:14b"]
 # name = "anthropic"
 # models = ["anthropic/claude-sonnet-4-20250514"]
 
+# Example specialist image workflow:
+# - keep your main chat on a normal /model-safe model (e.g. gpt-5.4)
+# - hide image specialists from /models with model_capabilities
+# - call them from a bounded subagent profile and use the image_generate tool
+#   to save outputs under ./generated/
+# - image_generate works with direct Gemini providers and OpenAI-compatible
+#   image models (for example OpenRouter-hosted Gemini image models)
 
 # ---------------------------------------------------------------------------
 # Model aliases — optional shorthand for config and /model

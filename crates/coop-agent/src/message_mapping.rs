@@ -1,4 +1,6 @@
-use genai::chat::{Binary, ChatMessage, ContentPart, MessageContent, Tool, ToolCall, ToolResponse};
+use genai::chat::{
+    Binary, BinarySource, ChatMessage, ContentPart, MessageContent, Tool, ToolCall, ToolResponse,
+};
 
 use coop_core::types::{Content, Message, Role, ToolDef};
 
@@ -136,7 +138,17 @@ pub(crate) fn map_response_message(
                 thinking: reasoning.clone(),
                 signature: None,
             }),
-            ContentPart::Binary(_) | ContentPart::ToolResponse(_) | ContentPart::Custom(_) => {}
+            ContentPart::Binary(binary) => {
+                if binary.is_image()
+                    && let BinarySource::Base64(data) = &binary.source
+                {
+                    message.content.push(Content::Image {
+                        data: data.to_string(),
+                        mime_type: binary.content_type.clone(),
+                    });
+                }
+            }
+            ContentPart::ToolResponse(_) | ContentPart::Custom(_) => {}
         }
     }
 
@@ -218,6 +230,21 @@ mod tests {
             }) if signature == "sig_1"
         ));
         assert_eq!(message.tool_requests()[0].name, "bash");
+    }
+
+    #[test]
+    fn map_response_message_preserves_base64_images() {
+        let content = MessageContent::from_parts(vec![ContentPart::Binary(Binary::from_base64(
+            "image/png",
+            "YWJj",
+            None,
+        ))]);
+
+        let message = map_response_message(&content, None);
+        assert!(matches!(
+            message.content.first(),
+            Some(Content::Image { mime_type, data }) if mime_type == "image/png" && data == "YWJj"
+        ));
     }
 
     #[test]

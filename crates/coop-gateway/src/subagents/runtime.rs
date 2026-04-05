@@ -1,7 +1,8 @@
 use anyhow::{Context, Result, bail};
 use coop_core::traits::ToolContext;
-use coop_core::{Message, OutboundMessage, SessionKey, SessionKind, ToolDef, ToolOutput};
+use coop_core::{Content, Message, OutboundMessage, SessionKey, SessionKind, ToolDef, ToolOutput};
 use serde_json::json;
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, Weak};
 use tokio::sync::{Notify, mpsc, oneshot};
@@ -485,6 +486,7 @@ impl PreparedRun {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 async fn collect_child_run(run: &PreparedRun) -> Result<SubagentCompletion> {
     let (event_tx, mut event_rx) = mpsc::channel(64);
     let gateway = Arc::clone(&run.gateway);
@@ -495,6 +497,7 @@ async fn collect_child_run(run: &PreparedRun) -> Result<SubagentCompletion> {
     let model = run.resolved_model.clone();
     let child_input = run.request.task.clone();
     let cancel = run.cancel.clone();
+    let turn_user_name = user_name.clone();
 
     let turn_future = async move {
         gateway
@@ -502,7 +505,7 @@ async fn collect_child_run(run: &PreparedRun) -> Result<SubagentCompletion> {
                 &session_key,
                 &child_input,
                 trust,
-                user_name.as_deref(),
+                turn_user_name.as_deref(),
                 None,
                 None,
                 overrides,
@@ -513,6 +516,7 @@ async fn collect_child_run(run: &PreparedRun) -> Result<SubagentCompletion> {
 
     tokio::pin!(turn_future);
     let mut final_text = String::new();
+    let mut final_message: Option<Message> = None;
     let mut turn_error: Option<String> = None;
     let timeout = tokio::time::sleep(std::time::Duration::from_secs(run.timeout_seconds));
     tokio::pin!(timeout);
@@ -523,7 +527,10 @@ async fn collect_child_run(run: &PreparedRun) -> Result<SubagentCompletion> {
                 while let Some(event) = event_rx.recv().await {
                     match event {
                         coop_core::TurnEvent::TextDelta(delta) => final_text.push_str(&delta),
-                        coop_core::TurnEvent::AssistantMessage(message) => final_text = message.text(),
+                        coop_core::TurnEvent::AssistantMessage(message) => {
+                            final_text = message.text();
+                            final_message = Some(message);
+                        }
                         coop_core::TurnEvent::Error(message) => turn_error = Some(message),
                         coop_core::TurnEvent::Done(_) => break,
                         coop_core::TurnEvent::ToolStart { .. }
@@ -544,10 +551,26 @@ async fn collect_child_run(run: &PreparedRun) -> Result<SubagentCompletion> {
 
                 result?;
                 let parsed = parse_child_response(&final_text);
+                let session_messages = run.gateway.messages(&run.child_session_key);
+                let mut artifact_paths: BTreeSet<String> =
+                    parsed.artifact_paths.into_iter().collect();
+                artifact_paths.extend(collect_tool_artifact_paths(&session_messages));
+                if let Some(message) = final_message.as_ref() {
+                    artifact_paths.extend(persist_generated_images(
+                        run,
+                        message,
+                        user_name.as_deref(),
+                    )?);
+                }
+                let summary = if parsed.summary.trim().is_empty() {
+                    default_summary_from_artifacts(artifact_paths.len(), final_message.as_ref())
+                } else {
+                    Some(parsed.summary)
+                };
                 return Ok(SubagentCompletion::new(
                     SubagentRunStatus::Completed,
-                    Some(parsed.summary),
-                    parsed.artifact_paths,
+                    summary,
+                    artifact_paths.into_iter().collect(),
                     None,
                 ));
             }
@@ -574,7 +597,10 @@ async fn collect_child_run(run: &PreparedRun) -> Result<SubagentCompletion> {
             Some(event) = event_rx.recv() => {
                 match event {
                     coop_core::TurnEvent::TextDelta(delta) => final_text.push_str(&delta),
-                    coop_core::TurnEvent::AssistantMessage(message) => final_text = message.text(),
+                    coop_core::TurnEvent::AssistantMessage(message) => {
+                        final_text = message.text();
+                        final_message = Some(message);
+                    }
                     coop_core::TurnEvent::Error(message) => turn_error = Some(message),
                     coop_core::TurnEvent::Done(_)
                     | coop_core::TurnEvent::ToolStart { .. }
@@ -753,6 +779,90 @@ fn finish_wait(
 fn parse_run_id(run_id: Option<&str>) -> Result<Uuid> {
     let run_id = run_id.ok_or_else(|| anyhow::anyhow!("run_id is required"))?;
     Uuid::parse_str(run_id).context("run_id must be a UUID")
+}
+
+fn collect_tool_artifact_paths(messages: &[Message]) -> BTreeSet<String> {
+    let mut artifact_paths = BTreeSet::new();
+
+    for message in messages {
+        for content in &message.content {
+            let Content::ToolResult { output, .. } = content else {
+                continue;
+            };
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(output) else {
+                continue;
+            };
+            artifact_paths.extend(json_string_list(&value, "artifact_paths"));
+            artifact_paths.extend(json_string_list(&value, "output_paths"));
+        }
+    }
+
+    artifact_paths
+}
+
+fn json_string_list(value: &serde_json::Value, key: &str) -> BTreeSet<String> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+fn persist_generated_images(
+    run: &PreparedRun,
+    message: &Message,
+    user_name: Option<&str>,
+) -> Result<BTreeSet<String>> {
+    let scope = coop_core::WorkspaceScope::for_turn(
+        &run.manager.workspace,
+        &run.child_session_key.kind,
+        run.trust,
+        user_name,
+    );
+    let output_dir = format!("generated/subagents/{}", run.record.run_id);
+    let mut paths = BTreeSet::new();
+
+    let mut image_index = 0usize;
+    for content in &message.content {
+        let Content::Image { data, mime_type } = content else {
+            continue;
+        };
+        let path = coop_core::save_base64_image(
+            &scope,
+            &output_dir,
+            "image",
+            image_index,
+            data,
+            mime_type,
+        )?;
+        paths.insert(path);
+        image_index += 1;
+    }
+
+    Ok(paths)
+}
+
+fn default_summary_from_artifacts(
+    artifact_count: usize,
+    final_message: Option<&Message>,
+) -> Option<String> {
+    if artifact_count > 0 {
+        return Some(format!("Generated {artifact_count} artifact(s)."));
+    }
+
+    final_message.and_then(|message| {
+        let image_count = message
+            .content
+            .iter()
+            .filter(|content| matches!(content, Content::Image { .. }))
+            .count();
+        (image_count > 0).then(|| format!("Generated {image_count} image(s)."))
+    })
 }
 
 #[derive(Debug, Default)]
@@ -1092,5 +1202,35 @@ workspace = "."
         assert!(trace.contains(child_session));
         assert!(trace.contains("timeout_seconds"));
         assert!(trace.contains("tool_count"));
+    }
+
+    #[test]
+    fn collect_tool_artifact_paths_reads_json_tool_outputs() {
+        let messages = vec![
+            Message::user().with_tool_result(
+                "call_1",
+                serde_json::json!({
+                    "output_paths": ["./one.png"],
+                    "artifact_paths": ["./two.txt"]
+                })
+                .to_string(),
+                false,
+            ),
+        ];
+
+        let paths = collect_tool_artifact_paths(&messages);
+        assert_eq!(
+            paths.into_iter().collect::<Vec<_>>(),
+            vec!["./one.png", "./two.txt"]
+        );
+    }
+
+    #[test]
+    fn default_summary_mentions_generated_images() {
+        let message = Message::assistant().with_image("YWJj", "image/png");
+        assert_eq!(
+            default_summary_from_artifacts(0, Some(&message)).as_deref(),
+            Some("Generated 1 image(s).")
+        );
     }
 }

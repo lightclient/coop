@@ -33,7 +33,9 @@ pub(crate) const TOOLS_MD_INIT: &str = "\
 <!-- Built-in defaults are prepended automatically by coop. -->
 <!-- Add your custom tool notes below. They extend the defaults. -->
 <!-- The built-in tool notes include workflow guidance for config changes, cron_trigger, and diagnostics. -->
-<!-- Use agent.subagents profiles for specialized models and delegated child work. -->
+<!-- Use agent.subagents profiles for specialized models, delegated child work, and image workflows. -->
+<!-- Model capability metadata can hide specialist models from /models and keep them subagent-only. -->
+<!-- image_generate works with direct Gemini providers and OpenAI-compatible image models. -->
 <!-- To fully replace the defaults, put <!-- override --> on the first line. -->
 ";
 

@@ -85,6 +85,18 @@ inherit_memory = false
 # default_timeout_seconds = 900
 # default_max_turns = 25
 # allow_spawn = false
+#
+# Specialist image profile pattern:
+# [agent.subagents.profiles.media]
+# model = "gpt-5-mini"
+# tools = ["image_generate", "read_file"]
+# prompt_mode = "minimal"
+# allow_spawn = false
+#
+# Keep image specialists out of /models with providers.model_capabilities and use
+# image_generate to save outputs under ./generated/. The tool works with direct
+# Gemini providers and OpenAI-compatible image models such as OpenRouter-hosted
+# Gemini image models.
 
 # Users and trust levels
 # Trust levels: owner > full > inner > familiar > public
@@ -176,6 +188,12 @@ name = "anthropic"                 # supported: anthropic, gemini, openai, opena
 name = "gemini"
 # models = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.5-flash-lite"]
 # api_keys = ["env:GEMINI_API_KEY", "env:GEMINI_API_KEY_2"]
+# [providers.model_capabilities."gemini-2.0-flash-preview-image-generation"]
+# supports_tools = false
+# input_modalities = ["text", "image"]
+# output_modalities = ["text", "image"]
+# subagent_only = true
+# hide_from_models = true
 
 [[providers]]
 name = "openai"

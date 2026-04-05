@@ -18,6 +18,7 @@ mod gateway;
 mod group_history;
 mod group_trigger;
 mod heartbeat;
+mod image_tools;
 mod init;
 mod init_templates;
 #[cfg(test)]
@@ -27,6 +28,7 @@ mod memory_embedding;
 mod memory_prompt_index;
 mod memory_reconcile;
 mod memory_tools;
+mod model_capabilities;
 mod model_catalog;
 mod overflow_recovery;
 mod provider_factory;
@@ -543,6 +545,7 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
         Arc::clone(&shared),
         Arc::clone(&scheduler_notify),
     );
+    let image_executor = image_tools::ImageToolExecutor::new(Arc::clone(&shared));
     let web_executor = web_tools::WebToolExecutor::new(&web_tool_config);
     let session_search_executor =
         session_search::SessionSearchExecutor::new(Arc::clone(&memory), Arc::clone(&provider));
@@ -555,6 +558,7 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
         Box::new(cron_executor),
         Box::new(memory_executor),
         Box::new(reminder_executor),
+        Box::new(image_executor),
         Box::new(web_executor),
         Box::new(session_search_executor),
         Box::new(subagent_executor),
@@ -924,6 +928,7 @@ async fn cmd_chat(config_path: Option<&str>, user_flag: Option<&str>) -> Result<
     let default_executor = DefaultExecutor::new();
     let config_executor = config_tool::ConfigToolExecutor::new(config_file.clone());
     let memory_executor = MemoryToolExecutor::new(Arc::clone(&memory));
+    let image_executor = image_tools::ImageToolExecutor::new(Arc::clone(&shared));
     let web_executor = web_tools::WebToolExecutor::new(&web_tool_config);
     let session_search_executor =
         session_search::SessionSearchExecutor::new(Arc::clone(&memory), Arc::clone(&provider));
@@ -932,6 +937,7 @@ async fn cmd_chat(config_path: Option<&str>, user_flag: Option<&str>) -> Result<
         Box::new(default_executor),
         Box::new(config_executor),
         Box::new(memory_executor),
+        Box::new(image_executor),
         Box::new(web_executor),
         Box::new(session_search_executor),
         Box::new(subagent_executor),

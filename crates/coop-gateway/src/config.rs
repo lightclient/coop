@@ -305,6 +305,8 @@ pub(crate) struct ProviderConfig {
     pub name: String,
     #[serde(default)]
     pub models: Vec<String>,
+    #[serde(default)]
+    pub model_capabilities: BTreeMap<String, ModelCapabilitiesConfig>,
     /// Per-model context window overrides keyed by model id.
     #[serde(default)]
     pub model_context_limits: BTreeMap<String, usize>,
@@ -326,6 +328,27 @@ pub(crate) struct ProviderConfig {
     /// access token, the provider auto-refreshes before expiry.
     #[serde(default)]
     pub refresh_token: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ModelModality {
+    Text,
+    Image,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub(crate) struct ModelCapabilitiesConfig {
+    #[serde(default)]
+    pub supports_tools: Option<bool>,
+    #[serde(default)]
+    pub input_modalities: Option<Vec<ModelModality>>,
+    #[serde(default)]
+    pub output_modalities: Option<Vec<ModelModality>>,
+    #[serde(default)]
+    pub subagent_only: bool,
+    #[serde(default)]
+    pub hide_from_models: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -1653,6 +1676,43 @@ models = ["llama3.2", "qwen2.5-coder:14b"]
     }
 
     #[test]
+    fn parse_config_with_model_capabilities() {
+        let toml_str = r#"
+[agent]
+id = "test"
+model = "gpt-5.4"
+
+[provider]
+name = "openai"
+models = ["gpt-5.4", "gemini-image"]
+
+[provider.model_capabilities."gemini-image"]
+supports_tools = false
+subagent_only = true
+hide_from_models = true
+input_modalities = ["text", "image"]
+output_modalities = ["text", "image"]
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let caps = config
+            .provider
+            .model_capabilities
+            .get("gemini-image")
+            .unwrap();
+        assert_eq!(caps.supports_tools, Some(false));
+        assert_eq!(
+            caps.input_modalities,
+            Some(vec![ModelModality::Text, ModelModality::Image])
+        );
+        assert_eq!(
+            caps.output_modalities,
+            Some(vec![ModelModality::Text, ModelModality::Image])
+        );
+        assert!(caps.subagent_only);
+        assert!(caps.hide_from_models);
+    }
+
+    #[test]
     fn parse_config_with_agent_context_limit() {
         let toml_str = r#"
 [agent]
@@ -1762,6 +1822,7 @@ stream_policy = "require"
         let provider = ProviderConfig {
             name: "openai".to_owned(),
             models: Vec::new(),
+            model_capabilities: BTreeMap::new(),
             model_context_limits: BTreeMap::new(),
             api_keys: Vec::new(),
             api_key_env: Some("CUSTOM_OPENAI_KEY".to_owned()),
@@ -1781,6 +1842,7 @@ stream_policy = "require"
         let provider = ProviderConfig {
             name: "anthropic".to_owned(),
             models: Vec::new(),
+            model_capabilities: BTreeMap::new(),
             model_context_limits: BTreeMap::new(),
             api_keys: Vec::new(),
             api_key_env: None,
@@ -1800,6 +1862,7 @@ stream_policy = "require"
         let provider = ProviderConfig {
             name: "gemini".to_owned(),
             models: Vec::new(),
+            model_capabilities: BTreeMap::new(),
             model_context_limits: BTreeMap::new(),
             api_keys: Vec::new(),
             api_key_env: None,

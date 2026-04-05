@@ -49,6 +49,8 @@ mod gateway;
 mod memory_auto_capture;
 #[path = "../src/memory_prompt_index.rs"]
 mod memory_prompt_index;
+#[path = "../src/model_capabilities.rs"]
+mod model_capabilities;
 #[path = "../src/model_catalog.rs"]
 mod model_catalog;
 #[path = "../src/overflow_recovery.rs"]

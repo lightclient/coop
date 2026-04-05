@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use tracing::debug;
 
 use crate::config::{Config, ProviderConfig};
+use crate::model_capabilities::provider_model_capabilities;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ModelCatalogEntry {
@@ -137,6 +138,13 @@ pub(crate) fn provider_model_candidates(provider: &ProviderConfig) -> Vec<Availa
     available
 }
 
+pub(crate) fn provider_main_model_candidates(provider: &ProviderConfig) -> Vec<AvailableModel> {
+    provider_model_candidates(provider)
+        .into_iter()
+        .filter(|model| provider_model_capabilities(provider, &model.id).visible_in_main_models())
+        .collect()
+}
+
 pub(crate) fn available_main_models(config: &Config) -> Vec<AvailableModel> {
     let mut available = Vec::new();
     let mut seen = HashSet::new();
@@ -148,7 +156,7 @@ pub(crate) fn available_main_models(config: &Config) -> Vec<AvailableModel> {
     }
 
     for provider in config.main_provider_configs() {
-        for model in provider_model_candidates(provider) {
+        for model in provider_main_model_candidates(provider) {
             let key = normalize_model_key(&model.id);
             if seen.insert(key) {
                 available.push(model);
@@ -203,10 +211,10 @@ pub(crate) fn resolve_available_model<'a>(
     requested: &str,
 ) -> Option<ResolvedAvailableModel<'a>> {
     let requested = resolve_model_reference(config, requested);
-    resolve_available_model_direct(config, &requested.resolved)
+    resolve_main_model_direct(config, &requested.resolved)
 }
 
-pub(crate) fn resolve_available_model_direct<'a>(
+pub(crate) fn resolve_main_model_direct<'a>(
     config: &'a Config,
     requested: &str,
 ) -> Option<ResolvedAvailableModel<'a>> {
@@ -221,6 +229,56 @@ pub(crate) fn resolve_available_model_direct<'a>(
     }
 
     for provider in config.main_provider_configs() {
+        for model in provider_main_model_candidates(provider) {
+            let key = normalize_model_key(&model.id);
+            if !seen.insert(key.clone()) {
+                continue;
+            }
+            if key == requested_key {
+                return Some(ResolvedAvailableModel { provider, model });
+            }
+        }
+    }
+
+    None
+}
+
+pub(crate) fn resolve_configured_model<'a>(
+    config: &'a Config,
+    requested: &str,
+) -> Option<ResolvedAvailableModel<'a>> {
+    let requested = resolve_model_reference(config, requested);
+    let requested_key = normalize_model_key(&requested.resolved);
+
+    if config.providers.is_empty() {
+        let builtins = builtin_models(&config.provider.normalized_name());
+        if let Some(model) = provider_model_candidates(&config.provider)
+            .into_iter()
+            .find(|model| normalize_model_key(&model.id) == requested_key)
+        {
+            return Some(ResolvedAvailableModel {
+                provider: &config.provider,
+                model,
+            });
+        }
+
+        let default_reference = resolve_model_reference(config, &config.agent.model);
+        if normalize_model_key(&default_reference.resolved) == requested_key {
+            return Some(ResolvedAvailableModel {
+                provider: &config.provider,
+                model: AvailableModel {
+                    id: requested.resolved.clone(),
+                    description: builtin_description(builtins, &requested.resolved)
+                        .map(str::to_owned),
+                },
+            });
+        }
+
+        return None;
+    }
+
+    let mut seen = HashSet::new();
+    for provider in &config.providers {
         for model in provider_model_candidates(provider) {
             let key = normalize_model_key(&model.id);
             if !seen.insert(key.clone()) {
@@ -237,30 +295,7 @@ pub(crate) fn resolve_available_model_direct<'a>(
 
 pub(crate) fn resolve_default_main_model(config: &Config) -> Option<ResolvedAvailableModel<'_>> {
     let default_reference = resolve_model_reference(config, &config.agent.model);
-
-    if config.providers.is_empty() {
-        let builtins = builtin_models(&config.provider.normalized_name());
-        return Some(ResolvedAvailableModel {
-            provider: &config.provider,
-            model: AvailableModel {
-                id: default_reference.resolved.clone(),
-                description: builtin_description(builtins, &default_reference.resolved)
-                    .map(str::to_owned),
-            },
-        });
-    }
-
-    let default_key = normalize_model_key(&default_reference.resolved);
-    for provider in &config.providers {
-        if let Some(model) = provider_model_candidates(provider)
-            .into_iter()
-            .find(|model| normalize_model_key(&model.id) == default_key)
-        {
-            return Some(ResolvedAvailableModel { provider, model });
-        }
-    }
-
-    None
+    resolve_configured_model(config, &default_reference.resolved)
 }
 
 fn builtin_description<'a>(builtins: &'a [ModelCatalogEntry], model: &str) -> Option<&'a str> {
@@ -406,6 +441,34 @@ models = ["llama3.2"]
     }
 
     #[test]
+    fn available_main_models_hides_subagent_only_models() {
+        let cfg = config(
+            r#"
+[agent]
+id = "test"
+model = "gpt-5.4"
+
+[[providers]]
+name = "openai"
+models = ["gpt-5.4", "gemini-specialist"]
+
+[providers.model_capabilities."gemini-specialist"]
+supports_tools = false
+subagent_only = true
+hide_from_models = true
+input_modalities = ["text", "image"]
+output_modalities = ["text", "image"]
+"#,
+        );
+
+        let models = available_main_models(&cfg);
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "gpt-5.4");
+        assert!(resolve_configured_model(&cfg, "gemini-specialist").is_some());
+        assert!(resolve_available_model(&cfg, "gemini-specialist").is_none());
+    }
+
+    #[test]
     fn find_available_model_matches_prefixed_and_unprefixed_variants() {
         let cfg = config(
             r#"
@@ -533,5 +596,28 @@ models = ["gpt-5-codex"]
         let resolved = resolve_default_main_model(&cfg).unwrap();
         assert_eq!(resolved.provider.name, "openai");
         assert_eq!(resolved.model.id, "gpt-5-codex");
+    }
+
+    #[test]
+    fn resolve_configured_model_finds_hidden_specialist_models() {
+        let cfg = config(
+            r#"
+[agent]
+id = "test"
+model = "gpt-5.4"
+
+[provider]
+name = "openai"
+models = ["gpt-5.4", "gemini-specialist"]
+
+[provider.model_capabilities."gemini-specialist"]
+subagent_only = true
+hide_from_models = true
+output_modalities = ["text", "image"]
+"#,
+        );
+
+        let resolved = resolve_configured_model(&cfg, "gemini-specialist").unwrap();
+        assert_eq!(resolved.model.id, "gemini-specialist");
     }
 }
