@@ -32,6 +32,7 @@ use crate::image_prep::{
     downscale_image, exceeds_dimension_limit,
 };
 use crate::key_pool::KeyPool;
+use crate::model_context::{ContextLimitInput, resolve_context_limit};
 use crate::provider_spec::ProviderSpec;
 
 const DEFAULT_ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com";
@@ -102,7 +103,7 @@ impl AnthropicProvider {
     ///
     /// Each key auto-detects OAuth (sk-ant-oat*) vs regular API keys.
     pub fn new(api_keys: Vec<String>, model_name: &str) -> Result<Self> {
-        Self::with_options(api_keys, model_name, None, BTreeMap::new())
+        Self::with_options(api_keys, model_name, None, BTreeMap::new(), None)
     }
 
     pub fn with_options(
@@ -110,6 +111,7 @@ impl AnthropicProvider {
         model_name: &str,
         base_url: Option<&str>,
         extra_headers: BTreeMap<String, String>,
+        configured_limit: Option<usize>,
     ) -> Result<Self> {
         anyhow::ensure!(!api_keys.is_empty(), "at least one API key is required");
 
@@ -122,9 +124,16 @@ impl AnthropicProvider {
             .context("failed to create HTTP client")?;
 
         let api_model = model_name.strip_prefix("anthropic/").unwrap_or(model_name);
+        let context_limit = resolve_context_limit(ContextLimitInput {
+            kind: crate::provider_spec::ProviderKind::Anthropic,
+            model: model_name,
+            base_url,
+            api_key: api_keys.first().map(String::as_str),
+            configured_limit,
+        });
         let model = ModelInfo {
             name: api_model.to_owned(),
-            context_limit: 200_000,
+            context_limit,
         };
 
         Ok(Self {
@@ -146,6 +155,7 @@ impl AnthropicProvider {
             &spec.model,
             spec.base_url.as_deref(),
             spec.extra_headers.clone(),
+            spec.configured_context_limit(&spec.model),
         )
     }
 
@@ -625,11 +635,20 @@ impl Provider for AnthropicProvider {
 
     fn set_model(&self, model: &str) {
         let api_model = model.strip_prefix("anthropic/").unwrap_or(model);
+        let api_key = self.keys.get(self.keys.best_key()).0;
+        let context_limit = resolve_context_limit(ContextLimitInput {
+            kind: crate::provider_spec::ProviderKind::Anthropic,
+            model,
+            base_url: Some(&self.base_url),
+            api_key: Some(api_key),
+            configured_limit: None,
+        });
         let mut info = self.model.write().expect("model lock poisoned");
         if info.name != api_model {
             debug!(old = %info.name, new = %api_model, "provider model updated");
             api_model.clone_into(&mut info.name);
         }
+        info.context_limit = context_limit;
     }
 
     async fn complete(

@@ -62,6 +62,9 @@ pub(crate) struct Config {
 pub(crate) struct AgentConfig {
     pub id: String,
     pub model: String,
+    /// Optional override for the default model's context window.
+    #[serde(default)]
+    pub context_limit: Option<usize>,
     #[serde(default = "default_workspace")]
     pub workspace: String,
 }
@@ -197,6 +200,9 @@ pub(crate) struct ProviderConfig {
     pub name: String,
     #[serde(default)]
     pub models: Vec<String>,
+    /// Per-model context window overrides keyed by model id.
+    #[serde(default)]
+    pub model_context_limits: BTreeMap<String, usize>,
     /// Key references with `env:` prefix (e.g. `env:ANTHROPIC_API_KEY`).
     /// Enables key rotation. When empty/omitted, falls back to `api_key_env`
     /// or the provider default environment variable.
@@ -1405,6 +1411,39 @@ models = ["llama3.2", "qwen2.5-coder:14b"]
     }
 
     #[test]
+    fn parse_config_with_agent_context_limit() {
+        let toml_str = r#"
+[agent]
+id = "test"
+model = "gpt-5.4"
+context_limit = 1050000
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.agent.context_limit, Some(1_050_000));
+    }
+
+    #[test]
+    fn parse_config_with_model_context_limits() {
+        let toml_str = r#"
+[agent]
+id = "test"
+model = "gpt-5.4"
+
+[provider]
+name = "openai"
+models = ["gpt-5.4"]
+
+[provider.model_context_limits]
+"gpt-5.4" = 1050000
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            config.provider.model_context_limits.get("gpt-5.4"),
+            Some(&1_050_000)
+        );
+    }
+
+    #[test]
     fn parse_config_with_multiple_main_providers() {
         let toml_str = r#"
 [agent]
@@ -1465,6 +1504,7 @@ X-Test = "1"
         let provider = ProviderConfig {
             name: "openai".to_owned(),
             models: Vec::new(),
+            model_context_limits: BTreeMap::new(),
             api_keys: Vec::new(),
             api_key_env: Some("CUSTOM_OPENAI_KEY".to_owned()),
             base_url: None,
@@ -1482,6 +1522,7 @@ X-Test = "1"
         let provider = ProviderConfig {
             name: "anthropic".to_owned(),
             models: Vec::new(),
+            model_context_limits: BTreeMap::new(),
             api_keys: Vec::new(),
             api_key_env: None,
             base_url: None,

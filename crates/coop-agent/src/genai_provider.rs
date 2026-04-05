@@ -11,6 +11,7 @@ use coop_core::types::{Message, ModelInfo, ToolDef, Usage};
 
 use crate::key_pool::KeyPool;
 use crate::message_mapping::{build_chat_request, map_response_message};
+use crate::model_context::{ContextLimitInput, resolve_context_limit};
 use crate::model_mapping::ResolvedModel;
 use crate::provider_spec::{ProviderKind, ProviderSpec};
 use crate::stream_mapping::into_provider_stream;
@@ -36,6 +37,13 @@ impl GenAiProvider {
         let keys = resolve_keys(&spec)?;
         let resolved =
             ResolvedModel::from_spec(&spec, &spec.model, genai::resolver::AuthData::None);
+        let context_limit = resolve_context_limit(ContextLimitInput {
+            kind: spec.kind,
+            model: &spec.model,
+            base_url: spec.base_url.as_deref(),
+            api_key: first_api_key(keys.as_ref()),
+            configured_limit: spec.configured_context_limit(&spec.model),
+        });
         let client = Client::builder()
             .with_web_config(genai::WebConfig::default().with_timeout(Duration::from_secs(300)))
             .build();
@@ -47,7 +55,7 @@ impl GenAiProvider {
             spec: RwLock::new(spec),
             model: RwLock::new(ModelInfo {
                 name: resolved.model_info_name,
-                context_limit: resolved.context_limit,
+                context_limit,
             }),
         })
     }
@@ -106,10 +114,7 @@ impl GenAiProvider {
         };
 
         let resolved = ResolvedModel::from_spec(&spec, &spec.model, auth.clone());
-        let model_info = ModelInfo {
-            name: resolved.model_info_name.clone(),
-            context_limit: resolved.context_limit,
-        };
+        let model_info = self.model_snapshot();
 
         (
             resolved.to_service_target(auth),
@@ -313,11 +318,18 @@ impl Provider for GenAiProvider {
         model.clone_into(&mut spec.model);
         let resolved =
             ResolvedModel::from_spec(&spec, &spec.model, genai::resolver::AuthData::None);
+        let context_limit = resolve_context_limit(ContextLimitInput {
+            kind: spec.kind,
+            model: &spec.model,
+            base_url: spec.base_url.as_deref(),
+            api_key: first_api_key(self.keys.as_ref()),
+            configured_limit: spec.configured_context_limit(&spec.model),
+        });
         drop(spec);
 
         let mut info = self.model.write().expect("model lock poisoned");
         info.name = resolved.model_info_name;
-        info.context_limit = resolved.context_limit;
+        info.context_limit = context_limit;
         debug!(provider = self.name(), new = %info.name, "provider model updated");
     }
 
@@ -392,6 +404,12 @@ fn resolve_keys(spec: &ProviderSpec) -> Result<Option<KeyPool>> {
     }
 }
 
+fn first_api_key(keys: Option<&KeyPool>) -> Option<&str> {
+    let keys = keys?;
+    let index = keys.best_key();
+    Some(keys.get(index).0)
+}
+
 struct StatusData<'a> {
     status: u16,
     body: &'a str,
@@ -449,6 +467,9 @@ mod tests {
         let provider = GenAiProvider::new(ProviderSpec {
             kind: ProviderKind::Ollama,
             model: "llama3.2".into(),
+            default_model: None,
+            default_model_context_limit: None,
+            model_context_limits: BTreeMap::new(),
             api_keys: Vec::new(),
             api_key_env: None,
             base_url: None,
@@ -466,6 +487,9 @@ mod tests {
         let provider = GenAiProvider::new(ProviderSpec {
             kind: ProviderKind::OpenAiCompatible,
             model: "meta-llama/Llama-3.1-8B-Instruct".into(),
+            default_model: None,
+            default_model_context_limit: None,
+            model_context_limits: BTreeMap::new(),
             api_keys: Vec::new(),
             api_key_env: None,
             base_url: Some("http://localhost:8000/v1".into()),

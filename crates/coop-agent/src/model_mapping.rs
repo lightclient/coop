@@ -7,7 +7,6 @@ use crate::provider_spec::{ProviderKind, ProviderSpec};
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedModel {
     pub model_info_name: String,
-    pub context_limit: usize,
     pub target_model: ModelIden,
     pub endpoint: Endpoint,
 }
@@ -17,11 +16,9 @@ impl ResolvedModel {
         let target_model = target_model(spec.kind, model);
         let endpoint = endpoint_for_spec(spec);
         let model_info_name = target_model.model_name.to_string();
-        let context_limit = context_limit(spec.kind, &model_info_name);
 
         Self {
             model_info_name,
-            context_limit,
             target_model,
             endpoint,
         }
@@ -118,20 +115,6 @@ fn strip_ollama_prefix(model: &str) -> String {
 
 fn strip_prefix(value: &str, prefix: &str) -> String {
     value.strip_prefix(prefix).unwrap_or(value).to_owned()
-}
-
-fn context_limit(kind: ProviderKind, model: &str) -> usize {
-    match kind {
-        ProviderKind::Anthropic => 200_000,
-        ProviderKind::OpenAi | ProviderKind::OpenAiCompatible => {
-            if model.starts_with("gpt-5") || model.starts_with('o') {
-                200_000
-            } else {
-                128_000
-            }
-        }
-        ProviderKind::Ollama => 32_000,
-    }
 }
 
 #[cfg(test)]

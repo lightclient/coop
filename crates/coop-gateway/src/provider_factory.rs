@@ -64,6 +64,9 @@ fn provider_spec(config: &Config, model: &str) -> Result<ProviderSpec> {
     Ok(ProviderSpec {
         kind,
         model: model.to_owned(),
+        default_model: Some(config.agent.model.clone()),
+        default_model_context_limit: config.agent.context_limit,
+        model_context_limits: provider.model_context_limits.clone(),
         api_keys: provider.api_keys.clone(),
         api_key_env: provider.effective_api_key_env(),
         base_url: provider.base_url.clone(),
@@ -132,35 +135,49 @@ mod tests {
         let addr = listener.local_addr().expect("local addr");
 
         tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.expect("accept");
-            let _request = read_http_request(&mut socket).await;
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let request = read_http_request(&mut socket).await;
+                let is_models =
+                    request.starts_with("GET /v1/models ") || request.starts_with("GET /models ");
 
-            let body = serde_json::json!({
-                "id": "chatcmpl_test",
-                "object": "chat.completion",
-                "model": "demo-model",
-                "choices": [{
-                    "index": 0,
-                    "message": {"role": "assistant", "content": "TRACE_OK"},
-                    "finish_reason": "stop"
-                }],
-                "usage": {
-                    "prompt_tokens": 12,
-                    "completion_tokens": 4,
-                    "total_tokens": 16
+                let body = if is_models {
+                    serde_json::json!({
+                        "data": [
+                            {"id": "demo-model", "context_length": 128_000}
+                        ]
+                    })
+                } else {
+                    serde_json::json!({
+                        "id": "chatcmpl_test",
+                        "object": "chat.completion",
+                        "model": "demo-model",
+                        "choices": [{
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "TRACE_OK"},
+                            "finish_reason": "stop"
+                        }],
+                        "usage": {
+                            "prompt_tokens": 12,
+                            "completion_tokens": 4,
+                            "total_tokens": 16
+                        }
+                    })
                 }
-            })
-            .to_string();
+                .to_string();
 
-            let response = format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            socket
-                .write_all(response.as_bytes())
-                .await
-                .expect("write response");
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                socket
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write response");
+            }
         });
 
         format!("http://{addr}/v1")

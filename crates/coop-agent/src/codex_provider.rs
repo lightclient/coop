@@ -7,11 +7,10 @@ use tracing::{Instrument, debug, info_span};
 use coop_core::traits::{Provider, ProviderStream};
 use coop_core::types::{Message, ModelInfo, ToolDef, Usage};
 
+use crate::model_context::{ContextLimitInput, resolve_context_limit};
 use crate::openai_codex::{CodexRequest, OpenAiAuthMode, api_model_name, complete_codex};
 use crate::openai_refresh::RefreshState;
 use crate::provider_spec::ProviderSpec;
-
-const DEFAULT_CONTEXT_LIMIT: usize = 128_000;
 
 pub(crate) struct CodexProvider {
     client: Client,
@@ -35,9 +34,17 @@ impl CodexProvider {
 
         let auth_mode = OpenAiAuthMode::detect(&api_key);
         let api_model = api_model_name(&spec.model, &auth_mode);
+        let context_limit = resolve_context_limit(ContextLimitInput {
+            kind: spec.kind,
+            model: &api_model,
+            base_url: Some("https://chatgpt.com/backend-api/codex/"),
+            api_key: Some(&api_key),
+            configured_limit: spec
+                .configured_context_limit_for_models([spec.model.as_str(), api_model.as_str()]),
+        });
         let model = ModelInfo {
             name: api_model,
-            context_limit: DEFAULT_CONTEXT_LIMIT,
+            context_limit,
         };
 
         let refresh = spec

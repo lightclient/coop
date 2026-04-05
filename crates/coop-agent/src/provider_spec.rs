@@ -44,6 +44,9 @@ impl ProviderKind {
 pub struct ProviderSpec {
     pub kind: ProviderKind,
     pub model: String,
+    pub default_model: Option<String>,
+    pub default_model_context_limit: Option<usize>,
+    pub model_context_limits: BTreeMap<String, usize>,
     pub api_keys: Vec<String>,
     pub api_key_env: Option<String>,
     pub base_url: Option<String>,
@@ -56,6 +59,9 @@ impl ProviderSpec {
         Self {
             kind,
             model: model.into(),
+            default_model: None,
+            default_model_context_limit: None,
+            model_context_limits: BTreeMap::new(),
             api_keys: Vec::new(),
             api_key_env: None,
             base_url: None,
@@ -93,6 +99,50 @@ impl ProviderSpec {
     pub fn normalized_base_url(&self) -> Option<String> {
         self.base_url.as_deref().map(normalize_base_url)
     }
+
+    pub fn configured_context_limit(&self, model: &str) -> Option<usize> {
+        self.configured_context_limit_for_models([model])
+    }
+
+    pub fn configured_context_limit_for_models<'a, I>(&self, models: I) -> Option<usize>
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        let requested = models
+            .into_iter()
+            .map(normalize_model_key)
+            .collect::<Vec<_>>();
+
+        if let (Some(default_model), Some(limit)) = (
+            self.default_model.as_deref(),
+            self.default_model_context_limit,
+        ) {
+            let default_key = normalize_model_key(default_model);
+            if requested.iter().any(|candidate| candidate == &default_key) {
+                return Some(limit);
+            }
+        }
+
+        self.model_context_limits
+            .iter()
+            .find_map(|(candidate, limit)| {
+                let candidate_key = normalize_model_key(candidate);
+                requested
+                    .iter()
+                    .any(|requested_key| requested_key == &candidate_key)
+                    .then_some(*limit)
+            })
+    }
+}
+
+fn normalize_model_key(model: &str) -> String {
+    let trimmed = model.trim();
+    for prefix in ["anthropic/", "openai/", "ollama/", "openai-compatible/"] {
+        if let Some(stripped) = trimmed.strip_prefix(prefix) {
+            return stripped.to_owned();
+        }
+    }
+    trimmed.to_owned()
 }
 
 pub(crate) fn normalize_base_url(base_url: &str) -> String {
@@ -130,5 +180,26 @@ mod tests {
     fn anthropic_uses_default_api_key_env() {
         let spec = ProviderSpec::new(ProviderKind::Anthropic, "claude-sonnet-4-20250514");
         assert_eq!(spec.effective_api_key_env(), Some("ANTHROPIC_API_KEY"));
+    }
+
+    #[test]
+    fn configured_context_limit_matches_prefixed_and_unprefixed_models() {
+        let mut spec = ProviderSpec::new(ProviderKind::OpenAi, "gpt-5.4");
+        spec.model_context_limits
+            .insert("gpt-5.4".to_owned(), 1_050_000);
+        assert_eq!(
+            spec.configured_context_limit("openai/gpt-5.4"),
+            Some(1_050_000)
+        );
+    }
+
+    #[test]
+    fn default_model_context_limit_has_priority() {
+        let mut spec = ProviderSpec::new(ProviderKind::OpenAi, "gpt-5.4");
+        spec.default_model = Some("gpt-5.4".to_owned());
+        spec.default_model_context_limit = Some(1_050_000);
+        spec.model_context_limits
+            .insert("gpt-5.4".to_owned(), 400_000);
+        assert_eq!(spec.configured_context_limit("gpt-5.4"), Some(1_050_000));
     }
 }

@@ -143,6 +143,9 @@ fn check_restart_only_fields(current: &Config, new: &Config) -> Option<Vec<&'sta
     if new.agent.id != current.agent.id {
         reasons.push("agent.id");
     }
+    if new.agent.context_limit != current.agent.context_limit {
+        reasons.push("agent.context_limit");
+    }
     if new.agent.workspace != current.agent.workspace {
         reasons.push("agent.workspace");
     }
@@ -204,6 +207,7 @@ fn provider_backend_settings_changed(
     new: &crate::config::ProviderConfig,
 ) -> bool {
     current.name != new.name
+        || current.model_context_limits != new.model_context_limits
         || current.api_keys != new.api_keys
         || current.api_key_env != new.api_key_env
         || current.base_url != new.base_url
@@ -263,6 +267,19 @@ mod tests {
         let b: Config = toml::from_str(&minimal_toml("a", "m", "/ws2")).unwrap();
         let reasons = check_restart_only_fields(&a, &b).unwrap();
         assert!(reasons.contains(&"agent.workspace"));
+    }
+
+    #[test]
+    fn check_restart_only_rejects_agent_context_limit_change() {
+        let ws = "/tmp/ws";
+        let mut a: Config = toml::from_str(&minimal_toml("a", "m", ws)).unwrap();
+        let mut b: Config = toml::from_str(&minimal_toml("a", "m", ws)).unwrap();
+        b.agent.context_limit = Some(1_050_000);
+        let reasons = check_restart_only_fields(&a, &b).unwrap();
+        assert!(reasons.contains(&"agent.context_limit"));
+
+        a.agent.context_limit = Some(1_050_000);
+        assert!(check_restart_only_fields(&a, &b).is_none());
     }
 
     #[test]

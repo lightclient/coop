@@ -4,11 +4,14 @@ mod genai_provider;
 mod image_prep;
 mod key_pool;
 mod message_mapping;
+mod model_context;
 mod model_mapping;
+mod models_dev;
 mod openai_codex;
 mod openai_refresh;
 mod provider_spec;
 mod stream_mapping;
+mod sync_http;
 mod usage_mapping;
 
 use anyhow::Result;

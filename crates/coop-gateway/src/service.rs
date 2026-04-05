@@ -1699,6 +1699,7 @@ mod tests {
             agent: crate::config::AgentConfig {
                 id: "agent/main".to_owned(),
                 model: "anthropic/test".to_owned(),
+                context_limit: None,
                 workspace: "./workspaces/default".to_owned(),
             },
             users: Vec::new(),
@@ -1707,6 +1708,7 @@ mod tests {
             provider: crate::config::ProviderConfig {
                 name: "anthropic".to_owned(),
                 models: Vec::new(),
+                model_context_limits: BTreeMap::new(),
                 api_keys: vec![
                     "env:ANTHROPIC_API_KEY".to_owned(),
                     "env:SECONDARY_KEY".to_owned(),

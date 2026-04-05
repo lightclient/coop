@@ -24,6 +24,9 @@ async fn live_openai_auth_roundtrip() {
     let spec = coop_agent::ProviderSpec {
         kind: coop_agent::ProviderKind::OpenAi,
         model: "openai/gpt-5.4".to_owned(),
+        default_model: None,
+        default_model_context_limit: None,
+        model_context_limits: Default::default(),
         api_keys: vec![format!("env:OPENAI_AUTH_TOKEN")],
         api_key_env: None,
         base_url: None,

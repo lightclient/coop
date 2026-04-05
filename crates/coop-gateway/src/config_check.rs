@@ -173,6 +173,21 @@ pub(crate) fn validate_config(config_path: &Path, config_dir: &Path) -> CheckRep
         },
     });
 
+    let agent_context_limit_ok = config.agent.context_limit.is_none_or(|limit| limit > 0);
+    report.push(CheckResult {
+        name: "agent_context_limit",
+        severity: Severity::Error,
+        passed: agent_context_limit_ok,
+        message: if agent_context_limit_ok {
+            config.agent.context_limit.map_or_else(
+                || "agent.context_limit: auto-detect".to_owned(),
+                |limit| format!("agent.context_limit: {limit}"),
+            )
+        } else {
+            "agent.context_limit must be > 0 when set".to_owned()
+        },
+    });
+
     // 3. workspace_exists
     let workspace = match config.resolve_workspace(config_dir) {
         Ok(ws) => {
@@ -432,6 +447,38 @@ fn check_provider_entry(report: &mut CheckReport, provider: &ProviderConfig, pat
             },
         });
     }
+
+    let mut override_errors = Vec::new();
+    let mut override_keys = HashSet::new();
+    for (model, limit) in &provider.model_context_limits {
+        let key = normalize_model_key(model);
+        if key.is_empty() {
+            override_errors.push("empty model key".to_owned());
+            continue;
+        }
+        if *limit == 0 {
+            override_errors.push(format!("{model} => 0"));
+        }
+        if !override_keys.insert(key) {
+            override_errors.push(format!("duplicate normalized key: {model}"));
+        }
+    }
+    report.push(CheckResult {
+        name: "provider_model_context_limits",
+        severity: Severity::Error,
+        passed: override_errors.is_empty(),
+        message: if override_errors.is_empty() {
+            format!(
+                "{path}.model_context_limits: {} configured",
+                provider.model_context_limits.len()
+            )
+        } else {
+            format!(
+                "{path}.model_context_limits contains invalid entries: {}",
+                override_errors.join(", ")
+            )
+        },
+    });
 
     let mut all_env_refs_valid = true;
     for entry in &provider.api_keys {
@@ -1465,6 +1512,56 @@ mod tests {
         let report = validate_config(&config_path, dir.path());
         let errors = non_env_errors(&report);
         assert!(errors.is_empty(), "expected no config errors: {errors:?}");
+    }
+
+    #[test]
+    fn test_invalid_agent_context_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        let config_path = dir.path().join("coop.toml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "[agent]\nid = \"test\"\nmodel = \"test-model\"\ncontext_limit = 0\nworkspace = \"{}\"\n",
+                workspace.display()
+            ),
+        )
+        .unwrap();
+
+        let report = validate_config(&config_path, dir.path());
+        let check = report
+            .results
+            .iter()
+            .find(|r| r.name == "agent_context_limit")
+            .unwrap();
+        assert!(!check.passed);
+    }
+
+    #[test]
+    fn test_invalid_provider_model_context_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        let config_path = dir.path().join("coop.toml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "[agent]\nid = \"test\"\nmodel = \"gpt-5.4\"\nworkspace = \"{}\"\n\n[provider]\nname = \"openai\"\n\n[provider.model_context_limits]\n\"gpt-5.4\" = 0\n",
+                workspace.display()
+            ),
+        )
+        .unwrap();
+
+        let report = validate_config(&config_path, dir.path());
+        let check = report
+            .results
+            .iter()
+            .find(|r| r.name == "provider_model_context_limits")
+            .unwrap();
+        assert!(!check.passed);
     }
 
     #[test]
