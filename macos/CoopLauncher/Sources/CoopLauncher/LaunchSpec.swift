@@ -59,6 +59,11 @@ struct LaunchSpec {
                 fileManager: fileManager
             )
 
+            if let supportPaths = try? SupportPaths.resolve(fileManager: fileManager),
+               executable == supportPaths.generatedScriptURL.standardizedFileURL.path {
+                throw LauncherError.generatedScriptCannotBeCustomExecutable(executable)
+            }
+
             guard fileManager.fileExists(atPath: executable) else {
                 throw LauncherError.customExecutableNotFound(executable)
             }
@@ -228,6 +233,7 @@ enum LauncherError: LocalizedError {
     case missingDebugBinary(String)
     case missingCustomExecutable
     case customExecutableNotFound(String)
+    case generatedScriptCannotBeCustomExecutable(String)
 
     var errorDescription: String? {
         switch self {
@@ -243,6 +249,8 @@ enum LauncherError: LocalizedError {
             return "Custom Executable mode requires custom_executable_path in config.json."
         case let .customExecutableNotFound(path):
             return "The custom executable does not exist: \(path)"
+        case let .generatedScriptCannotBeCustomExecutable(path):
+            return "Do not point custom_executable_path at the generated launcher script: \(path)"
         }
     }
 }

@@ -84,7 +84,7 @@ For custom executable mode:
 {
   "repo_path": "/Users/alice/src/coop/browser",
   "launch_mode": "customExecutable",
-  "custom_executable_path": "/Users/alice/Library/Application Support/CoopLauncher/run-coop.zsh",
+  "custom_executable_path": "/Users/alice/bin/coop-dev.sh",
   "arguments": ["chat"],
   "environment": {
     "RUST_LOG": "info"
@@ -93,6 +93,11 @@ For custom executable mode:
   "window_title": "Coop Launcher"
 }
 ```
+
+Do not point `custom_executable_path` at the generated
+`~/Library/Application Support/CoopLauncher/run-coop.zsh` helper. That file is
+exported from the launcher config for external use, not as the launch target for
+Custom Executable mode.
 
 ## Notes
 
