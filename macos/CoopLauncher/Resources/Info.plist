@@ -24,6 +24,8 @@
     <string>13.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>Coop needs local network access to reach local model servers and other devices on your LAN.</string>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
 </dict>

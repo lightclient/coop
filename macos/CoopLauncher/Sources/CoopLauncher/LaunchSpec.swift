@@ -47,6 +47,23 @@ struct LaunchSpec {
                 currentDirectory: repoPath,
                 displayName: normalized.launchMode.displayName
             )
+        case .installedBinary:
+            let executable = defaultInstalledBinaryPath(fileManager: fileManager)
+
+            guard fileManager.fileExists(atPath: executable) else {
+                throw LauncherError.missingInstalledBinary(executable)
+            }
+
+            return Self(
+                executable: executable,
+                arguments: normalized.arguments,
+                environment: buildEnvironment(from: normalized, fileManager: fileManager),
+                currentDirectory: resolveInstalledBinaryWorkingDirectory(
+                    repoPath: normalized.repoPath,
+                    fileManager: fileManager
+                ),
+                displayName: normalized.launchMode.displayName
+            )
         case .customExecutable:
             guard let customPath = normalized.customExecutablePath?.expandedPath,
                   !customPath.trimmedValue.isEmpty else {
@@ -80,6 +97,25 @@ struct LaunchSpec {
                 displayName: normalized.launchMode.displayName
             )
         }
+    }
+
+    static func defaultInstalledBinaryPath(fileManager: FileManager = .default) -> String {
+        let environment = ProcessInfo.processInfo.environment
+        let cargoHome = environment["CARGO_HOME"]?.trimmedValue
+        let basePath: String
+
+        if let cargoHome, !cargoHome.isEmpty {
+            basePath = cargoHome.expandedPath
+        } else {
+            basePath = fileManager.homeDirectoryForCurrentUser
+                .appendingPathComponent(".cargo", isDirectory: true)
+                .path
+        }
+
+        return URL(fileURLWithPath: basePath, isDirectory: true)
+            .appendingPathComponent("bin/coop")
+            .standardizedFileURL
+            .path
     }
 
     private static func resolveRepoPath(from configuration: LauncherConfiguration, fileManager: FileManager) throws -> String {
@@ -139,6 +175,22 @@ struct LaunchSpec {
         }
 
         return URL(fileURLWithPath: executablePath).deletingLastPathComponent().standardizedFileURL.path
+    }
+
+    private static func resolveInstalledBinaryWorkingDirectory(
+        repoPath: String,
+        fileManager: FileManager
+    ) -> String {
+        let trimmedRepoPath = repoPath.trimmedValue
+        if !trimmedRepoPath.isEmpty {
+            let expandedRepoPath = trimmedRepoPath.expandedPath
+            var isDirectory: ObjCBool = false
+            if fileManager.fileExists(atPath: expandedRepoPath, isDirectory: &isDirectory), isDirectory.boolValue {
+                return URL(fileURLWithPath: expandedRepoPath, isDirectory: true).standardizedFileURL.path
+            }
+        }
+
+        return fileManager.homeDirectoryForCurrentUser.standardizedFileURL.path
     }
 
     private static func buildEnvironment(
@@ -231,6 +283,7 @@ enum LauncherError: LocalizedError {
     case repoNotFound(String)
     case invalidRepo(String)
     case missingDebugBinary(String)
+    case missingInstalledBinary(String)
     case missingCustomExecutable
     case customExecutableNotFound(String)
     case generatedScriptCannotBeCustomExecutable(String)
@@ -245,6 +298,8 @@ enum LauncherError: LocalizedError {
             return "The configured path is not a Coop checkout: \(path)"
         case let .missingDebugBinary(path):
             return "The debug binary is missing at \(path). Build Coop first or switch to Cargo Run mode."
+        case let .missingInstalledBinary(path):
+            return "The installed coop binary is missing at \(path). Run `just install` first or switch launch modes."
         case .missingCustomExecutable:
             return "Custom Executable mode requires custom_executable_path in config.json."
         case let .customExecutableNotFound(path):

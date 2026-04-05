@@ -43,6 +43,9 @@ final class LauncherViewController: NSViewController, LocalProcessTerminalViewDe
         replaceTerminalView()
         _ = refreshConfiguration(showErrors: false)
         updateButtons()
+        DispatchQueue.main.async { [weak self] in
+            self?.performInitialLaunchIfNeeded()
+        }
     }
 
     override func viewDidAppear() {
@@ -55,7 +58,7 @@ final class LauncherViewController: NSViewController, LocalProcessTerminalViewDe
             return
         }
 
-        if configuration.launchMode != .customExecutable && configuration.repoPath.trimmedValue.isEmpty {
+        if configuration.launchMode.requiresRepoPath && configuration.repoPath.trimmedValue.isEmpty {
             chooseRepo(sender)
             return
         }
@@ -251,7 +254,7 @@ final class LauncherViewController: NSViewController, LocalProcessTerminalViewDe
 
         didPerformInitialLaunch = true
 
-        if configuration.launchMode != .customExecutable && configuration.repoPath.trimmedValue.isEmpty {
+        if configuration.launchMode.requiresRepoPath && configuration.repoPath.trimmedValue.isEmpty {
             updateStatus("Choose a Coop checkout to start the launcher.", color: .systemOrange)
             chooseRepo(nil)
             return
@@ -417,7 +420,7 @@ final class LauncherViewController: NSViewController, LocalProcessTerminalViewDe
 
     private func updateButtons() {
         stopButton.isEnabled = isProcessRunning
-        restartButton.isEnabled = isProcessRunning || configuration.repoPath.trimmedValue.isEmpty == false || configuration.launchMode == .customExecutable
+        restartButton.isEnabled = isProcessRunning || configuration.launchMode.requiresRepoPath == false || configuration.repoPath.trimmedValue.isEmpty == false
     }
 
     private func promptForRestart(message: String) {

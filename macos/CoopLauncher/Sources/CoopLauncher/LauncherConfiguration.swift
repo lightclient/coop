@@ -3,6 +3,7 @@ import Foundation
 enum LaunchMode: String, Codable, CaseIterable {
     case cargoRun
     case debugBinary
+    case installedBinary
     case customExecutable
 
     var displayName: String {
@@ -11,8 +12,19 @@ enum LaunchMode: String, Codable, CaseIterable {
             return "Cargo Run"
         case .debugBinary:
             return "Debug Binary"
+        case .installedBinary:
+            return "Installed Binary"
         case .customExecutable:
             return "Custom Executable"
+        }
+    }
+
+    var requiresRepoPath: Bool {
+        switch self {
+        case .cargoRun, .debugBinary:
+            return true
+        case .installedBinary, .customExecutable:
+            return false
         }
     }
 }
@@ -44,8 +56,12 @@ struct LauncherConfiguration: Codable, Equatable {
         self.windowTitle = windowTitle
     }
 
-    static func `default`(repoPath: String) -> Self {
-        Self(repoPath: repoPath, launchMode: .cargoRun)
+    static func `default`(repoPath: String, fileManager: FileManager = .default) -> Self {
+        let launchMode: LaunchMode = fileManager.fileExists(atPath: LaunchSpec.defaultInstalledBinaryPath(fileManager: fileManager))
+            ? .installedBinary
+            : .cargoRun
+
+        return Self(repoPath: repoPath, launchMode: launchMode)
     }
 
     var safeWindowTitle: String {
@@ -94,8 +110,10 @@ struct LauncherConfiguration: Codable, Equatable {
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        repoPath = try container.decodeIfPresent(String.self, forKey: .repoPath) ?? ""
-        launchMode = try container.decodeIfPresent(LaunchMode.self, forKey: .launchMode) ?? .cargoRun
+        let decodedRepoPath = try container.decodeIfPresent(String.self, forKey: .repoPath) ?? ""
+        repoPath = decodedRepoPath
+        launchMode = try container.decodeIfPresent(LaunchMode.self, forKey: .launchMode)
+            ?? LauncherConfiguration.default(repoPath: decodedRepoPath).launchMode
         customExecutablePath = try container.decodeIfPresent(String.self, forKey: .customExecutablePath)
         arguments = try container.decodeIfPresent([String].self, forKey: .arguments) ?? ["chat"]
         environment = try container.decodeIfPresent([String: String].self, forKey: .environment) ?? ["RUST_LOG": "info"]

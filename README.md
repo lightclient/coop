@@ -97,6 +97,11 @@ Build it with:
 just launcher-build
 ```
 
+On macOS, `just features=signal install` now also builds and installs the
+launcher app to `~/Applications/Coop Launcher.app` and preconfigures it for the
+current checkout in gateway mode (`start --config ~/.coop/coop.toml`). The
+launcher trace file defaults to `~/.coop/logs/trace.jsonl`.
+
 If your platform doesn't have systemd/launchd, use:
 
 ```bash

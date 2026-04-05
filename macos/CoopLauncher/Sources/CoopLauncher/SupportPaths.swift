@@ -66,6 +66,8 @@ struct SupportPaths {
         }
 
         appendCandidate(URL(fileURLWithPath: fileManager.currentDirectoryPath, isDirectory: true))
+        appendCandidate(homeDirectory.appendingPathComponent("dev/coop/browser", isDirectory: true))
+        appendCandidate(homeDirectory.appendingPathComponent("dev/coop", isDirectory: true))
         appendCandidate(homeDirectory.appendingPathComponent("src/coop/browser", isDirectory: true))
         appendCandidate(homeDirectory.appendingPathComponent("src/coop", isDirectory: true))
         appendCandidate(homeDirectory.appendingPathComponent("code/coop/browser", isDirectory: true))

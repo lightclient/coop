@@ -25,6 +25,28 @@ Or directly:
 ./macos/CoopLauncher/build-app.sh
 ```
 
+To build, install, and preconfigure the launcher on macOS for the current
+checkout and `~/.cargo/bin/coop`, run:
+
+```bash
+just launcher-install
+```
+
+A normal macOS install now does the same automatically:
+
+```bash
+just features=signal install
+```
+
+That install path configures the launcher for gateway mode using your normal
+Coop config:
+
+- arguments: `start --config ~/.coop/coop.toml`
+- trace file: `~/.coop/logs/trace.jsonl`
+
+If you want a different trace or config path, set `COOP_TRACE_FILE` and/or
+`COOP_CONFIG` when running `just install`.
+
 The app bundle is written to:
 
 ```text
@@ -45,15 +67,20 @@ On first launch, the app creates:
 If it cannot guess your repo location, click **Choose Repo…** and select the
 Coop checkout root.
 
+The repo guesser checks common paths including `~/dev/coop`.
+
 ## Launch modes
 
 The toolbar popup supports:
 
 - **Cargo Run** — runs `cargo run -p coop-gateway --bin coop -- ...`
 - **Debug Binary** — runs `<repo>/target/debug/coop ...`
+- **Installed Binary** — runs `~/.cargo/bin/coop ...`
 - **Custom Executable** — runs `custom_executable_path` from `config.json`
 
-`Cargo Run` is the default because it works before you have a built binary.
+If `~/.cargo/bin/coop` already exists, the launcher defaults to **Installed
+Binary**. Otherwise it defaults to **Cargo Run** so it still works before you
+have a built or installed binary.
 
 ## Config file
 
@@ -67,14 +94,14 @@ Example:
 
 ```json
 {
-  "repo_path": "/Users/alice/src/coop/browser",
-  "launch_mode": "debugBinary",
-  "arguments": ["chat"],
+  "repo_path": "/Users/alice/dev/coop",
+  "launch_mode": "installedBinary",
+  "arguments": ["start", "--config", "/Users/alice/.coop/coop.toml"],
   "environment": {
     "RUST_LOG": "info"
   },
-  "trace_file": "traces.jsonl",
-  "window_title": "Coop Launcher"
+  "trace_file": "/Users/alice/.coop/logs/trace.jsonl",
+  "window_title": "Coop Launcher (gateway)"
 }
 ```
 
