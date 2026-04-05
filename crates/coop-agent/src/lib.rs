@@ -10,6 +10,7 @@ mod models_dev;
 mod openai_codex;
 mod openai_refresh;
 mod provider_spec;
+mod request_trace;
 mod stream_mapping;
 mod sync_http;
 mod usage_mapping;

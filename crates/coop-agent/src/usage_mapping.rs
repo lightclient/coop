@@ -105,6 +105,7 @@ mod tests {
                 total_tokens: Some(190),
             },
             captured_raw_body: None,
+            response_id: None,
         };
 
         let usage = usage_from_response(&response);
@@ -122,6 +123,7 @@ mod tests {
             captured_stop_reason: Some(StopReason::ToolCall("tool_calls".into())),
             captured_content: None,
             captured_reasoning_content: None,
+            captured_response_id: None,
         };
 
         let usage = usage_from_stream_end(&end);

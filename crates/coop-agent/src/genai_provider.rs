@@ -14,6 +14,10 @@ use crate::message_mapping::{build_chat_request, map_response_message};
 use crate::model_context::{ContextLimitInput, resolve_context_limit};
 use crate::model_mapping::ResolvedModel;
 use crate::provider_spec::{ProviderKind, ProviderSpec};
+use crate::request_trace::{
+    ProviderTrace, RequestTrace, summarize_chat_request, summarize_provider_trace,
+    summarize_transport_error,
+};
 use crate::stream_mapping::into_provider_stream;
 use crate::usage_mapping::usage_from_response;
 
@@ -131,17 +135,22 @@ impl GenAiProvider {
         tools: &[ToolDef],
     ) -> Result<(Message, Usage)> {
         let chat_request = build_chat_request(self.kind, system, messages, tools);
+        let spec = self.spec_snapshot();
+        let provider_trace = summarize_provider_trace(self.kind, &spec, self.keys.is_some());
+        let request_trace = summarize_chat_request(&chat_request);
         let options = self.chat_options(false);
 
         for attempt in 0..=MAX_RETRIES {
             let (target, key_index, key_count, model_info) = self.request_target();
-            debug!(
-                provider = self.name(),
-                model = %model_info.name,
+            log_request_start(
+                self.name(),
+                "complete",
+                &model_info.name,
                 key_index,
                 key_count,
-                attempt = attempt + 1,
-                "genai complete request"
+                attempt,
+                &provider_trace,
+                &request_trace,
             );
 
             match self
@@ -168,6 +177,7 @@ impl GenAiProvider {
                     return Ok((message, usage));
                 }
                 Err(error) => {
+                    log_request_failure(self.name(), "complete", &model_info.name, attempt, &error);
                     if !self
                         .handle_retryable_error(&error, key_index, key_count, attempt)
                         .await
@@ -188,17 +198,22 @@ impl GenAiProvider {
         tools: &[ToolDef],
     ) -> Result<ProviderStream> {
         let chat_request = build_chat_request(self.kind, system, messages, tools);
+        let spec = self.spec_snapshot();
+        let provider_trace = summarize_provider_trace(self.kind, &spec, self.keys.is_some());
+        let request_trace = summarize_chat_request(&chat_request);
         let options = self.chat_options(true);
 
         for attempt in 0..=MAX_RETRIES {
             let (target, key_index, key_count, model_info) = self.request_target();
-            debug!(
-                provider = self.name(),
-                model = %model_info.name,
+            log_request_start(
+                self.name(),
+                "stream",
+                &model_info.name,
                 key_index,
                 key_count,
-                attempt = attempt + 1,
-                "genai stream request"
+                attempt,
+                &provider_trace,
+                &request_trace,
             );
 
             match self
@@ -210,6 +225,7 @@ impl GenAiProvider {
                     return Ok(into_provider_stream(response));
                 }
                 Err(error) => {
+                    log_request_failure(self.name(), "stream", &model_info.name, attempt, &error);
                     if !self
                         .handle_retryable_error(&error, key_index, key_count, attempt)
                         .await
@@ -454,6 +470,76 @@ fn jitter_ms() -> u64 {
 fn truncate_body(body: &str) -> &str {
     const MAX: usize = 200;
     if body.len() > MAX { &body[..MAX] } else { body }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn log_request_start(
+    provider: &str,
+    method: &'static str,
+    model: &str,
+    key_index: Option<usize>,
+    key_count: usize,
+    attempt: u32,
+    provider_trace: &ProviderTrace,
+    request_trace: &RequestTrace,
+) {
+    debug!(
+        provider,
+        method,
+        model,
+        key_index,
+        key_count,
+        attempt = attempt + 1,
+        provider_base_url = %provider_trace.base_url,
+        provider_auth_mode = provider_trace.auth_mode,
+        provider_extra_header_count = provider_trace.extra_header_count,
+        provider_extra_header_names = %provider_trace.extra_header_names,
+        mapped_chat_system_count = request_trace.system_count,
+        mapped_chat_user_count = request_trace.user_count,
+        mapped_chat_assistant_count = request_trace.assistant_count,
+        mapped_chat_tool_count = request_trace.tool_count,
+        mapped_content_text_count = request_trace.text_part_count,
+        mapped_content_binary_count = request_trace.binary_part_count,
+        mapped_content_tool_call_count = request_trace.tool_call_part_count,
+        mapped_content_tool_response_count = request_trace.tool_response_part_count,
+        mapped_content_reasoning_count = request_trace.reasoning_part_count,
+        mapped_content_thought_signature_count = request_trace.thought_signature_part_count,
+        mapped_assistant_reasoning_message_count = request_trace.assistant_reasoning_message_count,
+        mapped_chat_json_bytes = request_trace.json_bytes,
+        mapped_chat_json_hash = %request_trace.json_hash,
+        mapped_tool_names = %request_trace.tool_names,
+        "genai provider request"
+    );
+}
+
+fn log_request_failure(
+    provider: &str,
+    method: &'static str,
+    model: &str,
+    attempt: u32,
+    error: &genai::Error,
+) {
+    let transport = summarize_transport_error(error);
+    warn!(
+        provider,
+        method,
+        model,
+        attempt = attempt + 1,
+        transport_error_variant = transport.variant,
+        transport_error_kind = transport.kind,
+        transport_http_status = transport.http_status,
+        transport_reqwest_is_connect = transport.reqwest_is_connect,
+        transport_reqwest_is_timeout = transport.reqwest_is_timeout,
+        transport_reqwest_is_request = transport.reqwest_is_request,
+        transport_reqwest_is_body = transport.reqwest_is_body,
+        transport_reqwest_is_decode = transport.reqwest_is_decode,
+        transport_url = %transport.url,
+        transport_source_chain = %transport.source_chain,
+        transport_response_body_excerpt = %transport.body_excerpt,
+        error = %error,
+        error_debug = ?error,
+        "genai request failed"
+    );
 }
 
 #[allow(clippy::unwrap_used)]
