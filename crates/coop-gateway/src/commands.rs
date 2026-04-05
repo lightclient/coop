@@ -3,6 +3,20 @@ use coop_core::TrustLevel;
 
 use crate::gateway::Gateway;
 
+fn format_number(value: impl ToString) -> String {
+    let digits = value.to_string();
+    let mut reversed = String::with_capacity(digits.len() + digits.len() / 3);
+
+    for (idx, ch) in digits.chars().rev().enumerate() {
+        if idx > 0 && idx % 3 == 0 {
+            reversed.push(',');
+        }
+        reversed.push(ch);
+    }
+
+    reversed.chars().rev().collect()
+}
+
 pub(crate) async fn handle_slash_command(
     gateway: &Gateway,
     input: &str,
@@ -61,11 +75,11 @@ fn format_status(gateway: &Gateway, session_key: &SessionKey, user_name: Option<
         gateway.agent_id(),
         model,
         count,
-        usage.last_input_tokens,
-        context_limit,
+        format_number(usage.last_input_tokens),
+        format_number(context_limit),
         context_pct,
-        usage.cumulative.input_tokens.unwrap_or(0),
-        usage.cumulative.output_tokens.unwrap_or(0),
+        format_number(usage.cumulative.input_tokens.unwrap_or(0)),
+        format_number(usage.cumulative.output_tokens.unwrap_or(0)),
     )
 }
 
@@ -88,10 +102,19 @@ fn format_models(gateway: &Gateway, user_name: Option<&str>) -> String {
             if tags.contains(&"current") { "*" } else { "-" },
             model.id
         );
+
+        let mut details = Vec::new();
         if let Some(description) = model.description {
-            line.push_str(" — ");
-            line.push_str(&description);
+            details.push(description);
         }
+        if let Some(context_limit) = gateway.configured_context_limit_for_model(&model.id) {
+            details.push(format!("{} tokens", format_number(context_limit)));
+        }
+        if !details.is_empty() {
+            line.push_str(" — ");
+            line.push_str(&details.join(" · "));
+        }
+
         let aliases = gateway.model_aliases(&model.id);
         if !aliases.is_empty() || !tags.is_empty() {
             line.push_str(" (");
@@ -141,7 +164,8 @@ async fn handle_model_command(
         Ok(outcome) => {
             let mut response = format!(
                 "Model set to {} ✅\nContext window: {} tokens",
-                outcome.selection.model, outcome.selection.context_limit
+                outcome.selection.model,
+                format_number(outcome.selection.context_limit)
             );
             if outcome.compacted_for_handoff {
                 response.push_str("\nSession compacted before handoff ✅");

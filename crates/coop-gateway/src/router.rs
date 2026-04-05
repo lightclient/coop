@@ -1678,7 +1678,7 @@ match = ["signal:bob-uuid"]
         assert!(text.contains("Model:"));
         assert!(text.contains("reid"), "should contain agent id");
         assert!(text.contains("Context:"), "should show context usage");
-        assert!(text.contains("128000"), "should show context window size");
+        assert!(text.contains("128,000"), "should show context window size");
         assert!(
             text.contains("Total tokens used:"),
             "should show cumulative usage"
@@ -2076,6 +2076,40 @@ models = ["anthropic/claude-sonnet-4-20250514", "anthropic/claude-opus-4-0-20250
     }
 
     #[tokio::test]
+    async fn slash_models_shows_configured_context_limit_override() {
+        let config: Config = toml::from_str(
+            r#"
+[agent]
+id = "reid"
+model = "gemma4"
+
+[models.aliases]
+gemma4 = "gemma-4-31B-it-UD-Q8_K_XL.gguf"
+
+[[users]]
+name = "alice"
+trust = "full"
+match = ["terminal:default", "signal:alice-uuid"]
+
+[provider]
+name = "openai-compatible"
+base_url = "http://localhost:11434/v1"
+models = ["gemma-4-31B-it-UD-Q8_K_XL.gguf"]
+
+[provider.model_context_limits]
+"gemma-4-31B-it-UD-Q8_K_XL.gguf" = 32768
+"#,
+        )
+        .unwrap();
+        let (router, _gw) = make_router_and_gateway(&config);
+        let msg = inbound_command("signal", "alice-uuid", "/models");
+        let (_decision, text) = dispatch_and_collect_text(&router, &msg).await;
+
+        assert!(text.contains("gemma-4-31B-it-UD-Q8_K_XL.gguf"), "{text}");
+        assert!(text.contains("32,768 tokens"), "{text}");
+    }
+
+    #[tokio::test]
     async fn slash_model_can_override_user_configured_default_with_agent_default() {
         let config: Config = toml::from_str(
             r#"
@@ -2298,11 +2332,11 @@ models = ["gpt-5-codex"]
         let (_, text) = dispatch_and_collect_text(&router, &msg).await;
 
         assert!(
-            text.contains("Context: 10000 / 128000 tokens"),
+            text.contains("Context: 10,000 / 128,000 tokens"),
             "context should show 10000 (including cache tokens), got: {text}"
         );
         assert!(
-            text.contains("Total tokens used: 1500 in / 400 out"),
+            text.contains("Total tokens used: 1,500 in / 400 out"),
             "cumulative should show correct totals, got: {text}"
         );
     }

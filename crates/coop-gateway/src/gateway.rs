@@ -1551,6 +1551,30 @@ impl Gateway {
         crate::model_catalog::available_main_models(&self.config.load())
     }
 
+    pub(crate) fn configured_context_limit_for_model(&self, model: &str) -> Option<usize> {
+        let config = self.config.load();
+        let requested = resolve_model_reference(&config, model);
+        let resolved = resolve_available_model(&config, &requested.resolved)?;
+
+        if let Some(limit) = config.agent.context_limit {
+            let default_reference = resolve_model_reference(&config, &config.agent.model);
+            if normalize_model_key(&default_reference.resolved)
+                == normalize_model_key(&requested.resolved)
+            {
+                return Some(limit);
+            }
+        }
+
+        let model_key = normalize_model_key(&requested.resolved);
+        resolved
+            .provider
+            .model_context_limits
+            .iter()
+            .find_map(|(candidate, limit)| {
+                (normalize_model_key(candidate) == model_key).then_some(*limit)
+            })
+    }
+
     pub(crate) fn model_aliases(&self, model: &str) -> Vec<String> {
         model_aliases_for(&self.config.load(), model)
     }
