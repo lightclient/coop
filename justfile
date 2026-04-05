@@ -47,6 +47,14 @@ machete:
 build:
     cargo build {{_feat}} --release
 
+# Build the macOS launcher app bundle (macOS only)
+launcher-build:
+    ./macos/CoopLauncher/build-app.sh
+
+# Open the built macOS launcher app bundle (macOS only)
+launcher-open:
+    open ./macos/CoopLauncher/dist/Coop\ Launcher.app
+
 # Install the release binary to ~/.cargo/bin
 install:
     cargo install {{_feat}} --path crates/coop-gateway

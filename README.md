@@ -84,6 +84,19 @@ coop gateway rollback        # restore coop.toml.bak and restart
 coop gateway uninstall       # remove service files
 ```
 
+### macOS launcher for Full Disk Access
+
+If you want a stable macOS app that can later be signed and granted Full Disk
+Access while your changing Coop binaries stay outside the app bundle, see:
+
+- `macos/CoopLauncher/README.md`
+
+Build it with:
+
+```bash
+just launcher-build
+```
+
 If your platform doesn't have systemd/launchd, use:
 
 ```bash

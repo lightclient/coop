@@ -1,4 +1,7 @@
 /target
+/macos/CoopLauncher/.build/
+/macos/CoopLauncher/.swiftpm/
+/macos/CoopLauncher/dist/
 *.swp
 *.swo
 .DS_Store
