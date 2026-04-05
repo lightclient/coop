@@ -19,7 +19,9 @@ use crate::request_trace::{
     summarize_transport_error,
 };
 use crate::stream_mapping::into_provider_stream;
-use crate::transport_probe::{build_probe_client, probe_transport_failure};
+use crate::transport_probe::{
+    build_probe_client, probe_socket_transport_failure, probe_transport_failure,
+};
 use crate::usage_mapping::usage_from_response;
 
 const MAX_RETRIES: u32 = 3;
@@ -383,6 +385,28 @@ impl GenAiProvider {
                 transport_probe_source_chain = %probe.source_chain,
                 transport_probe_response_body_excerpt = %probe.body_excerpt,
                 "genai transport failure probe complete"
+            );
+        }
+
+        if let Some(socket_probe) =
+            probe_socket_transport_failure(self.kind, &spec, &transport).await
+        {
+            info!(
+                provider = self.name(),
+                method,
+                model,
+                attempt = attempt + 1,
+                transport_source_chain = %transport.source_chain,
+                transport_socket_probe_target_host = %socket_probe.target_host,
+                transport_socket_probe_target_port = socket_probe.target_port,
+                transport_socket_probe_resolved_addrs = %socket_probe.resolved_addrs,
+                transport_socket_probe_selected_local_addr = %socket_probe.selected_local_addr,
+                transport_socket_probe_connect_ok = socket_probe.connect_ok,
+                transport_socket_probe_connected_peer_addr = %socket_probe.connected_peer_addr,
+                transport_socket_probe_connected_local_addr = %socket_probe.connected_local_addr,
+                transport_socket_probe_error_kind = socket_probe.error_kind,
+                transport_socket_probe_error = %socket_probe.error,
+                "genai socket transport probe complete"
             );
         }
     }

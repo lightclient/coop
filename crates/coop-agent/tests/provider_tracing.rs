@@ -52,6 +52,10 @@ fn start_models_probe_server() -> (String, thread::JoinHandle<()>) {
             }
 
             let request = String::from_utf8_lossy(&request);
+            if request.is_empty() {
+                continue;
+            }
+
             if request.starts_with("POST /v1/chat/completions ") {
                 let partial_response = "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 64\r\nconnection: close\r\n\r\n{\"id\":\"broken\"";
                 stream
@@ -160,6 +164,8 @@ async fn provider_trace_logs_request_shape_and_transport_details() {
     assert!(trace.contains("\"transport_reqwest_is_connect\":true"));
     assert!(trace.contains("genai transport failure probe complete"));
     assert!(trace.contains("\"transport_probe_target\":\"models\""));
+    assert!(trace.contains("genai socket transport probe complete"));
+    assert!(trace.contains("\"transport_socket_probe_connect_ok\":false"));
     assert!(
         trace.contains("provider stream item failed") || trace.contains("\"method\":\"stream\"")
     );
@@ -213,5 +219,7 @@ async fn provider_failure_probe_can_show_models_endpoint_is_up() {
     assert!(trace.contains("genai request failed"));
     assert!(trace.contains("genai transport failure probe complete"));
     assert!(trace.contains("\"transport_probe_http_status\":200"));
+    assert!(trace.contains("genai socket transport probe complete"));
+    assert!(trace.contains("\"transport_socket_probe_connect_ok\":true"));
     assert!(trace.contains("/v1/models"));
 }
