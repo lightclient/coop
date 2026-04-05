@@ -169,6 +169,14 @@ name = "ollama"
 # api_key_env = "OPENAI_COMPAT_API_KEY"
 # models = ["meta-llama/Llama-3.3-70B-Instruct"]
 
+# Optional model aliases for shorter names in config and /model commands.
+# Aliases work in agent.model, users[*].model, groups[*].trigger_model,
+# and /model <alias>. Alias values must point to configured models.
+# [models.aliases]
+# main = "anthropic/claude-sonnet-4-20250514"
+# fast = "anthropic/claude-haiku-3-5-20241022"
+# codex = "gpt-5-codex"
+
 # Legacy single-provider form is still supported:
 # [provider]
 # name = "anthropic"

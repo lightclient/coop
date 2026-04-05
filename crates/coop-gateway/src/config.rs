@@ -47,6 +47,8 @@ pub(crate) struct Config {
     #[serde(default)]
     pub providers: Vec<ProviderConfig>,
     #[serde(default)]
+    pub models: ModelsConfig,
+    #[serde(default)]
     pub prompt: PromptConfig,
     #[serde(default)]
     pub memory: MemoryConfig,
@@ -56,6 +58,12 @@ pub(crate) struct Config {
     pub cron: Vec<CronConfig>,
     #[serde(default)]
     pub sandbox: SandboxConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub(crate) struct ModelsConfig {
+    #[serde(default)]
+    pub aliases: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1026,6 +1034,29 @@ model = "gpt-5-codex"
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.users.len(), 1);
         assert_eq!(config.users[0].model.as_deref(), Some("gpt-5-codex"));
+    }
+
+    #[test]
+    fn parse_config_with_model_aliases() {
+        let toml_str = r#"
+[agent]
+id = "coop"
+model = "main"
+
+[models.aliases]
+main = "anthropic/claude-sonnet-4-20250514"
+fast = "anthropic/claude-haiku-3-5-20241022"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.models.aliases.len(), 2);
+        assert_eq!(
+            config.models.aliases.get("main").map(String::as_str),
+            Some("anthropic/claude-sonnet-4-20250514")
+        );
+        assert_eq!(
+            config.models.aliases.get("fast").map(String::as_str),
+            Some("anthropic/claude-haiku-3-5-20241022")
+        );
     }
 
     #[test]

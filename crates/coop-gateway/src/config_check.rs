@@ -7,7 +7,7 @@ use coop_core::prompt::{PromptBuilder, WorkspaceIndex};
 use crate::config::{Config, ProviderConfig};
 use crate::model_catalog::{
     normalize_model_key, provider_model_candidates, resolve_available_model,
-    resolve_default_main_model,
+    resolve_available_model_direct, resolve_default_main_model, resolve_model_reference,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -211,6 +211,8 @@ pub(crate) fn validate_config(config_path: &Path, config_dir: &Path) -> CheckRep
         }
     };
 
+    check_model_aliases(&mut report, &config);
+
     check_provider_config(&mut report, &config);
 
     // 6. memory config
@@ -321,20 +323,104 @@ fn check_provider_config(report: &mut CheckReport, config: &Config) {
     });
 
     let default_model = resolve_default_main_model(config);
+    let default_reference = resolve_model_reference(config, &config.agent.model);
     report.push(CheckResult {
         name: "agent_model_provider",
         severity: Severity::Error,
         passed: default_model.is_some(),
         message: if let Some(resolved) = default_model {
-            format!(
-                "agent.model '{}' resolved via provider '{}'",
-                resolved.model.id, resolved.provider.name
+            default_reference.alias.as_ref().map_or_else(
+                || {
+                    format!(
+                        "agent.model '{}' resolved via provider '{}'",
+                        resolved.model.id, resolved.provider.name
+                    )
+                },
+                |alias| {
+                    format!(
+                        "agent.model alias '{}' -> '{}' via provider '{}'",
+                        alias, resolved.model.id, resolved.provider.name
+                    )
+                },
             )
         } else {
             format!(
                 "agent.model '{}' must appear in one configured provider's model list or built-in catalog",
                 config.agent.model
             )
+        },
+    });
+}
+
+fn check_model_aliases(report: &mut CheckReport, config: &Config) {
+    if config.models.aliases.is_empty() {
+        return;
+    }
+
+    let mut alias_keys = std::collections::HashMap::new();
+    let mut alias_errors = Vec::new();
+
+    for (alias, target) in &config.models.aliases {
+        let alias_key = normalize_model_key(alias);
+        if alias_key.is_empty() {
+            alias_errors.push("empty alias key".to_owned());
+            continue;
+        }
+        if target.trim().is_empty() {
+            alias_errors.push(format!("alias '{alias}' has an empty target"));
+        }
+        if let Some(previous) = alias_keys.insert(alias_key.clone(), alias.clone()) {
+            alias_errors.push(format!(
+                "duplicate normalized alias keys: '{previous}' and '{alias}'"
+            ));
+        }
+    }
+
+    let mut real_model_keys = HashSet::new();
+    if let Some(default_model) = resolve_default_main_model(config) {
+        real_model_keys.insert(normalize_model_key(&default_model.model.id));
+    }
+    for provider in config.main_provider_configs() {
+        for model in provider_model_candidates(provider) {
+            real_model_keys.insert(normalize_model_key(&model.id));
+        }
+    }
+
+    for (alias, target) in &config.models.aliases {
+        let alias_key = normalize_model_key(alias);
+        if alias_key.is_empty() {
+            continue;
+        }
+
+        if real_model_keys.contains(&alias_key) {
+            alias_errors.push(format!(
+                "alias '{alias}' collides with a configured model id"
+            ));
+        }
+
+        let target_key = normalize_model_key(target);
+        if alias_keys.contains_key(&target_key) {
+            alias_errors.push(format!(
+                "alias '{alias}' points to another alias target '{target}' — alias chaining is not supported"
+            ));
+            continue;
+        }
+
+        if resolve_available_model_direct(config, target).is_none() {
+            alias_errors.push(format!(
+                "alias '{alias}' target '{target}' does not resolve to a configured model"
+            ));
+        }
+    }
+
+    report.push(CheckResult {
+        name: "model_aliases",
+        severity: Severity::Error,
+        passed: alias_errors.is_empty(),
+        message: if alias_errors.is_empty() {
+            format!("models.aliases: {} configured", config.models.aliases.len())
+        } else {
+            format!("models.aliases invalid: {}", alias_errors.join("; "))
         },
     });
 }
@@ -1083,14 +1169,25 @@ fn check_users(report: &mut CheckReport, config: &Config) {
     for user in &config.users {
         if let Some(model) = &user.model {
             let resolved = resolve_available_model(config, model);
+            let requested = resolve_model_reference(config, model);
             report.push(CheckResult {
                 name: "users_models",
                 severity: Severity::Error,
                 passed: resolved.is_some(),
                 message: if let Some(resolved) = resolved {
-                    format!(
-                        "user '{}' model '{}' resolved via provider '{}'",
-                        user.name, resolved.model.id, resolved.provider.name
+                    requested.alias.as_ref().map_or_else(
+                        || {
+                            format!(
+                                "user '{}' model '{}' resolved via provider '{}'",
+                                user.name, resolved.model.id, resolved.provider.name
+                            )
+                        },
+                        |alias| {
+                            format!(
+                                "user '{}' model alias '{}' -> '{}' via provider '{}'",
+                                user.name, alias, resolved.model.id, resolved.provider.name
+                            )
+                        },
                     )
                 } else {
                     format!(
@@ -1195,6 +1292,37 @@ fn check_groups(report: &mut CheckReport, config: &Config) {
             }
         }
 
+        if group.trigger == GroupTrigger::Llm || group.trigger_model.is_some() {
+            let trigger_model = group.trigger_model_or_default();
+            let resolved = resolve_available_model(config, trigger_model);
+            let requested = resolve_model_reference(config, trigger_model);
+            report.push(CheckResult {
+                name: "groups_trigger_models",
+                severity: Severity::Error,
+                passed: resolved.is_some(),
+                message: if let Some(resolved) = resolved {
+                    requested.alias.as_ref().map_or_else(
+                        || {
+                            format!(
+                                "groups[{i}] trigger model '{}' resolved via provider '{}'",
+                                resolved.model.id, resolved.provider.name
+                            )
+                        },
+                        |alias| {
+                            format!(
+                                "groups[{i}] trigger model alias '{}' -> '{}' via provider '{}'",
+                                alias, resolved.model.id, resolved.provider.name
+                            )
+                        },
+                    )
+                } else {
+                    format!(
+                        "groups[{i}] trigger model '{trigger_model}' must appear in one configured provider's model list or built-in catalog"
+                    )
+                },
+            });
+        }
+
         if group.default_trust == TrustLevel::Owner {
             report.push(CheckResult {
                 name: "groups",
@@ -1229,7 +1357,7 @@ fn check_groups(report: &mut CheckReport, config: &Config) {
     let group_errors = report
         .results
         .iter()
-        .any(|r| r.name == "groups" && !r.passed);
+        .any(|r| matches!(r.name, "groups" | "groups_trigger_models") && !r.passed);
     if !group_errors {
         report.push(CheckResult {
             name: "groups",
@@ -1717,6 +1845,104 @@ mod tests {
             .unwrap();
         assert!(!model_check.passed);
         assert!(model_check.message.contains("missing-model"));
+    }
+
+    #[test]
+    fn test_model_aliases_allow_agent_and_user_models() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        let config_path = dir.path().join("coop.toml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "[agent]\nid = \"test\"\nmodel = \"main\"\nworkspace = \"{}\"\n\n[models.aliases]\nmain = \"gpt-5-mini\"\ncodex = \"gpt-5-codex\"\n\n[[providers]]\nname = \"anthropic\"\nmodels = [\"anthropic/claude-sonnet-4-20250514\"]\n\n[[providers]]\nname = \"openai\"\nmodels = [\"gpt-5-mini\", \"gpt-5-codex\"]\n\n[[users]]\nname = \"alice\"\ntrust = \"full\"\nmodel = \"codex\"\n",
+                workspace.display()
+            ),
+        )
+        .unwrap();
+
+        let report = validate_config(&config_path, dir.path());
+        let alias_check = report
+            .results
+            .iter()
+            .find(|r| r.name == "model_aliases")
+            .unwrap();
+        let agent_check = report
+            .results
+            .iter()
+            .find(|r| r.name == "agent_model_provider")
+            .unwrap();
+        let user_check = report
+            .results
+            .iter()
+            .find(|r| r.name == "users_models")
+            .unwrap();
+
+        assert!(alias_check.passed, "{alias_check:?}");
+        assert!(agent_check.passed, "{agent_check:?}");
+        assert!(agent_check.message.contains("alias 'main'"));
+        assert!(user_check.passed, "{user_check:?}");
+        assert!(user_check.message.contains("alias 'codex'"));
+    }
+
+    #[test]
+    fn test_model_aliases_reject_alias_chains() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        let config_path = dir.path().join("coop.toml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "[agent]\nid = \"test\"\nmodel = \"main\"\nworkspace = \"{}\"\n\n[models.aliases]\nmain = \"gpt-5-mini\"\nfast = \"main\"\n\n[provider]\nname = \"openai\"\n",
+                workspace.display()
+            ),
+        )
+        .unwrap();
+
+        let report = validate_config(&config_path, dir.path());
+        let alias_check = report
+            .results
+            .iter()
+            .find(|r| r.name == "model_aliases")
+            .unwrap();
+
+        assert!(!alias_check.passed);
+        assert!(
+            alias_check
+                .message
+                .contains("alias chaining is not supported")
+        );
+    }
+
+    #[test]
+    fn test_groups_trigger_model_accepts_alias() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        let config_path = dir.path().join("coop.toml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "[agent]\nid = \"test\"\nmodel = \"main\"\nworkspace = \"{}\"\n\n[models.aliases]\nmain = \"anthropic/claude-sonnet-4-20250514\"\nfast = \"anthropic/claude-haiku-3-5-20241022\"\n\n[channels.signal]\ndb_path = \"./db/signal.db\"\n\n[provider]\nname = \"anthropic\"\n\n[[groups]]\nmatch = [\"signal:group:deadbeef\"]\ntrigger = \"llm\"\ntrigger_model = \"fast\"\n",
+                workspace.display()
+            ),
+        )
+        .unwrap();
+
+        let report = validate_config(&config_path, dir.path());
+        let trigger_check = report
+            .results
+            .iter()
+            .find(|r| r.name == "groups_trigger_models")
+            .unwrap();
+
+        assert!(trigger_check.passed, "{trigger_check:?}");
+        assert!(trigger_check.message.contains("alias 'fast'"));
     }
 
     #[test]

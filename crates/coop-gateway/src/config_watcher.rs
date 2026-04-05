@@ -187,6 +187,9 @@ fn diff_sections(current: &Config, new: &Config) -> Vec<&'static str> {
     if new.provider.models != current.provider.models {
         changed.push("provider.models");
     }
+    if new.models != current.models {
+        changed.push("models");
+    }
     if new.memory.prompt_index != current.memory.prompt_index {
         changed.push("memory.prompt_index");
     }

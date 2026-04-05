@@ -1719,6 +1719,7 @@ mod tests {
                 refresh_token: None,
             },
             providers: Vec::new(),
+            models: crate::config::ModelsConfig::default(),
             prompt: crate::config::PromptConfig::default(),
             memory: crate::config::MemoryConfig::default(),
             tools: crate::config::ToolsConfig::default(),

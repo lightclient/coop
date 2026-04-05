@@ -1913,6 +1913,69 @@ models = ["anthropic/claude-opus-4-0-20250514"]
     }
 
     #[tokio::test]
+    async fn slash_model_accepts_alias() {
+        let config: Config = toml::from_str(
+            r#"
+[agent]
+id = "reid"
+model = "main"
+
+[models.aliases]
+main = "anthropic/claude-sonnet-4-20250514"
+smart = "anthropic/claude-opus-4-0-20250514"
+
+[[users]]
+name = "alice"
+trust = "full"
+match = ["terminal:default", "signal:alice-uuid"]
+
+[provider]
+name = "anthropic"
+models = ["anthropic/claude-sonnet-4-20250514", "anthropic/claude-opus-4-0-20250514"]
+"#,
+        )
+        .unwrap();
+        let workspace = test_workspace();
+        let primary: Arc<dyn Provider> = Arc::new(FakeProvider::with_model(
+            "should not reach LLM",
+            "anthropic/claude-sonnet-4-20250514",
+            128_000,
+        ));
+        let mut providers = ProviderRegistry::new(primary);
+        providers.register(
+            "anthropic/claude-opus-4-0-20250514".to_owned(),
+            Arc::new(FakeProvider::with_model(
+                "should not reach LLM",
+                "anthropic/claude-opus-4-0-20250514",
+                200_000,
+            )),
+        );
+        let executor = Arc::new(DefaultExecutor::new());
+        let shared = shared_config(config);
+        let gateway = Arc::new(
+            Gateway::new(
+                Arc::clone(&shared),
+                workspace.path().to_path_buf(),
+                providers,
+                executor,
+                None,
+                None,
+            )
+            .unwrap(),
+        );
+        let router = MessageRouter::new(shared, Arc::clone(&gateway));
+
+        let msg = inbound_command("signal", "alice-uuid", "/model smart");
+        let (_decision, text) = dispatch_and_collect_text(&router, &msg).await;
+
+        assert!(text.contains("Model set to anthropic/claude-opus-4-0-20250514"));
+        assert_eq!(
+            gateway.model_name_for_user(Some("alice")),
+            "anthropic/claude-opus-4-0-20250514"
+        );
+    }
+
+    #[tokio::test]
     async fn slash_models_marks_user_configured_default() {
         let config: Config = toml::from_str(
             r#"
@@ -1967,6 +2030,37 @@ models = ["anthropic/claude-opus-4-0-20250514"]
 
         assert!(text.contains("anthropic/claude-opus-4-0-20250514"));
         assert!(text.contains("(current, default)"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn slash_models_lists_aliases() {
+        let config: Config = toml::from_str(
+            r#"
+[agent]
+id = "reid"
+model = "main"
+
+[models.aliases]
+main = "anthropic/claude-sonnet-4-20250514"
+smart = "anthropic/claude-opus-4-0-20250514"
+
+[[users]]
+name = "alice"
+trust = "full"
+match = ["terminal:default", "signal:alice-uuid"]
+
+[provider]
+name = "anthropic"
+models = ["anthropic/claude-sonnet-4-20250514", "anthropic/claude-opus-4-0-20250514"]
+"#,
+        )
+        .unwrap();
+        let (router, _gw) = make_router_and_gateway(&config);
+        let msg = inbound_command("signal", "alice-uuid", "/models");
+        let (_decision, text) = dispatch_and_collect_text(&router, &msg).await;
+
+        assert!(text.contains("aliases: main"), "{text}");
+        assert!(text.contains("aliases: smart"), "{text}");
     }
 
     #[tokio::test]

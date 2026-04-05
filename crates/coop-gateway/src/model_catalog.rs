@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use tracing::debug;
 
 use crate::config::{Config, ProviderConfig};
 
@@ -18,6 +19,13 @@ pub(crate) struct AvailableModel {
 pub(crate) struct ResolvedAvailableModel<'a> {
     pub provider: &'a ProviderConfig,
     pub model: AvailableModel,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedModelReference {
+    pub requested: String,
+    pub alias: Option<String>,
+    pub resolved: String,
 }
 
 pub(crate) const ANTHROPIC_MODELS: &[ModelCatalogEntry] = &[
@@ -151,11 +159,54 @@ pub(crate) fn available_main_models(config: &Config) -> Vec<AvailableModel> {
     available
 }
 
+pub(crate) fn resolve_model_reference(config: &Config, requested: &str) -> ResolvedModelReference {
+    let requested = requested.trim().to_owned();
+    let requested_key = normalize_model_key(&requested);
+
+    if let Some((alias, target)) = config.models.aliases.iter().find(|(alias, _)| {
+        let alias_key = normalize_model_key(alias);
+        !alias_key.is_empty() && alias_key == requested_key
+    }) {
+        let resolved = target.trim().to_owned();
+        debug!(requested = %requested, alias = %alias, resolved = %resolved, "resolved model alias");
+        return ResolvedModelReference {
+            requested,
+            alias: Some(alias.clone()),
+            resolved,
+        };
+    }
+
+    ResolvedModelReference {
+        requested: requested.clone(),
+        alias: None,
+        resolved: requested,
+    }
+}
+
+pub(crate) fn model_aliases_for(config: &Config, model: &str) -> Vec<String> {
+    let model_key = normalize_model_key(model);
+    config
+        .models
+        .aliases
+        .iter()
+        .filter(|(_, target)| normalize_model_key(target) == model_key)
+        .map(|(alias, _)| alias.clone())
+        .collect()
+}
+
 pub(crate) fn find_available_model(config: &Config, requested: &str) -> Option<AvailableModel> {
     resolve_available_model(config, requested).map(|resolved| resolved.model)
 }
 
 pub(crate) fn resolve_available_model<'a>(
+    config: &'a Config,
+    requested: &str,
+) -> Option<ResolvedAvailableModel<'a>> {
+    let requested = resolve_model_reference(config, requested);
+    resolve_available_model_direct(config, &requested.resolved)
+}
+
+pub(crate) fn resolve_available_model_direct<'a>(
     config: &'a Config,
     requested: &str,
 ) -> Option<ResolvedAvailableModel<'a>> {
@@ -185,18 +236,21 @@ pub(crate) fn resolve_available_model<'a>(
 }
 
 pub(crate) fn resolve_default_main_model(config: &Config) -> Option<ResolvedAvailableModel<'_>> {
+    let default_reference = resolve_model_reference(config, &config.agent.model);
+
     if config.providers.is_empty() {
         let builtins = builtin_models(&config.provider.normalized_name());
         return Some(ResolvedAvailableModel {
             provider: &config.provider,
             model: AvailableModel {
-                id: config.agent.model.clone(),
-                description: builtin_description(builtins, &config.agent.model).map(str::to_owned),
+                id: default_reference.resolved.clone(),
+                description: builtin_description(builtins, &default_reference.resolved)
+                    .map(str::to_owned),
             },
         });
     }
 
-    let default_key = normalize_model_key(&config.agent.model);
+    let default_key = normalize_model_key(&default_reference.resolved);
     for provider in &config.providers {
         if let Some(model) = provider_model_candidates(provider)
             .into_iter()
@@ -369,6 +423,70 @@ name = "anthropic"
     }
 
     #[test]
+    fn resolve_model_reference_expands_aliases() {
+        let cfg = config(
+            r#"
+[agent]
+id = "test"
+model = "main"
+
+[models.aliases]
+main = "anthropic/claude-sonnet-4-20250514"
+
+[provider]
+name = "anthropic"
+"#,
+        );
+
+        let resolved = resolve_model_reference(&cfg, "main");
+        assert_eq!(resolved.alias.as_deref(), Some("main"));
+        assert_eq!(resolved.resolved, "anthropic/claude-sonnet-4-20250514");
+    }
+
+    #[test]
+    fn find_available_model_resolves_aliases() {
+        let cfg = config(
+            r#"
+[agent]
+id = "test"
+model = "main"
+
+[models.aliases]
+main = "anthropic/claude-sonnet-4-20250514"
+fast = "anthropic/claude-haiku-3-5-20241022"
+
+[provider]
+name = "anthropic"
+"#,
+        );
+
+        let found = find_available_model(&cfg, "fast").unwrap();
+        assert_eq!(found.id, "anthropic/claude-haiku-3-5-20241022");
+    }
+
+    #[test]
+    fn model_aliases_for_returns_all_aliases_for_model() {
+        let cfg = config(
+            r#"
+[agent]
+id = "test"
+model = "main"
+
+[models.aliases]
+main = "anthropic/claude-sonnet-4-20250514"
+sonnet = "anthropic/claude-sonnet-4-20250514"
+fast = "anthropic/claude-haiku-3-5-20241022"
+
+[provider]
+name = "anthropic"
+"#,
+        );
+
+        let aliases = model_aliases_for(&cfg, "anthropic/claude-sonnet-4-20250514");
+        assert_eq!(aliases, vec!["main".to_owned(), "sonnet".to_owned()]);
+    }
+
+    #[test]
     fn resolve_available_model_returns_matching_provider() {
         let cfg = config(
             r#"
@@ -387,6 +505,32 @@ models = ["gpt-5-codex"]
         );
 
         let resolved = resolve_available_model(&cfg, "gpt-5-codex").unwrap();
+        assert_eq!(resolved.provider.name, "openai");
+        assert_eq!(resolved.model.id, "gpt-5-codex");
+    }
+
+    #[test]
+    fn resolve_default_main_model_uses_alias_target() {
+        let cfg = config(
+            r#"
+[agent]
+id = "test"
+model = "main"
+
+[models.aliases]
+main = "gpt-5-codex"
+
+[[providers]]
+name = "anthropic"
+models = ["anthropic/claude-sonnet-4-20250514"]
+
+[[providers]]
+name = "openai"
+models = ["gpt-5-codex"]
+"#,
+        );
+
+        let resolved = resolve_default_main_model(&cfg).unwrap();
         assert_eq!(resolved.provider.name, "openai");
         assert_eq!(resolved.model.id, "gpt-5-codex");
     }

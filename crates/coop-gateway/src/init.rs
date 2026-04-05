@@ -203,6 +203,10 @@ trust = "full"
 match = ["terminal:default"]
 
 {provider_block}
+# Optional model aliases for shorter names in config and /model:
+# [models.aliases]
+# main = "{agent_model}"
+
 [memory]
 db_path = "./db/memory.db"
 

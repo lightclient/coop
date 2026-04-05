@@ -66,9 +66,9 @@ coop attach
 ```
 
 Inside the TUI, use `/status` to inspect the current session, `/models` to list
-available main models, and `/model <id>` to switch the current user's main
-model. Runtime selections override that user's configured default and persist
-in the workspace.
+available main models, and `/model <id-or-alias>` to switch the current user's
+main model. Runtime selections override that user's configured default and
+persist in the workspace.
 
 The gateway install step persists the resolved runtime environment (including
 API key variables) in a per-agent env file with mode `0600`, so restarts and
@@ -185,6 +185,18 @@ models = ["llama3.2", "qwen2.5-coder:14b"]
 # [provider]
 # name = "anthropic"
 # models = ["anthropic/claude-sonnet-4-20250514"]
+
+
+# ---------------------------------------------------------------------------
+# Model aliases — optional shorthand for config and /model
+# ---------------------------------------------------------------------------
+# Aliases can be used in agent.model, users[*].model, groups[*].trigger_model,
+# and /model <alias>. Alias values must resolve to configured models.
+
+[models.aliases]
+main = "anthropic/claude-sonnet-4-20250514"
+fast = "gpt-5-mini"
+local = "llama3.2"
 
 
 # ---------------------------------------------------------------------------

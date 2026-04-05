@@ -87,9 +87,19 @@ fn format_models(gateway: &Gateway, user_name: Option<&str>) -> String {
             line.push_str(" — ");
             line.push_str(&description);
         }
-        if !tags.is_empty() {
+        let aliases = gateway.model_aliases(&model.id);
+        if !aliases.is_empty() || !tags.is_empty() {
             line.push_str(" (");
-            line.push_str(&tags.join(", "));
+            if !aliases.is_empty() {
+                line.push_str("aliases: ");
+                line.push_str(&aliases.join(", "));
+                if !tags.is_empty() {
+                    line.push_str("; ");
+                }
+            }
+            if !tags.is_empty() {
+                line.push_str(&tags.join(", "));
+            }
             line.push(')');
         }
         lines.push(line);

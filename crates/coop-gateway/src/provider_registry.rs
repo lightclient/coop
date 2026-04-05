@@ -28,6 +28,7 @@ impl ProviderRegistry {
         &self.primary
     }
 
+    #[cfg(test)]
     pub(crate) fn get(&self, model: &str) -> &Arc<dyn Provider> {
         self.by_model.get(model).unwrap_or(&self.primary)
     }
