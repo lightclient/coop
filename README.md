@@ -84,24 +84,6 @@ coop gateway rollback        # restore coop.toml.bak and restart
 coop gateway uninstall       # remove service files
 ```
 
-### macOS launcher for Full Disk Access
-
-If you want a stable macOS app that can later be signed and granted Full Disk
-Access while your changing Coop binaries stay outside the app bundle, see:
-
-- `macos/CoopLauncher/README.md`
-
-Build it with:
-
-```bash
-just launcher-build
-```
-
-On macOS, `just features=signal install` now also builds and installs the
-launcher app to `~/Applications/Coop Launcher.app` and preconfigures it for the
-current checkout in gateway mode (`start --config ~/.coop/coop.toml`). The
-launcher trace file defaults to `~/.coop/logs/trace.jsonl`.
-
 If your platform doesn't have systemd/launchd, use:
 
 ```bash

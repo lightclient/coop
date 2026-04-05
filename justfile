@@ -47,22 +47,9 @@ machete:
 build:
     cargo build {{_feat}} --release
 
-# Build the macOS launcher app bundle (macOS only)
-launcher-build:
-    ./macos/CoopLauncher/build-app.sh
-
-# Build, install, and preconfigure the macOS launcher app bundle (macOS only)
-launcher-install:
-    ./macos/CoopLauncher/install-launcher.sh
-
-# Open the built macOS launcher app bundle (macOS only)
-launcher-open:
-    open ./macos/CoopLauncher/dist/Coop\ Launcher.app
-
 # Install the release binary to ~/.cargo/bin
 install:
     cargo install {{_feat}} --path crates/coop-gateway
-    if [ "$(uname -s)" = "Darwin" ]; then ./macos/CoopLauncher/install-launcher.sh; fi
 
 # Run the TUI
 run:
