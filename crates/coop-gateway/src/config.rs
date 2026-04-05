@@ -224,11 +224,38 @@ pub(crate) struct ProviderConfig {
     pub base_url: Option<String>,
     #[serde(default)]
     pub extra_headers: BTreeMap<String, String>,
+    #[serde(default)]
+    pub stream_policy: StreamPolicy,
     /// Optional refresh token for OpenAI Codex OAuth. Uses `env:` prefix
     /// (e.g. `"env:OPENAI_REFRESH_TOKEN"`). When set alongside a Codex OAuth
     /// access token, the provider auto-refreshes before expiry.
     #[serde(default)]
     pub refresh_token: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum StreamPolicy {
+    #[default]
+    Prefer,
+    Require,
+    Disable,
+}
+
+impl StreamPolicy {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Prefer => "prefer",
+            Self::Require => "require",
+            Self::Disable => "disable",
+        }
+    }
+}
+
+impl fmt::Display for StreamPolicy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
 }
 
 impl ProviderConfig {
@@ -1553,6 +1580,22 @@ X-Test = "1"
     }
 
     #[test]
+    fn parse_provider_with_stream_policy() {
+        let toml_str = r#"
+[agent]
+id = "test"
+model = "gpt-4o-mini"
+
+[provider]
+name = "openai-compatible"
+base_url = "http://localhost:8000/v1"
+stream_policy = "require"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.provider.stream_policy, StreamPolicy::Require);
+    }
+
+    #[test]
     fn provider_effective_api_key_env_prefers_explicit_value() {
         let provider = ProviderConfig {
             name: "openai".to_owned(),
@@ -1562,6 +1605,7 @@ X-Test = "1"
             api_key_env: Some("CUSTOM_OPENAI_KEY".to_owned()),
             base_url: None,
             extra_headers: BTreeMap::new(),
+            stream_policy: StreamPolicy::Prefer,
             refresh_token: None,
         };
         assert_eq!(
@@ -1580,6 +1624,7 @@ X-Test = "1"
             api_key_env: None,
             base_url: None,
             extra_headers: BTreeMap::new(),
+            stream_policy: StreamPolicy::Prefer,
             refresh_token: None,
         };
         assert_eq!(
@@ -1598,6 +1643,7 @@ X-Test = "1"
             api_key_env: None,
             base_url: None,
             extra_headers: BTreeMap::new(),
+            stream_policy: StreamPolicy::Prefer,
             refresh_token: None,
         };
         assert_eq!(

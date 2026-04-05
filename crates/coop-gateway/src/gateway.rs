@@ -17,7 +17,9 @@ use uuid::Uuid;
 
 use crate::compaction::{self, CompactionState};
 use crate::compaction_store::CompactionStore;
-use crate::config::{Config, CronDeliveryMode, SharedConfig, find_group_config_by_session};
+use crate::config::{
+    Config, CronDeliveryMode, SharedConfig, StreamPolicy, find_group_config_by_session,
+};
 use crate::cron_delivery;
 use crate::final_reply::FinalReplyPolicy;
 use crate::group_history::{GroupHistoryBuffer, GroupHistoryEntry};
@@ -26,7 +28,7 @@ use crate::memory_auto_capture;
 use crate::memory_prompt_index;
 use crate::model_catalog::{
     AvailableModel, find_available_model, model_aliases_for, normalize_model_key,
-    resolve_model_reference,
+    resolve_available_model, resolve_model_reference,
 };
 use crate::overflow_recovery;
 use crate::provider_factory;
@@ -2037,6 +2039,17 @@ impl Gateway {
         .await
     }
 
+    fn stream_policy_for_model(&self, model: &str) -> StreamPolicy {
+        let config = self.config.load();
+        if config.providers.is_empty() {
+            return config.provider.stream_policy;
+        }
+
+        resolve_available_model(&config, model).map_or(config.provider.stream_policy, |available| {
+            available.provider.stream_policy
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn assistant_response(
         &self,
@@ -2047,13 +2060,24 @@ impl Gateway {
         tool_defs: &[ToolDef],
         event_tx: &mpsc::Sender<TurnEvent>,
     ) -> Result<(Message, Usage)> {
-        let streaming = provider.supports_streaming();
+        let stream_policy = self.stream_policy_for_model(model);
+        if matches!(stream_policy, StreamPolicy::Require) && !provider.supports_streaming() {
+            bail!(
+                "provider '{}' does not support stream_policy=require for model '{}'",
+                provider.name(),
+                model
+            );
+        }
+
+        let streaming =
+            provider.supports_streaming() && !matches!(stream_policy, StreamPolicy::Disable);
         let span = info_span!(
             "provider_request",
             model = %model,
             message_count = messages.len(),
             tool_count = tool_defs.len(),
             streaming,
+            stream_policy = %stream_policy,
         );
 
         let (response, usage) = async {
@@ -2064,6 +2088,7 @@ impl Gateway {
                     messages,
                     tool_defs,
                     event_tx,
+                    stream_policy,
                 )
                 .await
             } else {
@@ -2087,6 +2112,7 @@ impl Gateway {
         Ok((response, usage))
     }
 
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     async fn assistant_response_streaming(
         &self,
         provider: &dyn Provider,
@@ -2094,59 +2120,110 @@ impl Gateway {
         messages: &[Message],
         tool_defs: &[ToolDef],
         event_tx: &mpsc::Sender<TurnEvent>,
+        stream_policy: StreamPolicy,
     ) -> Result<(Message, Usage)> {
-        let mut stream = match provider.stream(system_prompt, messages, tool_defs).await {
-            Ok(stream) => stream,
-            Err(error) => {
-                if overflow_recovery::should_force_compact_after_error(&error) {
-                    return Err(error);
-                }
-
-                let model = provider.model_info();
-                warn!(
-                    provider = provider.name(),
-                    model = %model.name,
-                    error = %error,
-                    "streaming provider request failed before first output, retrying non-streaming"
-                );
-                return self
-                    .assistant_response_non_streaming(
-                        provider,
-                        system_prompt,
-                        messages,
-                        tool_defs,
-                        event_tx,
-                    )
-                    .await;
-            }
-        };
-
-        let mut response = Message::assistant();
-        let mut usage = Usage::default();
-        let mut saw_stream_output = false;
-
-        while let Some(item) = stream.next().await {
-            match item {
-                Ok((msg_opt, usage_opt)) => {
-                    if msg_opt.is_some() || usage_opt.is_some() {
-                        saw_stream_output = true;
+        'stream_attempts: for attempt in 0..=MAX_EARLY_STREAM_RETRIES {
+            let mut stream = match provider.stream(system_prompt, messages, tool_defs).await {
+                Ok(stream) => stream,
+                Err(error) => {
+                    if overflow_recovery::should_force_compact_after_error(&error) {
+                        return Err(error);
                     }
 
-                    if let Some(msg) = msg_opt {
-                        if let Some(final_usage) = usage_opt {
-                            usage += final_usage;
-                            response = msg;
-                        } else {
-                            let text = msg.text();
-                            if !text.is_empty() {
-                                let _ = event_tx.send(TurnEvent::TextDelta(text)).await;
+                    if is_transient_stream_transport_error(&error)
+                        && attempt < MAX_EARLY_STREAM_RETRIES
+                    {
+                        let backoff = early_stream_retry_backoff(attempt);
+                        let model = provider.model_info();
+                        warn!(
+                            provider = provider.name(),
+                            model = %model.name,
+                            attempt = attempt + 1,
+                            max_attempts = MAX_EARLY_STREAM_RETRIES + 1,
+                            backoff_ms = duration_to_millis_u64(backoff),
+                            error = %error,
+                            "streaming provider request failed before first output, retrying stream"
+                        );
+                        tokio::time::sleep(backoff).await;
+                        continue 'stream_attempts;
+                    }
+
+                    if matches!(stream_policy, StreamPolicy::Require) {
+                        return Err(error);
+                    }
+
+                    let model = provider.model_info();
+                    warn!(
+                        provider = provider.name(),
+                        model = %model.name,
+                        attempt = attempt + 1,
+                        max_attempts = MAX_EARLY_STREAM_RETRIES + 1,
+                        error = %error,
+                        "streaming provider request failed before first output, falling back to non-streaming"
+                    );
+                    return self
+                        .assistant_response_non_streaming(
+                            provider,
+                            system_prompt,
+                            messages,
+                            tool_defs,
+                            event_tx,
+                        )
+                        .await;
+                }
+            };
+
+            let mut response = Message::assistant();
+            let mut usage = Usage::default();
+            let mut saw_stream_output = false;
+
+            while let Some(item) = stream.next().await {
+                match item {
+                    Ok((msg_opt, usage_opt)) => {
+                        if msg_opt.is_some() || usage_opt.is_some() {
+                            saw_stream_output = true;
+                        }
+
+                        if let Some(msg) = msg_opt {
+                            if let Some(final_usage) = usage_opt {
+                                usage += final_usage;
+                                response = msg;
+                            } else {
+                                let text = msg.text();
+                                if !text.is_empty() {
+                                    let _ = event_tx.send(TurnEvent::TextDelta(text)).await;
+                                }
                             }
                         }
                     }
-                }
-                Err(error) => {
-                    if !saw_stream_output {
+                    Err(error) => {
+                        if saw_stream_output {
+                            return Err(error);
+                        }
+
                         if overflow_recovery::should_force_compact_after_error(&error) {
+                            return Err(error);
+                        }
+
+                        if is_transient_stream_transport_error(&error)
+                            && attempt < MAX_EARLY_STREAM_RETRIES
+                        {
+                            let backoff = early_stream_retry_backoff(attempt);
+                            let model = provider.model_info();
+                            warn!(
+                                provider = provider.name(),
+                                model = %model.name,
+                                attempt = attempt + 1,
+                                max_attempts = MAX_EARLY_STREAM_RETRIES + 1,
+                                backoff_ms = duration_to_millis_u64(backoff),
+                                error = %error,
+                                "streaming provider request failed before first output, retrying stream"
+                            );
+                            tokio::time::sleep(backoff).await;
+                            continue 'stream_attempts;
+                        }
+
+                        if matches!(stream_policy, StreamPolicy::Require) {
                             return Err(error);
                         }
 
@@ -2154,8 +2231,10 @@ impl Gateway {
                         warn!(
                             provider = provider.name(),
                             model = %model.name,
+                            attempt = attempt + 1,
+                            max_attempts = MAX_EARLY_STREAM_RETRIES + 1,
                             error = %error,
-                            "streaming provider request failed before first output, retrying non-streaming"
+                            "streaming provider request failed before first output, falling back to non-streaming"
                         );
                         return self
                             .assistant_response_non_streaming(
@@ -2167,22 +2246,22 @@ impl Gateway {
                             )
                             .await;
                     }
-
-                    return Err(error);
                 }
             }
+
+            debug!(
+                input_tokens = usage.input_tokens,
+                output_tokens = usage.output_tokens,
+                cache_read_tokens = usage.cache_read_tokens,
+                cache_write_tokens = usage.cache_write_tokens,
+                stop_reason = %usage.stop_reason.as_deref().unwrap_or("unknown"),
+                "provider response complete"
+            );
+
+            return Ok((response, usage));
         }
 
-        debug!(
-            input_tokens = usage.input_tokens,
-            output_tokens = usage.output_tokens,
-            cache_read_tokens = usage.cache_read_tokens,
-            cache_write_tokens = usage.cache_write_tokens,
-            stop_reason = %usage.stop_reason.as_deref().unwrap_or("unknown"),
-            "provider response complete"
-        );
-
-        Ok((response, usage))
+        unreachable!("stream attempt loop always returns or retries")
     }
 
     async fn assistant_response_non_streaming(
@@ -2213,6 +2292,41 @@ impl Gateway {
 
         Ok((response, usage))
     }
+}
+
+const MAX_EARLY_STREAM_RETRIES: u32 = 2;
+const EARLY_STREAM_RETRY_BASE_BACKOFF_MS: u64 = 200;
+
+fn early_stream_retry_backoff(attempt: u32) -> Duration {
+    Duration::from_millis(
+        EARLY_STREAM_RETRY_BASE_BACKOFF_MS.saturating_mul(1_u64 << attempt.min(8)),
+    )
+}
+
+fn duration_to_millis_u64(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn is_transient_stream_transport_error(error: &anyhow::Error) -> bool {
+    let text = error.to_string().to_ascii_lowercase();
+    [
+        "error sending request for url",
+        "connection reset",
+        "connection closed",
+        "connection terminated",
+        "network connection lost",
+        "network error",
+        "remote protocol error",
+        "peer closed",
+        "broken pipe",
+        "unexpected eof",
+        "timed out",
+        "timeout",
+        "deadline has elapsed",
+        "body write aborted",
+    ]
+    .into_iter()
+    .any(|needle| text.contains(needle))
 }
 
 fn terminal_turn_messages(messages: &[Message]) -> Vec<Message> {
@@ -2433,6 +2547,12 @@ model = "test-model"
 "#,
         )
         .unwrap()
+    }
+
+    fn test_config_with_stream_policy(stream_policy: StreamPolicy) -> Config {
+        let mut config = test_config();
+        config.provider.stream_policy = stream_policy;
+        config
     }
 
     fn read_trace_file(path: &std::path::Path) -> String {
@@ -5296,6 +5416,13 @@ models = ["anthropic/claude-opus-4-0-20250514"]
         complete_calls: Arc<std::sync::atomic::AtomicUsize>,
     }
 
+    #[derive(Debug)]
+    struct StreamTransientThenSuccessProvider {
+        model: ModelInfo,
+        stream_calls: Arc<std::sync::atomic::AtomicUsize>,
+        complete_calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
     impl ToolUseStopWithoutToolRequestStreamingProvider {
         fn new() -> Self {
             Self {
@@ -5315,6 +5442,22 @@ models = ["anthropic/claude-opus-4-0-20250514"]
             Self {
                 model: ModelInfo {
                     name: "stream-fails-before-first-chunk".into(),
+                    context_limit: 128_000,
+                },
+                stream_calls,
+                complete_calls,
+            }
+        }
+    }
+
+    impl StreamTransientThenSuccessProvider {
+        fn new(
+            stream_calls: Arc<std::sync::atomic::AtomicUsize>,
+            complete_calls: Arc<std::sync::atomic::AtomicUsize>,
+        ) -> Self {
+            Self {
+                model: ModelInfo {
+                    name: "stream-transient-then-success".into(),
                     context_limit: 128_000,
                 },
                 stream_calls,
@@ -5444,8 +5587,75 @@ models = ["anthropic/claude-opus-4-0-20250514"]
             self.stream_calls
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let stream = futures::stream::once(async {
-                Err(anyhow::anyhow!(
-                    "Web stream error for model 'stream-fails-before-first-chunk'.\nCause: error sending request for url (http://10.0.0.7:11434/v1/chat/completions)"
+                Err(anyhow::anyhow!("Streaming is not supported for this model"))
+            });
+            Ok(Box::pin(stream))
+        }
+
+        fn supports_streaming(&self) -> bool {
+            true
+        }
+    }
+
+    #[async_trait]
+    impl Provider for StreamTransientThenSuccessProvider {
+        fn name(&self) -> &'static str {
+            "stream-transient-then-success"
+        }
+
+        fn model_info(&self) -> ModelInfo {
+            self.model.clone()
+        }
+
+        async fn complete(
+            &self,
+            _system: &[String],
+            _messages: &[Message],
+            _tools: &[ToolDef],
+        ) -> Result<(Message, Usage)> {
+            self.complete_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok((
+                Message::assistant().with_text("should not use non-streaming fallback"),
+                Usage {
+                    input_tokens: Some(12),
+                    output_tokens: Some(4),
+                    stop_reason: Some("stop".into()),
+                    ..Default::default()
+                },
+            ))
+        }
+
+        async fn stream(
+            &self,
+            _system: &[String],
+            _messages: &[Message],
+            _tools: &[ToolDef],
+        ) -> Result<ProviderStream> {
+            let call = self
+                .stream_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+
+            if call < 3 {
+                let stream = futures::stream::once(async {
+                    Err(anyhow::anyhow!(
+                        "Web stream error for model 'stream-transient-then-success'.\nCause: error sending request for url (http://10.0.0.7:11434/v1/chat/completions)"
+                    ))
+                });
+                return Ok(Box::pin(stream));
+            }
+
+            let usage = Usage {
+                input_tokens: Some(15),
+                output_tokens: Some(5),
+                stop_reason: Some("stop".into()),
+                ..Default::default()
+            };
+            let stream = futures::stream::once(async move {
+                Ok((
+                    Some(Message::assistant().with_text("stream recovered after retry")),
+                    Some(usage),
                 ))
             });
             Ok(Box::pin(stream))
@@ -5511,6 +5721,227 @@ models = ["anthropic/claude-opus-4-0-20250514"]
                 .iter()
                 .any(|delta| delta.contains("fallback response")),
             "expected non-streaming fallback text delta, got {deltas:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn retries_transient_stream_failures_before_falling_back() {
+        let workspace = test_workspace();
+        let stream_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let complete_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider: Arc<dyn Provider> = Arc::new(StreamTransientThenSuccessProvider::new(
+            Arc::clone(&stream_calls),
+            Arc::clone(&complete_calls),
+        ));
+        let gateway = Gateway::new(
+            shared_config(test_config()),
+            workspace.path().to_path_buf(),
+            registry(provider),
+            Arc::new(DefaultExecutor::new()),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let session_key = gateway.default_session_key();
+        let (event_tx, mut event_rx) = mpsc::channel(32);
+
+        gateway
+            .run_turn_with_trust(
+                &session_key,
+                "hello",
+                TrustLevel::Full,
+                Some("alice"),
+                None,
+                event_tx,
+            )
+            .await
+            .unwrap();
+
+        let messages = gateway.messages(&session_key);
+        let assistant = messages
+            .iter()
+            .rev()
+            .find(|message| message.role == Role::Assistant)
+            .expect("assistant reply present");
+        assert_eq!(assistant.text(), "stream recovered after retry");
+        assert_eq!(stream_calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+        assert_eq!(complete_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        let saw_error = std::iter::from_fn(|| event_rx.try_recv().ok())
+            .any(|event| matches!(event, TurnEvent::Error(_)));
+        assert!(
+            !saw_error,
+            "did not expect an error event after retry success"
+        );
+    }
+
+    #[tokio::test]
+    async fn require_stream_policy_does_not_fallback_to_non_streaming() {
+        let workspace = test_workspace();
+        let stream_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let complete_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider: Arc<dyn Provider> = Arc::new(StreamFailsBeforeFirstChunkProvider::new(
+            Arc::clone(&stream_calls),
+            Arc::clone(&complete_calls),
+        ));
+        let gateway = Gateway::new(
+            shared_config(test_config_with_stream_policy(StreamPolicy::Require)),
+            workspace.path().to_path_buf(),
+            registry(provider),
+            Arc::new(DefaultExecutor::new()),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let session_key = gateway.default_session_key();
+        let (event_tx, mut event_rx) = mpsc::channel(32);
+
+        let result = gateway
+            .run_turn_with_trust(
+                &session_key,
+                "hello",
+                TrustLevel::Full,
+                Some("alice"),
+                None,
+                event_tx,
+            )
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "turn should surface an error event, not panic"
+        );
+        assert_eq!(stream_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(complete_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(gateway.messages(&session_key).is_empty());
+
+        let mut saw_error = false;
+        while let Ok(event) = event_rx.try_recv() {
+            if matches!(event, TurnEvent::Error(_)) {
+                saw_error = true;
+            }
+        }
+        assert!(saw_error, "expected turn error when fallback is disabled");
+    }
+
+    #[tokio::test]
+    async fn disable_stream_policy_uses_non_streaming_path() {
+        let workspace = test_workspace();
+        let stream_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let complete_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider: Arc<dyn Provider> = Arc::new(StreamFailsBeforeFirstChunkProvider::new(
+            Arc::clone(&stream_calls),
+            Arc::clone(&complete_calls),
+        ));
+        let gateway = Gateway::new(
+            shared_config(test_config_with_stream_policy(StreamPolicy::Disable)),
+            workspace.path().to_path_buf(),
+            registry(provider),
+            Arc::new(DefaultExecutor::new()),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let session_key = gateway.default_session_key();
+        let (event_tx, _event_rx) = mpsc::channel(32);
+
+        gateway
+            .run_turn_with_trust(
+                &session_key,
+                "hello",
+                TrustLevel::Full,
+                Some("alice"),
+                None,
+                event_tx,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(stream_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(complete_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let messages = gateway.messages(&session_key);
+        assert_eq!(
+            messages.last().map(Message::text),
+            Some("fallback response".to_owned())
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn trace_records_early_stream_retry_before_success() {
+        use tracing_subscriber::fmt::format::FmtSpan;
+        use tracing_subscriber::prelude::*;
+
+        let _trace_guard = trace_test_guard().await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let trace_file = dir.path().join("traces.jsonl");
+
+        let file_appender = tracing_appender::rolling::never(dir.path(), "traces.jsonl");
+        let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+
+        let jsonl_layer = tracing_subscriber::fmt::layer()
+            .json()
+            .with_writer(non_blocking)
+            .with_span_list(true)
+            .with_file(true)
+            .with_line_number(true)
+            .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
+            .with_filter(tracing_subscriber::EnvFilter::new("debug"));
+
+        let subscriber = tracing_subscriber::Registry::default().with(jsonl_layer);
+        let dispatch = tracing::dispatcher::Dispatch::new(subscriber);
+        let default_guard = tracing::dispatcher::set_default(&dispatch);
+
+        let workspace = test_workspace();
+        let stream_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let complete_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider: Arc<dyn Provider> = Arc::new(StreamTransientThenSuccessProvider::new(
+            Arc::clone(&stream_calls),
+            Arc::clone(&complete_calls),
+        ));
+        let gateway = Gateway::new(
+            shared_config(test_config()),
+            workspace.path().to_path_buf(),
+            registry(provider),
+            Arc::new(DefaultExecutor::new()),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let session_key = gateway.default_session_key();
+        let (event_tx, _event_rx) = mpsc::channel(32);
+
+        gateway
+            .run_turn_with_trust(
+                &session_key,
+                "hello",
+                TrustLevel::Full,
+                Some("alice"),
+                None,
+                event_tx,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(stream_calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+        assert_eq!(complete_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        drop(default_guard);
+        drop(guard);
+
+        let trace = read_trace_file_with_retry(&trace_file, "retrying stream");
+        assert!(
+            trace
+                .contains("streaming provider request failed before first output, retrying stream"),
+            "expected stream retry trace"
+        );
+        assert!(
+            trace.contains("\"stream_policy\":\"prefer\""),
+            "expected stream policy trace field"
         );
     }
 

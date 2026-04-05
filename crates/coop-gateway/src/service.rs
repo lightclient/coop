@@ -1716,6 +1716,7 @@ mod tests {
                 api_key_env: None,
                 base_url: None,
                 extra_headers: BTreeMap::new(),
+                stream_policy: crate::config::StreamPolicy::Prefer,
                 refresh_token: None,
             },
             providers: Vec::new(),

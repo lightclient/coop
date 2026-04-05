@@ -497,6 +497,13 @@ fn check_provider_entry(report: &mut CheckReport, provider: &ProviderConfig, pat
         });
     }
 
+    report.push(CheckResult {
+        name: "provider_stream_policy",
+        severity: Severity::Info,
+        passed: true,
+        message: format!("{path}.stream_policy: {}", provider.stream_policy),
+    });
+
     let empty_models = provider.models.iter().any(|model| model.trim().is_empty());
     report.push(CheckResult {
         name: "provider_models_valid",
