@@ -13,6 +13,7 @@ mod provider_spec;
 mod request_trace;
 mod stream_mapping;
 mod sync_http;
+mod transport_probe;
 mod usage_mapping;
 
 use anyhow::Result;

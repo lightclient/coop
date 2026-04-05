@@ -19,12 +19,14 @@ use crate::request_trace::{
     summarize_transport_error,
 };
 use crate::stream_mapping::into_provider_stream;
+use crate::transport_probe::{build_probe_client, probe_transport_failure};
 use crate::usage_mapping::usage_from_response;
 
 const MAX_RETRIES: u32 = 3;
 
 pub(crate) struct GenAiProvider {
     client: Client,
+    probe_client: reqwest::Client,
     kind: ProviderKind,
     keys: Option<KeyPool>,
     spec: RwLock<ProviderSpec>,
@@ -51,9 +53,11 @@ impl GenAiProvider {
         let client = Client::builder()
             .with_web_config(genai::WebConfig::default().with_timeout(Duration::from_secs(300)))
             .build();
+        let probe_client = build_probe_client()?;
 
         Ok(Self {
             client,
+            probe_client,
             kind: spec.kind,
             keys,
             spec: RwLock::new(spec),
@@ -177,7 +181,8 @@ impl GenAiProvider {
                     return Ok((message, usage));
                 }
                 Err(error) => {
-                    log_request_failure(self.name(), "complete", &model_info.name, attempt, &error);
+                    self.log_request_failure("complete", &model_info.name, attempt, &error)
+                        .await;
                     if !self
                         .handle_retryable_error(&error, key_index, key_count, attempt)
                         .await
@@ -225,7 +230,8 @@ impl GenAiProvider {
                     return Ok(into_provider_stream(response));
                 }
                 Err(error) => {
-                    log_request_failure(self.name(), "stream", &model_info.name, attempt, &error);
+                    self.log_request_failure("stream", &model_info.name, attempt, &error)
+                        .await;
                     if !self
                         .handle_retryable_error(&error, key_index, key_count, attempt)
                         .await
@@ -302,6 +308,83 @@ impl GenAiProvider {
         }
 
         false
+    }
+
+    fn probe_auth_header(&self, spec: &ProviderSpec) -> Option<String> {
+        if spec
+            .extra_headers
+            .keys()
+            .any(|name| name.eq_ignore_ascii_case("authorization"))
+        {
+            return None;
+        }
+
+        let keys = self.keys.as_ref()?;
+        let key_index = keys.best_key();
+        let (value, _) = keys.get(key_index);
+        Some(format!("Bearer {value}"))
+    }
+
+    async fn log_request_failure(
+        &self,
+        method: &'static str,
+        model: &str,
+        attempt: u32,
+        error: &genai::Error,
+    ) {
+        let transport = summarize_transport_error(error);
+        warn!(
+            provider = self.name(),
+            method,
+            model,
+            attempt = attempt + 1,
+            transport_error_variant = transport.variant,
+            transport_error_kind = transport.kind,
+            transport_http_status = transport.http_status,
+            transport_reqwest_is_connect = transport.reqwest_is_connect,
+            transport_reqwest_is_timeout = transport.reqwest_is_timeout,
+            transport_reqwest_is_request = transport.reqwest_is_request,
+            transport_reqwest_is_body = transport.reqwest_is_body,
+            transport_reqwest_is_decode = transport.reqwest_is_decode,
+            transport_url = %transport.url,
+            transport_source_chain = %transport.source_chain,
+            transport_response_body_excerpt = %transport.body_excerpt,
+            error = %error,
+            error_debug = ?error,
+            "genai request failed"
+        );
+
+        let spec = self.spec_snapshot();
+        let auth_header = self.probe_auth_header(&spec);
+        if let Some(probe) = probe_transport_failure(
+            &self.probe_client,
+            self.kind,
+            &spec,
+            &transport,
+            auth_header.as_deref(),
+        )
+        .await
+        {
+            info!(
+                provider = self.name(),
+                method,
+                model,
+                attempt = attempt + 1,
+                transport_source_chain = %transport.source_chain,
+                transport_probe_target = probe.target,
+                transport_probe_kind = probe.kind,
+                transport_probe_http_status = probe.http_status,
+                transport_probe_reqwest_is_connect = probe.reqwest_is_connect,
+                transport_probe_reqwest_is_timeout = probe.reqwest_is_timeout,
+                transport_probe_reqwest_is_request = probe.reqwest_is_request,
+                transport_probe_reqwest_is_body = probe.reqwest_is_body,
+                transport_probe_reqwest_is_decode = probe.reqwest_is_decode,
+                transport_probe_url = %probe.url,
+                transport_probe_source_chain = %probe.source_chain,
+                transport_probe_response_body_excerpt = %probe.body_excerpt,
+                "genai transport failure probe complete"
+            );
+        }
     }
 }
 
@@ -509,36 +592,6 @@ fn log_request_start(
         mapped_chat_json_hash = %request_trace.json_hash,
         mapped_tool_names = %request_trace.tool_names,
         "genai provider request"
-    );
-}
-
-fn log_request_failure(
-    provider: &str,
-    method: &'static str,
-    model: &str,
-    attempt: u32,
-    error: &genai::Error,
-) {
-    let transport = summarize_transport_error(error);
-    warn!(
-        provider,
-        method,
-        model,
-        attempt = attempt + 1,
-        transport_error_variant = transport.variant,
-        transport_error_kind = transport.kind,
-        transport_http_status = transport.http_status,
-        transport_reqwest_is_connect = transport.reqwest_is_connect,
-        transport_reqwest_is_timeout = transport.reqwest_is_timeout,
-        transport_reqwest_is_request = transport.reqwest_is_request,
-        transport_reqwest_is_body = transport.reqwest_is_body,
-        transport_reqwest_is_decode = transport.reqwest_is_decode,
-        transport_url = %transport.url,
-        transport_source_chain = %transport.source_chain,
-        transport_response_body_excerpt = %transport.body_excerpt,
-        error = %error,
-        error_debug = ?error,
-        "genai request failed"
     );
 }
 

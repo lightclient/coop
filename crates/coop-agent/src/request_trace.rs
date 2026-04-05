@@ -45,6 +45,22 @@ pub(crate) struct TransportErrorTrace {
     pub body_excerpt: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
+pub(crate) struct TransportProbeTrace {
+    pub target: &'static str,
+    pub kind: &'static str,
+    pub http_status: Option<u16>,
+    pub reqwest_is_connect: bool,
+    pub reqwest_is_timeout: bool,
+    pub reqwest_is_request: bool,
+    pub reqwest_is_body: bool,
+    pub reqwest_is_decode: bool,
+    pub url: String,
+    pub source_chain: String,
+    pub body_excerpt: String,
+}
+
 pub(crate) fn summarize_chat_request(chat_request: &ChatRequest) -> RequestTrace {
     let mut system_count = usize::from(chat_request.system.is_some());
     let mut user_count = 0;
@@ -182,6 +198,47 @@ pub(crate) fn summarize_transport_error(error: &genai::Error) -> TransportErrorT
             source_chain: error.to_string(),
             body_excerpt: String::new(),
         },
+    }
+}
+
+pub(crate) fn summarize_transport_probe_response(
+    target: &'static str,
+    url: &str,
+    status: u16,
+    body: &str,
+) -> TransportProbeTrace {
+    TransportProbeTrace {
+        target,
+        kind: "http_status",
+        http_status: Some(status),
+        reqwest_is_connect: false,
+        reqwest_is_timeout: false,
+        reqwest_is_request: false,
+        reqwest_is_body: false,
+        reqwest_is_decode: false,
+        url: url.to_owned(),
+        source_chain: String::new(),
+        body_excerpt: truncate(body),
+    }
+}
+
+pub(crate) fn summarize_transport_probe_reqwest_error(
+    target: &'static str,
+    url: &str,
+    error: &reqwest::Error,
+) -> TransportProbeTrace {
+    TransportProbeTrace {
+        target,
+        kind: "reqwest",
+        http_status: error.status().map(|status| status.as_u16()),
+        reqwest_is_connect: error.is_connect(),
+        reqwest_is_timeout: error.is_timeout(),
+        reqwest_is_request: error.is_request(),
+        reqwest_is_body: error.is_body(),
+        reqwest_is_decode: error.is_decode(),
+        url: url.to_owned(),
+        source_chain: error_source_chain(error),
+        body_excerpt: String::new(),
     }
 }
 
@@ -401,5 +458,20 @@ mod tests {
         assert_eq!(trace.kind, "http_status");
         assert_eq!(trace.http_status, Some(400));
         assert!(trace.body_excerpt.contains("bad request body"));
+    }
+
+    #[test]
+    fn summarize_transport_probe_response_reads_status_body() {
+        let trace = summarize_transport_probe_response(
+            "models",
+            "http://127.0.0.1:11434/v1/models",
+            200,
+            r#"{"object":"list"}"#,
+        );
+
+        assert_eq!(trace.target, "models");
+        assert_eq!(trace.kind, "http_status");
+        assert_eq!(trace.http_status, Some(200));
+        assert!(trace.body_excerpt.contains("object"));
     }
 }
