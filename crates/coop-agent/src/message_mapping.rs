@@ -39,6 +39,7 @@ pub(crate) fn map_tool(tool: &ToolDef) -> Tool {
 pub(crate) fn map_message(provider: ProviderKind, message: &Message) -> Vec<ChatMessage> {
     let mut regular_parts = Vec::new();
     let mut tool_responses = Vec::new();
+    let include_history_thinking = provider != ProviderKind::OpenAiCompatible;
 
     for content in &message.content {
         match content {
@@ -77,11 +78,13 @@ pub(crate) fn map_message(provider: ProviderKind, message: &Message) -> Vec<Chat
                 thinking,
                 signature,
             } => {
-                if let Some(signature) = signature {
-                    regular_parts.push(ContentPart::ThoughtSignature(signature.clone()));
-                }
-                if !thinking.is_empty() {
-                    regular_parts.push(ContentPart::ReasoningContent(thinking.clone()));
+                if include_history_thinking {
+                    if let Some(signature) = signature {
+                        regular_parts.push(ContentPart::ThoughtSignature(signature.clone()));
+                    }
+                    if !thinking.is_empty() {
+                        regular_parts.push(ContentPart::ReasoningContent(thinking.clone()));
+                    }
                 }
             }
         }
@@ -232,5 +235,44 @@ mod tests {
             matches!(parts[0], ContentPart::ThoughtSignature(ref signature) if signature == "sig_1")
         );
         assert!(matches!(parts[1], ContentPart::ToolCall(_)));
+    }
+
+    #[test]
+    fn map_message_skips_thinking_for_openai_compatible() {
+        let message = Message::assistant()
+            .with_content(Content::Thinking {
+                thinking: "internal reasoning".into(),
+                signature: Some("sig_1".into()),
+            })
+            .with_text("final answer")
+            .with_tool_request("call_1", "bash", json!({"command": "pwd"}));
+
+        let mapped = map_message(ProviderKind::OpenAiCompatible, &message);
+        let parts = mapped[0].content.parts();
+        assert!(matches!(parts[0], ContentPart::Text(ref text) if text == "final answer"));
+        assert!(matches!(parts[1], ContentPart::ToolCall(_)));
+        assert_eq!(parts.len(), 2);
+    }
+
+    #[test]
+    fn map_message_preserves_thinking_for_openai() {
+        let message = Message::assistant()
+            .with_content(Content::Thinking {
+                thinking: "internal reasoning".into(),
+                signature: Some("sig_1".into()),
+            })
+            .with_text("final answer");
+
+        let mapped = map_message(ProviderKind::OpenAi, &message);
+        let parts = mapped[0].content.parts();
+        assert!(matches!(
+            parts[0],
+            ContentPart::ThoughtSignature(ref signature) if signature == "sig_1"
+        ));
+        assert!(matches!(
+            parts[1],
+            ContentPart::ReasoningContent(ref reasoning) if reasoning == "internal reasoning"
+        ));
+        assert!(matches!(parts[2], ContentPart::Text(ref text) if text == "final answer"));
     }
 }
