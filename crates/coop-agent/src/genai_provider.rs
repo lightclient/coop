@@ -20,7 +20,8 @@ use crate::request_trace::{
 };
 use crate::stream_mapping::into_provider_stream;
 use crate::transport_probe::{
-    build_probe_client, probe_socket_transport_failure, probe_transport_failure,
+    build_probe_client, probe_command_transport_failure, probe_socket_transport_failure,
+    probe_transport_failure,
 };
 use crate::usage_mapping::usage_from_response;
 
@@ -408,6 +409,32 @@ impl GenAiProvider {
                 transport_socket_probe_error = %socket_probe.error,
                 "genai socket transport probe complete"
             );
+        }
+
+        if let Some(command_probes) =
+            probe_command_transport_failure(self.kind, &spec, &transport).await
+        {
+            for probe in command_probes {
+                info!(
+                    provider = self.name(),
+                    method,
+                    model,
+                    attempt = attempt + 1,
+                    transport_source_chain = %transport.source_chain,
+                    transport_command_probe_target = probe.target,
+                    transport_command_probe_command = %probe.command,
+                    transport_command_probe_success = probe.success,
+                    transport_command_probe_exit_code_present = probe.exit_code.is_some(),
+                    transport_command_probe_exit_code = probe.exit_code.unwrap_or(-1),
+                    transport_command_probe_duration_ms = probe.duration_ms,
+                    transport_command_probe_related_interface = %probe.related_interface,
+                    transport_command_probe_error_kind = probe.error_kind,
+                    transport_command_probe_error = %probe.error,
+                    transport_command_probe_stdout_excerpt = %probe.stdout_excerpt,
+                    transport_command_probe_stderr_excerpt = %probe.stderr_excerpt,
+                    "genai command transport probe complete"
+                );
+            }
         }
     }
 }

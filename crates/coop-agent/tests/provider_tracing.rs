@@ -166,6 +166,8 @@ async fn provider_trace_logs_request_shape_and_transport_details() {
     assert!(trace.contains("\"transport_probe_target\":\"models\""));
     assert!(trace.contains("genai socket transport probe complete"));
     assert!(trace.contains("\"transport_socket_probe_connect_ok\":false"));
+    assert!(trace.contains("genai command transport probe complete"));
+    assert!(trace.contains("\"transport_command_probe_target\":\"curl_models\""));
     assert!(
         trace.contains("provider stream item failed") || trace.contains("\"method\":\"stream\"")
     );
@@ -221,5 +223,7 @@ async fn provider_failure_probe_can_show_models_endpoint_is_up() {
     assert!(trace.contains("\"transport_probe_http_status\":200"));
     assert!(trace.contains("genai socket transport probe complete"));
     assert!(trace.contains("\"transport_socket_probe_connect_ok\":true"));
+    assert!(trace.contains("genai command transport probe complete"));
+    assert!(trace.contains("\"transport_command_probe_target\":\"route_get\""));
     assert!(trace.contains("/v1/models"));
 }
