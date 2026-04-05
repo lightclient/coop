@@ -549,6 +549,7 @@ impl Gateway {
                     .filter(|t| t.name != "signal_send")
                     .filter(|t| t.name != "signal_react")
                     .filter(|t| t.name != "signal_reply")
+                    .filter(|t| t.name != "cron_trigger")
                     .collect()
             } else {
                 tool_defs

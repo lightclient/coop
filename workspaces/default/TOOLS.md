@@ -45,6 +45,15 @@ These fields require a process restart:
 
 If a user asks to change a restart-required field, apply it with config_write and tell them to restart coop.
 
+## Cron workflow
+
+Use `cron_trigger` only when the user explicitly asks to rerun, test, or force a configured cron job.
+
+- Default behavior is **inline only** — leave `deliver` unset/false so the cron result comes back in the current conversation
+- Set `deliver = true` only when the user wants to test the real scheduled delivery path
+- `cron_trigger` runs an existing cron by **name** from `coop.toml`; if you are unsure which names exist, check `config_read` first
+- Do not use `cron_trigger` speculatively or in a loop
+
 ## coop.toml reference
 
 ```toml

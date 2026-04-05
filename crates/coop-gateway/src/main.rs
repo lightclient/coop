@@ -10,7 +10,9 @@ mod config_tool;
 mod config_watcher;
 mod config_write;
 mod cron_delivery;
+mod cron_runner;
 mod cron_timezone;
+mod cron_tool;
 mod final_reply;
 mod gateway;
 mod group_history;
@@ -73,6 +75,7 @@ use tracing::{Instrument, debug, info, info_span, warn};
 
 use crate::cli::{Cli, Commands, GatewayCommands, MemoryCommands, SandboxCommands, SignalCommands};
 use crate::config::{Config, SharedConfig, shared_config};
+use crate::cron_tool::CronToolExecutor;
 use crate::gateway::Gateway;
 use crate::memory_embedding::build_embedder;
 use crate::memory_reconcile::ProviderReconciler;
@@ -508,18 +511,20 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
     // Build the delivery sender early so both the send_message tool and the
     // scheduler can use it.
     #[cfg(feature = "signal")]
-    let deliver_tx: Option<scheduler::DeliverySender> = signal_action_tx
+    let deliver_tx: Option<cron_runner::DeliverySender> = signal_action_tx
         .as_ref()
-        .map(|tx| scheduler::spawn_signal_delivery_bridge(tx.clone()));
+        .map(|tx| cron_runner::spawn_signal_delivery_bridge(tx.clone()));
 
     #[cfg(not(feature = "signal"))]
-    let deliver_tx: Option<scheduler::DeliverySender> = None;
+    let deliver_tx: Option<cron_runner::DeliverySender> = None;
 
     let reminder_store = reminder::ReminderStore::new(workspace.join("sessions"))?;
     let scheduler_notify = Arc::new(tokio::sync::Notify::new());
+    let (cron_command_tx, cron_command_rx) = mpsc::channel(16);
 
     let default_executor = DefaultExecutor::new();
     let config_executor = config_tool::ConfigToolExecutor::new(config_file.clone());
+    let cron_executor = CronToolExecutor::new(Arc::clone(&shared), cron_command_tx);
     let memory_executor = MemoryToolExecutor::new(Arc::clone(&memory));
     let reminder_executor = reminder::ReminderToolExecutor::new(
         reminder_store.clone(),
@@ -534,6 +539,7 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
     let mut executors: Vec<Box<dyn coop_core::ToolExecutor>> = vec![
         Box::new(default_executor),
         Box::new(config_executor),
+        Box::new(cron_executor),
         Box::new(memory_executor),
         Box::new(reminder_executor),
         Box::new(web_executor),
@@ -678,14 +684,16 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
         let sched_token = shutdown_token.clone();
         let sched_notify = Arc::clone(&scheduler_notify);
         let sched_reminders = reminder_store;
+        let sched_commands = cron_command_rx;
         tokio::spawn(async move {
-            scheduler::run_scheduler_with_notify(
+            scheduler::run_scheduler_with_notify_and_commands(
                 sched_config,
                 sched_router,
                 deliver_tx,
                 sched_token,
                 Some(sched_notify),
                 Some(sched_reminders),
+                sched_commands,
             )
             .await;
         });

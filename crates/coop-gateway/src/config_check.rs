@@ -1242,6 +1242,22 @@ fn check_groups(report: &mut CheckReport, config: &Config) {
 
 #[allow(clippy::too_many_lines)]
 fn check_cron(report: &mut CheckReport, config: &Config) {
+    let mut seen = HashSet::new();
+    let dupes: Vec<&str> = config
+        .cron
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .filter(|name| !seen.insert(*name))
+        .collect();
+    if !dupes.is_empty() {
+        report.push(CheckResult {
+            name: "cron_names",
+            severity: Severity::Error,
+            passed: false,
+            message: format!("duplicate cron names: {}", dupes.join(", ")),
+        });
+    }
+
     // 10. cron_expressions
     for entry in &config.cron {
         match crate::scheduler::parse_cron(&entry.cron) {
@@ -2016,6 +2032,33 @@ mod tests {
             .unwrap();
         assert!(!cron_check.passed);
         assert!(report.has_warnings());
+    }
+
+    #[test]
+    fn test_duplicate_cron_names_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(workspace.join("SOUL.md"), "test soul").unwrap();
+
+        let config_path = dir.path().join("coop.toml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "[agent]\nid = \"test\"\nmodel = \"test-model\"\nworkspace = \"{}\"\n\n[[cron]]\nname = \"heartbeat\"\ncron = \"*/30 * * * *\"\nmessage = \"check one\"\n\n[[cron]]\nname = \"heartbeat\"\ncron = \"0 8 * * *\"\nmessage = \"check two\"\n",
+                workspace.display()
+            ),
+        )
+        .unwrap();
+
+        let report = validate_config(&config_path, dir.path());
+        let check = report
+            .results
+            .iter()
+            .find(|r| r.name == "cron_names" && !r.passed)
+            .unwrap();
+        assert!(check.message.contains("heartbeat"));
+        assert!(report.has_errors());
     }
 
     #[test]

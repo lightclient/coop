@@ -1,10 +1,9 @@
 use anyhow::Result;
 use chrono::Utc;
 use chrono_tz::Tz;
-use coop_core::{InboundKind, InboundMessage, Message, OutboundMessage, SessionKey, SessionKind};
+use coop_core::{InboundKind, InboundMessage};
 use cron::Schedule;
 use std::collections::HashMap;
-use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,68 +11,31 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, error, info, info_span, warn};
 
-use crate::config::{Config, CronConfig, CronDeliveryMode, SharedConfig};
-use crate::cron_timezone::{next_cron_fire_after, resolve_cron_timezone};
-use crate::heartbeat::{
-    NO_ACTION_NEEDED_TOKEN, SuppressionTokenResult, contains_legacy_heartbeat_token,
-    is_heartbeat_content_empty, strip_suppression_token,
+use crate::config::{CronConfig, SharedConfig};
+use crate::cron_runner::{
+    CronCommand, DeliverySender, announce_to_session, deliver_to_target, run_manual_cron_by_name,
+    run_scheduled_cron,
 };
+use crate::cron_timezone::{next_cron_fire_after, resolve_cron_timezone};
 use crate::reminder::{Reminder, ReminderStore};
-use crate::router::{MessageRouter, RouteDecision};
+use crate::router::MessageRouter;
 
-/// Sender for delivering cron output to channels.
-///
-/// Wraps an `mpsc::Sender<OutboundMessage>`. In production, a bridge task
-/// forwards outbound messages to the appropriate channel (e.g. Signal).
-#[derive(Clone, Debug)]
-pub(crate) struct DeliverySender {
-    tx: mpsc::Sender<OutboundMessage>,
-}
+#[cfg(test)]
+use crate::config::CronDeliveryMode;
+#[cfg(test)]
+use crate::cron_runner::CronTriggerStatus;
+#[cfg(test)]
+use crate::cron_runner::resolve_cron_delivery_targets;
+#[cfg(test)]
+use crate::cron_tool::CronToolExecutor;
+#[cfg(test)]
+use coop_core::OutboundMessage;
 
 #[derive(Clone)]
 struct ParsedCron {
     cfg: CronConfig,
     schedule: Schedule,
     timezone: Tz,
-}
-
-impl DeliverySender {
-    #[cfg(any(feature = "signal", test))]
-    pub(crate) fn new(tx: mpsc::Sender<OutboundMessage>) -> Self {
-        Self { tx }
-    }
-
-    pub(crate) async fn send(&self, channel: &str, target: &str, content: &str) -> Result<()> {
-        let outbound = OutboundMessage {
-            channel: channel.to_owned(),
-            target: target.to_owned(),
-            content: content.to_owned(),
-        };
-        self.tx
-            .send(outbound)
-            .await
-            .map_err(|_send_err| anyhow::anyhow!("delivery channel closed"))
-    }
-}
-
-/// Spawn a bridge task that forwards `OutboundMessage`s to a Signal action sender.
-#[cfg(feature = "signal")]
-pub(crate) fn spawn_signal_delivery_bridge(
-    signal_tx: mpsc::Sender<coop_channels::SignalAction>,
-) -> DeliverySender {
-    let (outbound_tx, mut outbound_rx) = mpsc::channel::<OutboundMessage>(64);
-    tokio::spawn(async move {
-        while let Some(msg) = outbound_rx.recv().await {
-            if signal_tx
-                .send(coop_channels::SignalAction::SendText(msg))
-                .await
-                .is_err()
-            {
-                break;
-            }
-        }
-    });
-    DeliverySender::new(outbound_tx)
 }
 
 pub(crate) fn parse_cron(expr: &str) -> Result<Schedule> {
@@ -98,6 +60,7 @@ pub(crate) async fn run_scheduler(
     run_scheduler_with_notify(config, router, deliver_tx, shutdown, None, None).await;
 }
 
+#[allow(dead_code)]
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn run_scheduler_with_notify(
     config: SharedConfig,
@@ -106,6 +69,50 @@ pub(crate) async fn run_scheduler_with_notify(
     shutdown: CancellationToken,
     cron_notify: Option<Arc<tokio::sync::Notify>>,
     reminders: Option<ReminderStore>,
+) {
+    run_scheduler_inner(
+        config,
+        router,
+        deliver_tx,
+        shutdown,
+        cron_notify,
+        reminders,
+        None,
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub(crate) async fn run_scheduler_with_notify_and_commands(
+    config: SharedConfig,
+    router: Arc<MessageRouter>,
+    deliver_tx: Option<DeliverySender>,
+    shutdown: CancellationToken,
+    cron_notify: Option<Arc<tokio::sync::Notify>>,
+    reminders: Option<ReminderStore>,
+    command_rx: mpsc::Receiver<CronCommand>,
+) {
+    run_scheduler_inner(
+        config,
+        router,
+        deliver_tx,
+        shutdown,
+        cron_notify,
+        reminders,
+        Some(command_rx),
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn run_scheduler_inner(
+    config: SharedConfig,
+    router: Arc<MessageRouter>,
+    deliver_tx: Option<DeliverySender>,
+    shutdown: CancellationToken,
+    cron_notify: Option<Arc<tokio::sync::Notify>>,
+    reminders: Option<ReminderStore>,
+    mut command_rx: Option<mpsc::Receiver<CronCommand>>,
 ) {
     info!("scheduler started");
 
@@ -183,6 +190,16 @@ pub(crate) async fn run_scheduler_with_notify(
 
         let Some(fire_time) = next_fire else {
             tokio::select! {
+                maybe_command = next_command(&mut command_rx) => {
+                    handle_cron_command(
+                        maybe_command,
+                        &mut command_rx,
+                        &config,
+                        &router,
+                        deliver_tx.clone(),
+                    );
+                    continue;
+                }
                 () = notify.notified() => continue,
                 () = shutdown.cancelled() => {
                     info!("scheduler shutting down");
@@ -223,19 +240,31 @@ pub(crate) async fn run_scheduler_with_notify(
                         let deliver_tx = deliver_tx.clone();
                         let sched_config = Arc::clone(&config);
                         tokio::spawn(async move {
-                            fire_cron_with_timezone(
+                            if let Err(error) = run_scheduled_cron(
                                 &cfg,
                                 timezone,
                                 &router,
                                 deliver_tx.as_ref(),
                                 &sched_config,
                             )
-                            .await;
+                            .await
+                            {
+                                error!(cron.name = %cfg.name, error = %error, "scheduled cron failed");
+                            }
                         });
                     }
                 }
                 // Reminders are checked at the top of the next iteration
                 // via take_due(), so we just loop.
+            }
+            maybe_command = next_command(&mut command_rx) => {
+                handle_cron_command(
+                    maybe_command,
+                    &mut command_rx,
+                    &config,
+                    &router,
+                    deliver_tx.clone(),
+                );
             }
             () = notify.notified() => {
                 debug!("scheduler woken by config/reminder change");
@@ -244,6 +273,63 @@ pub(crate) async fn run_scheduler_with_notify(
                 info!("scheduler shutting down");
                 return;
             }
+        }
+    }
+}
+
+async fn next_command(command_rx: &mut Option<mpsc::Receiver<CronCommand>>) -> Option<CronCommand> {
+    match command_rx {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending::<Option<CronCommand>>().await,
+    }
+}
+
+fn handle_cron_command(
+    maybe_command: Option<CronCommand>,
+    command_rx: &mut Option<mpsc::Receiver<CronCommand>>,
+    config: &SharedConfig,
+    router: &Arc<MessageRouter>,
+    deliver_tx: Option<DeliverySender>,
+) {
+    let Some(command) = maybe_command else {
+        if command_rx.is_some() {
+            debug!("cron command channel closed");
+        }
+        *command_rx = None;
+        return;
+    };
+
+    match command {
+        CronCommand::RunNow {
+            name,
+            deliver,
+            origin_session_id,
+            reply,
+        } => {
+            info!(
+                cron.name = %name,
+                cron.deliver = deliver,
+                origin.session = %origin_session_id,
+                "manual cron trigger queued"
+            );
+
+            let router = Arc::clone(router);
+            let config = Arc::clone(config);
+            tokio::spawn(async move {
+                let result = run_manual_cron_by_name(
+                    &name,
+                    deliver,
+                    &origin_session_id,
+                    &router,
+                    deliver_tx.as_ref(),
+                    &config,
+                )
+                .await;
+
+                if reply.send(result).is_err() {
+                    debug!(cron.name = %name, "manual cron trigger requester dropped reply channel");
+                }
+            });
         }
     }
 }
@@ -308,75 +394,6 @@ fn parse_and_validate(
     parsed
 }
 
-/// Resolve delivery targets for a cron entry.
-///
-/// If the cron entry has an explicit `deliver` field, return that single target.
-/// If it has a `user` field but no `deliver`, look up the user's match patterns
-/// and return all non-terminal channels.
-/// Otherwise, return an empty list.
-pub(crate) fn resolve_cron_delivery_targets(
-    config: &Config,
-    cfg: &CronConfig,
-) -> Vec<(String, String)> {
-    if let Some(ref delivery) = cfg.deliver {
-        return vec![(delivery.channel.clone(), delivery.target.clone())];
-    }
-
-    let Some(ref user_name) = cfg.user else {
-        return Vec::new();
-    };
-
-    let Some(user) = config.users.iter().find(|u| u.name == *user_name) else {
-        return Vec::new();
-    };
-
-    user.r#match
-        .iter()
-        .filter_map(|pattern| {
-            let (channel, target) = pattern.split_once(':')?;
-            if channel == "terminal" {
-                None
-            } else {
-                Some((channel.to_owned(), target.to_owned()))
-            }
-        })
-        .collect()
-}
-
-/// Wait for any in-progress turns on delivery target DM sessions to complete.
-///
-/// When a cron fires while a user has tool calls in flight, running the cron
-/// turn concurrently can compete for provider capacity and the subsequent
-/// `announce_to_session` injection can corrupt the `tool_use`/`tool_result`
-/// pairing. This function acquires (and immediately releases) each target's
-/// turn lock, which blocks until any active turn finishes.
-///
-/// Groups are excluded — they use direct delivery without session injection.
-async fn wait_for_delivery_sessions(
-    delivery_targets: &[(String, String)],
-    agent_id: &str,
-    router: &MessageRouter,
-) {
-    for (channel, target) in delivery_targets {
-        if target.starts_with("group:") {
-            continue;
-        }
-        let dm_session_key = SessionKey {
-            agent_id: agent_id.to_owned(),
-            kind: SessionKind::Dm(format!("{channel}:{target}")),
-        };
-        if router.has_active_turn(&dm_session_key) {
-            info!(
-                session = %dm_session_key,
-                "cron waiting for active turn to complete on delivery target"
-            );
-            let lock = router.session_turn_lock(&dm_session_key);
-            let _guard = lock.lock().await;
-            // Lock acquired → turn finished. Release immediately.
-        }
-    }
-}
-
 #[cfg(test)]
 async fn fire_cron(
     cfg: &CronConfig,
@@ -387,232 +404,9 @@ async fn fire_cron(
     let config_snapshot = shared_config.load();
     let timezone = resolve_cron_timezone(cfg, &config_snapshot.users).unwrap_or(chrono_tz::UTC);
     drop(config_snapshot);
-    fire_cron_with_timezone(cfg, timezone, router, deliver_tx, shared_config).await;
-}
-
-async fn fire_cron_with_timezone(
-    cfg: &CronConfig,
-    timezone: Tz,
-    router: &MessageRouter,
-    deliver_tx: Option<&DeliverySender>,
-    shared_config: &SharedConfig,
-) {
-    let delivery_mode = cfg.effective_delivery_mode();
-    let span = info_span!(
-        "cron_fired",
-        cron.name = %cfg.name,
-        cron.timezone = %timezone,
-        cron.delivery_mode = %delivery_mode,
-        cron.legacy_delivery_mode = cfg.uses_legacy_delivery_mode(),
-        user = ?cfg.user,
-    );
-
-    async {
-        let config_snapshot = shared_config.load();
-        info!(
-            cron = %cfg.cron,
-            cron.timezone = %timezone,
-            message = %cfg.message,
-            user = ?cfg.user,
-            cron.delivery_mode = %delivery_mode,
-            cron.legacy_delivery_mode = cfg.uses_legacy_delivery_mode(),
-            "cron firing"
-        );
-
-        let delivery_targets = resolve_cron_delivery_targets(&config_snapshot, cfg);
-        let agent_id = config_snapshot.agent.id.clone();
-
-        // Skip LLM call for empty HEARTBEAT.md
-        if should_skip_heartbeat(&config_snapshot, &cfg.message) {
-            debug!(cron.name = %cfg.name, "heartbeat skipped: empty heartbeat file");
-            return;
-        }
-
-        // Wait for any in-progress turns on delivery target sessions to
-        // complete before starting the cron turn. Running concurrently can
-        // compete for provider capacity and corrupt tool_use/tool_result
-        // pairing in the DM history.
-        wait_for_delivery_sessions(&delivery_targets, &agent_id, router).await;
-
-        let sender = match &cfg.user {
-            Some(user) => format!("cron:{}:{}", cfg.name, user),
-            None => format!("cron:{}", cfg.name),
-        };
-
-        // Determine the delivery channel for prompt context. When responses
-        // will be delivered to Signal, the prompt builder should format for
-        // Signal (plain text, conversational tone) instead of the generic
-        // "cron" channel which has no formatting instructions.
-        let prompt_channel = delivery_targets
-            .first()
-            .map(|(channel, _)| channel.clone());
-
-        let content = if delivery_targets.is_empty() {
-            cfg.message.clone()
-        } else {
-            format!(
-                "[Your response will be delivered to the user via {}. Your response is delivered automatically.]\n\n{}",
-                prompt_channel.as_deref().unwrap_or("messaging"),
-                cfg.message
-            )
-        };
-
-        let inbound = InboundMessage {
-            channel: "cron".to_owned(),
-            sender,
-            content,
-            chat_id: None,
-            is_group: false,
-            timestamp: Utc::now(),
-            reply_to: None,
-            kind: InboundKind::Text,
-            message_timestamp: None,
-            group_revision: None,
-        };
-
-        let prompt_delivery_mode = (!delivery_targets.is_empty()).then_some(delivery_mode);
-        let delivery_prompt_channel = prompt_channel.clone();
-
-        match router
-            .dispatch_collect_text_with_channel_and_cron_delivery(
-                &inbound,
-                prompt_channel,
-                prompt_delivery_mode,
-            )
-            .await
-        {
-            Ok((decision, response)) => {
-                info!(
-                    session = %decision.session_key,
-                    trust = ?decision.trust,
-                    user = ?decision.user_name,
-                    "cron completed"
-                );
-
-                deliver_cron_response(
-                    cfg,
-                    response,
-                    &delivery_targets,
-                    &decision,
-                    delivery_prompt_channel.as_deref(),
-                    &agent_id,
-                    router,
-                    deliver_tx,
-                )
-                .await;
-            }
-            Err(e) => {
-                error!(error = %e, "cron dispatch failed");
-            }
-        }
-    }
-    .instrument(span)
-    .await;
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn deliver_cron_response(
-    cfg: &CronConfig,
-    response: String,
-    delivery_targets: &[(String, String)],
-    decision: &RouteDecision,
-    prompt_channel: Option<&str>,
-    agent_id: &str,
-    router: &MessageRouter,
-    deliver_tx: Option<&DeliverySender>,
-) {
-    if delivery_targets.is_empty() {
-        return;
-    }
-
-    // Empty response means the turn was skipped (session lock held)
-    // or the LLM returned nothing.
-    if response.trim().is_empty() {
-        debug!(cron.name = %cfg.name, "cron produced empty response, skipping delivery");
-        return;
-    }
-
-    let delivery_mode = cfg.effective_delivery_mode();
-    let content_to_deliver = match delivery_mode {
-        CronDeliveryMode::AsNeeded => match strip_suppression_token(&response) {
-            SuppressionTokenResult::Suppress => {
-                if contains_legacy_heartbeat_token(&response) {
-                    debug!(
-                        cron.name = %cfg.name,
-                        cron.delivery_mode = %delivery_mode,
-                        token = %NO_ACTION_NEEDED_TOKEN,
-                        legacy_token = true,
-                        "cron suppressed: legacy HEARTBEAT_OK token detected"
-                    );
-                } else {
-                    debug!(
-                        cron.name = %cfg.name,
-                        cron.delivery_mode = %delivery_mode,
-                        token = %NO_ACTION_NEEDED_TOKEN,
-                        "cron suppressed: NO_ACTION_NEEDED token detected"
-                    );
-                }
-                return;
-            }
-            SuppressionTokenResult::Deliver(cleaned) => match router
-                .review_as_needed_cron_delivery(
-                    decision,
-                    &cfg.message,
-                    cfg.review_prompt.as_deref(),
-                    prompt_channel,
-                    &cleaned,
-                )
-                .await
-            {
-                Ok(true) => cleaned,
-                Ok(false) => {
-                    debug!(
-                        cron.name = %cfg.name,
-                        cron.delivery_mode = %delivery_mode,
-                        "cron suppressed: as-needed delivery review vetoed message"
-                    );
-                    return;
-                }
-                Err(error) => {
-                    warn!(
-                        cron.name = %cfg.name,
-                        cron.delivery_mode = %delivery_mode,
-                        fallback = "deliver_original",
-                        error = %error,
-                        "cron delivery review failed; delivering original as-needed content"
-                    );
-                    cleaned
-                }
-            },
-        },
-        CronDeliveryMode::Always => {
-            if matches!(
-                strip_suppression_token(&response),
-                SuppressionTokenResult::Suppress
-            ) {
-                warn!(
-                    cron.name = %cfg.name,
-                    cron.delivery_mode = %delivery_mode,
-                    token = %NO_ACTION_NEEDED_TOKEN,
-                    "cron configured for always delivery emitted suppression token; delivering literal content"
-                );
-            }
-            response
-        }
-    };
-
-    for (channel, target) in delivery_targets {
-        announce_to_session(
-            &cfg.name,
-            &cfg.message,
-            &content_to_deliver,
-            channel,
-            target,
-            agent_id,
-            router,
-            deliver_tx,
-        )
-        .await;
+    let result = run_scheduled_cron(cfg, timezone, router, deliver_tx, shared_config).await;
+    if let Err(error) = result {
+        error!(cron.name = %cfg.name, error = %error, "scheduled cron failed");
     }
 }
 
@@ -741,6 +535,7 @@ async fn dispatch_reminder(
                     &agent_id,
                     router,
                     deliver_tx,
+                    None,
                 )
                 .await;
             }
@@ -765,137 +560,6 @@ async fn dispatch_reminder(
             }
         }
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn announce_to_session(
-    cron_name: &str,
-    cron_message: &str,
-    cron_output: &str,
-    channel: &str,
-    target: &str,
-    agent_id: &str,
-    router: &MessageRouter,
-    deliver_tx: Option<&DeliverySender>,
-) {
-    // Groups: direct delivery (no DM session for groups)
-    if target.starts_with("group:") {
-        deliver_to_target(channel, target, cron_output, deliver_tx).await;
-        return;
-    }
-
-    let dm_session_key = SessionKey {
-        agent_id: agent_id.to_owned(),
-        kind: SessionKind::Dm(format!("{channel}:{target}")),
-    };
-
-    let span = info_span!(
-        "cron_announce",
-        cron.name = %cron_name,
-        channel = %channel,
-        target = %target,
-        session = %dm_session_key,
-    );
-
-    async {
-        // Acquire the session turn lock so we don't inject messages between
-        // a tool_use and its tool_result in an in-progress turn. If a turn
-        // is running, this waits until it finishes.
-        let lock = router.session_turn_lock(&dm_session_key);
-        let _guard = lock.lock().await;
-
-        debug!(
-            dm_session = %dm_session_key,
-            "injecting cron output into DM session"
-        );
-
-        // 1. Append context: user message with cron task
-        let context_msg =
-            Message::user().with_text(format!("[Scheduled: {cron_name}]\n{cron_message}"));
-        router.append_to_session(&dm_session_key, context_msg);
-
-        // 2. Append cron output as assistant message
-        let output_msg = Message::assistant().with_text(cron_output);
-        router.append_to_session(&dm_session_key, output_msg);
-
-        // 3. Deliver to channel
-        deliver_to_target(channel, target, cron_output, deliver_tx).await;
-    }
-    .instrument(span)
-    .await;
-}
-
-/// Check if the cron message references HEARTBEAT.md and if that file is empty.
-fn should_skip_heartbeat(config: &Config, message: &str) -> bool {
-    if !message.contains("HEARTBEAT.md") {
-        return false;
-    }
-
-    // Resolve workspace path the same way Config::resolve_workspace does,
-    // but we don't have config_dir here. Use a best-effort approach: if the
-    // workspace path is absolute, use it directly. Otherwise we can't reliably
-    // resolve it, so don't skip.
-    let workspace_str = &config.agent.workspace;
-    let workspace = std::path::PathBuf::from(workspace_str);
-    if !workspace.is_absolute() {
-        // Try CWD-relative as fallback (the gateway typically sets CWD).
-        let cwd_relative = std::env::current_dir().ok().map(|cwd| cwd.join(&workspace));
-        if let Some(ref path) = cwd_relative {
-            return check_heartbeat_file(path);
-        }
-        return false;
-    }
-
-    check_heartbeat_file(&workspace)
-}
-
-fn check_heartbeat_file(workspace: &Path) -> bool {
-    let heartbeat_path = workspace.join("HEARTBEAT.md");
-    match std::fs::read_to_string(&heartbeat_path) {
-        Ok(content) => {
-            if is_heartbeat_content_empty(&content) {
-                return true;
-            }
-            false
-        }
-        Err(_) => false, // File doesn't exist → proceed normally
-    }
-}
-
-pub(crate) async fn deliver_to_target(
-    channel: &str,
-    target: &str,
-    content: &str,
-    deliver_tx: Option<&DeliverySender>,
-) {
-    let Some(tx) = deliver_tx else {
-        warn!(
-            channel = %channel,
-            target = %target,
-            "delivery target resolved but no delivery sender available"
-        );
-        return;
-    };
-
-    let span = info_span!(
-        "cron_deliver",
-        channel = %channel,
-        target = %target,
-        content_len = content.len(),
-    );
-
-    async {
-        match tx.send(channel, target, content).await {
-            Ok(()) => {
-                info!("cron delivery sent");
-            }
-            Err(e) => {
-                error!(error = %e, "cron delivery failed");
-            }
-        }
-    }
-    .instrument(span)
-    .await;
 }
 
 #[allow(clippy::unwrap_used)]
@@ -2807,6 +2471,107 @@ match = ["signal:alice-uuid"]
         assert!(trace.contains("cron suppressed: as-needed delivery review vetoed message"));
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn trace_records_manual_cron_trigger() {
+        use std::io::BufRead;
+        use tracing_subscriber::fmt::format::FmtSpan;
+        use tracing_subscriber::prelude::*;
+
+        let dir = tempfile::tempdir().unwrap();
+        let trace_file = dir.path().join("traces.jsonl");
+        let file_appender = tracing_appender::rolling::never(dir.path(), "traces.jsonl");
+        let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+
+        let jsonl_layer = tracing_subscriber::fmt::layer()
+            .json()
+            .with_writer(non_blocking)
+            .with_span_list(true)
+            .with_file(true)
+            .with_line_number(true)
+            .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
+            .with_filter(tracing_subscriber::EnvFilter::new("debug"));
+
+        let subscriber = tracing_subscriber::Registry::default().with(jsonl_layer);
+        let dispatch = tracing::dispatcher::Dispatch::new(subscriber);
+        let default_guard = tracing::dispatcher::set_default(&dispatch);
+
+        let cron = vec![CronConfig {
+            name: "heartbeat".to_owned(),
+            cron: "*/30 * * * *".to_owned(),
+            timezone: None,
+            message: "check tasks".to_owned(),
+            user: None,
+            delivery: None,
+            deliver: None,
+            review_prompt: None,
+            sandbox: None,
+        }];
+        let (shared, router, _gateway) =
+            make_shared_config_and_router(None, &cron, "cron response ok");
+        let router = Arc::new(router);
+        let cancel = CancellationToken::new();
+        let (command_tx, command_rx) = mpsc::channel(4);
+        let executor = CronToolExecutor::new(Arc::clone(&shared), command_tx);
+
+        let sched_shared = Arc::clone(&shared);
+        let sched_router = Arc::clone(&router);
+        let sched_cancel = cancel.clone();
+        let handle = tokio::spawn(async move {
+            run_scheduler_with_notify_and_commands(
+                sched_shared,
+                sched_router,
+                None,
+                sched_cancel,
+                None,
+                None,
+                command_rx,
+            )
+            .await;
+        });
+
+        let ctx = coop_core::ToolContext::new(
+            "test:main",
+            SessionKind::Main,
+            TrustLevel::Full,
+            std::path::PathBuf::from("."),
+            None,
+        );
+
+        let output = coop_core::ToolExecutor::execute(
+            &executor,
+            "cron_trigger",
+            serde_json::json!({"name": "heartbeat"}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+
+        assert!(!output.is_error);
+
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("scheduler did not exit after cancellation")
+            .expect("scheduler task panicked");
+
+        drop(default_guard);
+        drop(guard);
+
+        let file = std::fs::File::open(&trace_file).unwrap();
+        let lines: Vec<String> = std::io::BufReader::new(file)
+            .lines()
+            .map(|line| line.unwrap())
+            .filter(|line| !line.is_empty())
+            .collect();
+        let trace = lines.join("\n");
+
+        assert!(trace.contains("cron_trigger_tool"));
+        assert!(trace.contains("cron_triggered"));
+        assert!(trace.contains("manual cron trigger finished"));
+        assert!(trace.contains("\"cron.trigger\":\"manual\""));
+        assert!(trace.contains("\"origin.session\":\"test:main\""));
+    }
+
     #[tokio::test]
     async fn fire_cron_non_heartbeat_always_delivers() {
         let (shared, router, _gateway) = make_shared_config_and_router(None, &[], "HEARTBEAT_OK");
@@ -2979,6 +2744,9 @@ match = ["signal:alice-uuid"]
             if let Some(timezone) = &entry.timezone {
                 let _ = writeln!(toml_str, "timezone = \"{timezone}\"");
             }
+            if let Some(delivery_mode) = entry.delivery {
+                let _ = writeln!(toml_str, "delivery = \"{delivery_mode}\"");
+            }
             let _ = writeln!(toml_str, "message = \"{}\"", entry.message);
             if let Some(ref review_prompt) = entry.review_prompt {
                 let _ = writeln!(toml_str, "review_prompt = \"{review_prompt}\"");
@@ -3052,6 +2820,9 @@ match = ["signal:alice-uuid"]
             );
             if let Some(timezone) = &entry.timezone {
                 let _ = writeln!(toml_str, "timezone = \"{timezone}\"");
+            }
+            if let Some(delivery_mode) = entry.delivery {
+                let _ = writeln!(toml_str, "delivery = \"{delivery_mode}\"");
             }
             let _ = writeln!(toml_str, "message = \"{}\"", entry.message);
             if let Some(ref review_prompt) = entry.review_prompt {
@@ -3317,5 +3088,123 @@ match = ["signal:alice-uuid"]
         let msg = rx.try_recv().unwrap();
         assert_eq!(msg.channel, "signal");
         assert_eq!(msg.target, "group:deadbeef");
+    }
+
+    #[tokio::test]
+    async fn scheduler_manual_cron_command_runs_named_cron() {
+        let cron = vec![CronConfig {
+            name: "heartbeat".to_owned(),
+            cron: "*/30 * * * *".to_owned(),
+            timezone: None,
+            message: "check tasks".to_owned(),
+            user: None,
+            delivery: None,
+            deliver: None,
+            review_prompt: None,
+            sandbox: None,
+        }];
+        let (shared, router, _gateway) =
+            make_shared_config_and_router(None, &cron, "cron response ok");
+        let router = Arc::new(router);
+        let cancel = CancellationToken::new();
+        let (command_tx, command_rx) = mpsc::channel(4);
+
+        let sched_cancel = cancel.clone();
+        let handle = tokio::spawn(async move {
+            run_scheduler_with_notify_and_commands(
+                shared,
+                router,
+                None,
+                sched_cancel,
+                None,
+                None,
+                command_rx,
+            )
+            .await;
+        });
+
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        command_tx
+            .send(CronCommand::RunNow {
+                name: "heartbeat".to_owned(),
+                deliver: false,
+                origin_session_id: "test:main".to_owned(),
+                reply: reply_tx,
+            })
+            .await
+            .unwrap();
+
+        let result = tokio::time::timeout(Duration::from_secs(5), reply_rx)
+            .await
+            .expect("manual cron command timed out")
+            .expect("scheduler dropped manual cron reply")
+            .expect("manual cron command failed");
+
+        assert_eq!(result.status, CronTriggerStatus::Completed);
+        assert_eq!(result.response.as_deref(), Some("cron response ok"));
+
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("scheduler did not exit after cancellation")
+            .expect("scheduler task panicked");
+    }
+
+    #[tokio::test]
+    async fn manual_delivery_skips_origin_session_lock_and_injection() {
+        let cfg = CronConfig {
+            name: "briefing".to_owned(),
+            cron: "0 8 * * *".to_owned(),
+            timezone: None,
+            message: "Morning briefing".to_owned(),
+            user: Some("alice".to_owned()),
+            delivery: Some(CronDeliveryMode::Always),
+            deliver: None,
+            review_prompt: None,
+            sandbox: None,
+        };
+        let users = [UserConfig {
+            name: "alice".to_owned(),
+            trust: TrustLevel::Full,
+            r#match: vec!["signal:alice-uuid".to_owned()],
+            timezone: None,
+            sandbox: None,
+        }];
+        let (shared, router, gateway) =
+            make_shared_config_and_router_with_users_and_match(&users, &[cfg], "cron response ok");
+        let (tx, mut rx) = mpsc::channel::<OutboundMessage>(8);
+        let deliver_tx = DeliverySender::new(tx);
+
+        let origin_session_key = SessionKey {
+            agent_id: "test".to_owned(),
+            kind: SessionKind::Dm("signal:alice-uuid".to_owned()),
+        };
+        let lock = router.session_turn_lock(&origin_session_key);
+        let guard = lock.lock().await;
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_manual_cron_by_name(
+                "briefing",
+                true,
+                &origin_session_key.to_string(),
+                &router,
+                Some(&deliver_tx),
+                &shared,
+            ),
+        )
+        .await
+        .expect("manual cron delivery deadlocked")
+        .expect("manual cron delivery failed");
+
+        drop(guard);
+
+        assert_eq!(result.status, CronTriggerStatus::Completed);
+        assert_eq!(result.delivered_to, 1);
+
+        let outbound = rx.try_recv().unwrap();
+        assert_eq!(outbound.target, "alice-uuid");
+        assert_eq!(outbound.content, "cron response ok");
+        assert_eq!(gateway.session_message_count(&origin_session_key), 0);
     }
 }

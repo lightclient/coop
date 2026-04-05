@@ -122,6 +122,7 @@ fn tool_label(name: &str) -> (&'static str, &'static str) {
         "write_file" | "Write" => ("✏️", "Write"),
         "memory_search" | "memory_files" | "memory_timeline" | "memory_get" | "memory_write"
         | "memory_history" | "memory_people" => ("🧠", "Memory"),
+        "cron_trigger" => ("⏰", "Trigger"),
         _ => ("🔧", "Run"),
     }
 }

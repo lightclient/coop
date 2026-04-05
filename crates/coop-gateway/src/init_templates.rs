@@ -32,6 +32,7 @@ pub(crate) const AGENTS_MD_INIT: &str = "\
 pub(crate) const TOOLS_MD_INIT: &str = "\
 <!-- Built-in defaults are prepended automatically by coop. -->
 <!-- Add your custom tool notes below. They extend the defaults. -->
+<!-- The built-in tool notes include workflow guidance for config changes, cron_trigger, and diagnostics. -->
 <!-- To fully replace the defaults, put <!-- override --> on the first line. -->
 ";
 
