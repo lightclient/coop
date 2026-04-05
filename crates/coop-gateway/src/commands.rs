@@ -3,7 +3,7 @@ use coop_core::TrustLevel;
 
 use crate::gateway::Gateway;
 
-fn format_number(value: impl ToString) -> String {
+fn format_number(value: u64) -> String {
     let digits = value.to_string();
     let mut reversed = String::with_capacity(digits.len() + digits.len() / 3);
 
@@ -75,11 +75,11 @@ fn format_status(gateway: &Gateway, session_key: &SessionKey, user_name: Option<
         gateway.agent_id(),
         model,
         count,
-        format_number(usage.last_input_tokens),
-        format_number(context_limit),
+        format_number(u64::from(usage.last_input_tokens)),
+        format_number(context_limit as u64),
         context_pct,
-        format_number(usage.cumulative.input_tokens.unwrap_or(0)),
-        format_number(usage.cumulative.output_tokens.unwrap_or(0)),
+        format_number(u64::from(usage.cumulative.input_tokens.unwrap_or(0))),
+        format_number(u64::from(usage.cumulative.output_tokens.unwrap_or(0))),
     )
 }
 
@@ -108,7 +108,7 @@ fn format_models(gateway: &Gateway, user_name: Option<&str>) -> String {
             details.push(description);
         }
         if let Some(context_limit) = gateway.configured_context_limit_for_model(&model.id) {
-            details.push(format!("{} tokens", format_number(context_limit)));
+            details.push(format!("{} tokens", format_number(context_limit as u64)));
         }
         if !details.is_empty() {
             line.push_str(" — ");
@@ -165,7 +165,7 @@ async fn handle_model_command(
             let mut response = format!(
                 "Model set to {} ✅\nContext window: {} tokens",
                 outcome.selection.model,
-                format_number(outcome.selection.context_limit)
+                format_number(outcome.selection.context_limit as u64)
             );
             if outcome.compacted_for_handoff {
                 response.push_str("\nSession compacted before handoff ✅");

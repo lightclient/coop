@@ -15,7 +15,7 @@ use tracing::{Instrument, debug, info_span};
 pub(crate) const DEFAULT_RESERVE_TOKENS: usize = 16_384;
 
 /// Approximate tokens of recent context to preserve verbatim after compaction.
-const RECENT_CONTEXT_TARGET: u32 = 20_000;
+pub(crate) const DEFAULT_RECENT_CONTEXT_TARGET: u32 = 20_000;
 
 /// Rough chars-per-token estimate for cut-point detection.
 const CHARS_PER_TOKEN: u32 = 4;
@@ -110,12 +110,12 @@ pub(crate) fn should_compact(input_tokens: u32, context_limit: usize) -> bool {
 /// the cut and gets summarized away), causing the API to reject the
 /// request. By including such boundary user messages in the summarized
 /// portion, the summary captures the complete tool interaction.
-fn find_cut_point(messages: &[Message]) -> usize {
+fn find_cut_point(messages: &[Message], recent_context_target: u32) -> usize {
     if messages.is_empty() {
         return 0;
     }
 
-    let target_chars = (RECENT_CONTEXT_TARGET * CHARS_PER_TOKEN) as usize;
+    let target_chars = (recent_context_target * CHARS_PER_TOKEN) as usize;
     let mut char_count = 0;
 
     for (i, msg) in messages.iter().enumerate().rev() {
@@ -380,12 +380,13 @@ pub(crate) async fn compact(
     provider: &dyn Provider,
     system_prompt: &[String],
     previous_state: Option<&CompactionState>,
+    recent_context_target: u32,
 ) -> Result<CompactionState> {
     let span = info_span!("compaction", message_count = messages.len());
 
     async {
         // Determine what to summarize based on cut-point detection.
-        let cut_point = find_cut_point(messages);
+        let cut_point = find_cut_point(messages, recent_context_target);
 
         // For iterative compaction, only summarize messages between the
         // old cut point and the new cut point.
@@ -431,6 +432,7 @@ pub(crate) async fn compact(
         debug!(
             prepared_message_count = msgs.len(),
             cut_point,
+            recent_context_target,
             is_iterative = previous_state.is_some(),
             compaction_count = previous_state.map_or(0, |p| p.compaction_count),
             files_tracked = all_files.len(),
@@ -696,7 +698,7 @@ mod tests {
 
     #[test]
     fn cut_point_empty_messages() {
-        assert_eq!(find_cut_point(&[]), 0);
+        assert_eq!(find_cut_point(&[], DEFAULT_RECENT_CONTEXT_TARGET), 0);
     }
 
     #[test]
@@ -705,7 +707,7 @@ mod tests {
             Message::user().with_text("hello"),
             Message::assistant().with_text("hi"),
         ];
-        assert_eq!(find_cut_point(&messages), 0);
+        assert_eq!(find_cut_point(&messages, DEFAULT_RECENT_CONTEXT_TARGET), 0);
     }
 
     #[test]
@@ -722,7 +724,7 @@ mod tests {
             }
         }
 
-        let cut = find_cut_point(&messages);
+        let cut = find_cut_point(&messages, DEFAULT_RECENT_CONTEXT_TARGET);
         // Cut point should leave some messages after it
         assert!(cut > 0, "should have a non-zero cut point");
         assert!(cut < 200, "should preserve some recent messages");
@@ -737,7 +739,7 @@ mod tests {
         #[allow(clippy::cast_possible_truncation)]
         let preserved_tokens = preserved_chars as u32 / CHARS_PER_TOKEN;
         assert!(
-            preserved_tokens >= RECENT_CONTEXT_TARGET / 2,
+            preserved_tokens >= DEFAULT_RECENT_CONTEXT_TARGET / 2,
             "should preserve at least half the target: {preserved_tokens}"
         );
     }
@@ -764,7 +766,7 @@ mod tests {
             messages.push(Message::assistant().with_text(format!("done {i} {padding}")));
         }
 
-        let cut = find_cut_point(&messages);
+        let cut = find_cut_point(&messages, DEFAULT_RECENT_CONTEXT_TARGET);
         assert!(
             cut > 0,
             "conversation should be large enough to trigger a cut"

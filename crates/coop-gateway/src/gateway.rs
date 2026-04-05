@@ -563,20 +563,7 @@ impl Gateway {
             let session_len_before = self.messages(session_key).len();
             self.append_message(session_key, Message::user().with_text(user_input));
 
-            let tool_defs = self.executor.tools();
-            // Cron sessions don't need channel-specific tools like signal_send;
-            // delivery is handled by the scheduler after the turn completes.
-            let tool_defs = if matches!(session_key.kind, SessionKind::Cron(_)) {
-                tool_defs
-                    .into_iter()
-                    .filter(|t| t.name != "signal_send")
-                    .filter(|t| t.name != "signal_react")
-                    .filter(|t| t.name != "signal_reply")
-                    .filter(|t| t.name != "cron_trigger")
-                    .collect()
-            } else {
-                tool_defs
-            };
+            let tool_defs = self.tool_defs_for_session(session_key);
             let ctx = Self::tool_context(session_key, trust, user_name, &workspace_scope);
             let turn_config = TurnConfig::default();
             let final_reply_policy = FinalReplyPolicy::for_turn(channel, cron_delivery_mode);
@@ -1273,14 +1260,19 @@ impl Gateway {
 
     /// Check if the session needs compaction and perform it if so.
     ///
-    /// Uses `last_input_tokens` from session usage as the signal — this is
-    /// the input token count the provider reported on the most recent call,
-    /// reflecting how large the context actually was.
+    /// Uses the larger of:
+    /// - `last_input_tokens` from session usage, i.e. the input token count
+    ///   the provider reported on the most recent successful call
+    /// - a fresh estimate from the current provider-context messages
+    ///
+    /// The estimate matters for cold-loaded sessions or newly selected
+    /// lower-context models: persisted history may be large even when this
+    /// process has not seen a successful provider call for the session yet.
     ///
     /// When `force` is true, compaction runs even if the threshold has not
     /// been reached yet. This mirrors pi's overflow recovery path: compact the
     /// current branch state, then retry the same prompt once.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     async fn maybe_compact(
         &self,
         session_key: &SessionKey,
@@ -1291,23 +1283,35 @@ impl Gateway {
         reason: &'static str,
         force: bool,
     ) -> Result<bool> {
-        let input_tokens = self
+        let all_messages = self.messages(session_key);
+        let previous_compaction = self.get_compaction(session_key);
+        let context_messages = match &previous_compaction {
+            Some((state, msg_count_before)) => {
+                compaction::build_provider_context(&all_messages, Some(state), *msg_count_before)
+            }
+            None => all_messages.clone(),
+        };
+
+        let last_input_tokens = self
             .session_usage
             .lock()
             .expect("session_usage mutex poisoned")
             .get(session_key)
             .map_or(0, |u| u.last_input_tokens);
+        let estimated_input_tokens = compaction::estimate_messages_tokens(&context_messages);
+        let effective_input_tokens = last_input_tokens.max(estimated_input_tokens);
         let reserve_tokens = compaction::reserve_tokens(context_limit);
+        let input_budget_tokens =
+            u32::try_from(context_limit.saturating_sub(reserve_tokens)).unwrap_or(u32::MAX);
 
-        if !force && !compaction::should_compact(input_tokens, context_limit) {
+        if !force && !compaction::should_compact(effective_input_tokens, context_limit) {
             return Ok(false);
         }
 
         // If we already have a compaction state and no new messages have been
         // added since, there's nothing to re-compact.
-        let previous_compaction = self.get_compaction(session_key);
         if let Some((_, msg_count_at_compaction)) = &previous_compaction {
-            let current_count = self.messages(session_key).len();
+            let current_count = all_messages.len();
             if current_count <= *msg_count_at_compaction {
                 return Ok(false);
             }
@@ -1315,49 +1319,135 @@ impl Gateway {
 
         let _ = event_tx.send(TurnEvent::Compacting).await;
 
-        let all_messages = self.messages(session_key);
         let msg_count = all_messages.len();
-
-        let previous_state = previous_compaction.as_ref().map(|(state, _)| state);
+        let tool_defs = self.tool_defs_for_session(session_key);
+        let mut previous_state = previous_compaction.map(|(state, _)| state);
+        let mut recent_context_target = compaction::DEFAULT_RECENT_CONTEXT_TARGET;
 
         info!(
             session = %session_key,
             reason,
             force,
-            input_tokens,
+            last_input_tokens,
+            estimated_input_tokens,
+            effective_input_tokens,
             context_limit,
             reserve_tokens,
             message_count = msg_count,
+            input_budget_tokens,
             is_iterative = previous_state.is_some(),
             "compaction triggered"
         );
 
-        match compaction::compact(&all_messages, provider, system_prompt, previous_state).await {
-            Ok(state) => {
-                let cut_point = state.messages_at_compaction.unwrap_or(msg_count);
-                info!(
-                    session = %session_key,
-                    reason,
-                    force,
-                    summary_len = state.summary.len(),
-                    compaction_count = state.compaction_count,
-                    files_tracked = state.files_touched.len(),
-                    cut_point,
-                    "session compacted"
-                );
-                self.set_compaction(session_key, state, cut_point);
-                Ok(true)
+        for pass in 0..MAX_COMPACTION_PASSES {
+            match compaction::compact(
+                &all_messages,
+                provider,
+                system_prompt,
+                previous_state.as_ref(),
+                recent_context_target,
+            )
+            .await
+            {
+                Ok(state) => {
+                    let cut_point = state.messages_at_compaction.unwrap_or(msg_count);
+                    let provider_context =
+                        compaction::build_provider_context(&all_messages, Some(&state), cut_point);
+                    let request_metrics = estimate_provider_request_metrics(
+                        system_prompt,
+                        &provider_context,
+                        &tool_defs,
+                    );
+                    let estimated_request_tokens =
+                        estimate_tokens_from_json_bytes(request_metrics.estimated_json_bytes);
+
+                    info!(
+                        session = %session_key,
+                        reason,
+                        force,
+                        pass,
+                        summary_len = state.summary.len(),
+                        compaction_count = state.compaction_count,
+                        files_tracked = state.files_touched.len(),
+                        cut_point,
+                        recent_context_target,
+                        provider_message_count = provider_context.len(),
+                        estimated_request_tokens,
+                        request_estimated_bytes = request_metrics.estimated_json_bytes,
+                        request_message_chars = request_metrics.message_chars,
+                        request_system_chars = request_metrics.system_chars,
+                        request_tool_schema_bytes = request_metrics.tool_schema_bytes,
+                        "session compacted"
+                    );
+
+                    self.set_compaction(session_key, state.clone(), cut_point);
+
+                    if estimated_request_tokens <= input_budget_tokens {
+                        return Ok(true);
+                    }
+
+                    if pass + 1 >= MAX_COMPACTION_PASSES {
+                        warn!(
+                            session = %session_key,
+                            reason,
+                            force,
+                            estimated_request_tokens,
+                            input_budget_tokens,
+                            "compaction exhausted without fitting request budget"
+                        );
+                        return Ok(true);
+                    }
+
+                    let next_target = shrink_recent_context_target(
+                        recent_context_target,
+                        estimated_request_tokens,
+                        input_budget_tokens,
+                    );
+
+                    if next_target >= recent_context_target {
+                        warn!(
+                            session = %session_key,
+                            reason,
+                            force,
+                            estimated_request_tokens,
+                            input_budget_tokens,
+                            recent_context_target,
+                            "compaction target could not be reduced further"
+                        );
+                        return Ok(true);
+                    }
+
+                    previous_state = Some(state);
+                    recent_context_target = next_target;
+                }
+                Err(e) => {
+                    warn!(
+                        session = %session_key,
+                        reason,
+                        force,
+                        error = %e,
+                        "compaction failed, continuing with full context"
+                    );
+                    return Ok(false);
+                }
             }
-            Err(e) => {
-                warn!(
-                    session = %session_key,
-                    reason,
-                    force,
-                    error = %e,
-                    "compaction failed, continuing with full context"
-                );
-                Ok(false)
-            }
+        }
+
+        Ok(false)
+    }
+
+    fn tool_defs_for_session(&self, session_key: &SessionKey) -> Vec<ToolDef> {
+        let tool_defs = self.executor.tools();
+        if matches!(session_key.kind, SessionKind::Cron(_)) {
+            tool_defs
+                .into_iter()
+                .filter(|t| t.name != "signal_send")
+                .filter(|t| t.name != "signal_react")
+                .filter(|t| t.name != "signal_reply")
+                .filter(|t| t.name != "cron_trigger")
+                .collect()
+        } else {
+            tool_defs
         }
     }
 
@@ -2350,6 +2440,8 @@ const MAX_EARLY_STREAM_RETRIES: u32 = 2;
 const EARLY_STREAM_RETRY_BASE_BACKOFF_MS: u64 = 200;
 const MAX_EARLY_NON_STREAM_RETRIES: u32 = 3;
 const EARLY_NON_STREAM_RETRY_BASE_BACKOFF_MS: u64 = 200;
+const MAX_COMPACTION_PASSES: u32 = 4;
+const MIN_RECENT_CONTEXT_TARGET_TOKENS: u32 = 2_000;
 
 fn early_stream_retry_backoff(attempt: u32) -> Duration {
     Duration::from_millis(
@@ -2365,6 +2457,28 @@ fn early_non_stream_retry_backoff(attempt: u32) -> Duration {
 
 fn duration_to_millis_u64(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn estimate_tokens_from_json_bytes(bytes: usize) -> u32 {
+    let tokens = bytes / 4;
+    u32::try_from(tokens).unwrap_or(u32::MAX)
+}
+
+fn shrink_recent_context_target(
+    current_target: u32,
+    estimated_request_tokens: u32,
+    input_budget_tokens: u32,
+) -> u32 {
+    if estimated_request_tokens <= input_budget_tokens || current_target == 0 {
+        return current_target;
+    }
+
+    let scaled = current_target
+        .saturating_mul(input_budget_tokens)
+        .checked_div(estimated_request_tokens)
+        .unwrap_or(0);
+    let reduced = scaled.min(current_target.saturating_sub(1));
+    reduced.max(MIN_RECENT_CONTEXT_TARGET_TOKENS)
 }
 
 fn is_transient_transport_error(error: &anyhow::Error) -> bool {
@@ -5165,6 +5279,64 @@ models = ["gemma-4-31B-it-UD-Q8_K_XL.gguf"]
             gateway.get_compaction(&session_key).is_some(),
             "compaction state should be persisted"
         );
+    }
+
+    #[tokio::test]
+    async fn pre_turn_compaction_uses_estimated_history_when_usage_missing() {
+        let workspace = test_workspace();
+        let provider: Arc<dyn Provider> =
+            Arc::new(FakeProvider::with_model("ok", "test-model", 32_000));
+        let executor = Arc::new(DefaultExecutor::new());
+        let gateway = Arc::new(
+            Gateway::new(
+                shared_config(test_config()),
+                workspace.path().to_path_buf(),
+                registry(provider),
+                executor,
+                None,
+                None,
+            )
+            .unwrap(),
+        );
+
+        let session_key = gateway.default_session_key();
+        let large_text = "x".repeat(20_000);
+        gateway.append_message(&session_key, Message::user().with_text(&large_text));
+        gateway.append_message(&session_key, Message::assistant().with_text(&large_text));
+        gateway.append_message(&session_key, Message::user().with_text(&large_text));
+        gateway.append_message(&session_key, Message::assistant().with_text(&large_text));
+
+        assert_eq!(gateway.session_usage(&session_key).last_input_tokens, 0);
+
+        let (event_tx, mut event_rx) = mpsc::channel(128);
+        gateway
+            .run_turn_with_trust(
+                &session_key,
+                "second message",
+                TrustLevel::Full,
+                Some("alice"),
+                None,
+                event_tx,
+            )
+            .await
+            .unwrap();
+
+        let mut saw_compacting = false;
+        let mut saw_done = false;
+        while let Ok(event) = event_rx.try_recv() {
+            match event {
+                TurnEvent::Compacting => saw_compacting = true,
+                TurnEvent::Done(_) => saw_done = true,
+                _ => {}
+            }
+        }
+
+        assert!(
+            saw_compacting,
+            "should compact based on estimated history even without cached usage"
+        );
+        assert!(saw_done, "turn should still complete after compaction");
+        assert!(gateway.get_compaction(&session_key).is_some());
     }
 
     #[tokio::test]

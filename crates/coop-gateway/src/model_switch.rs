@@ -189,6 +189,7 @@ impl Gateway {
             plan.current_provider,
             &system_prompt,
             previous_state,
+            compaction::DEFAULT_RECENT_CONTEXT_TARGET,
         )
         .await?;
         let cut_point = state.messages_at_compaction.unwrap_or(all_messages.len());
