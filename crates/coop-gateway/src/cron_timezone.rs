@@ -118,6 +118,7 @@ mod tests {
         let users = vec![UserConfig {
             name: "alice".to_owned(),
             trust: TrustLevel::Full,
+            model: None,
             r#match: vec![],
             timezone: Some("America/Chicago".to_owned()),
             sandbox: None,
@@ -143,6 +144,7 @@ mod tests {
         let users = vec![UserConfig {
             name: "alice".to_owned(),
             trust: TrustLevel::Full,
+            model: None,
             r#match: vec![],
             timezone: Some("America/Chicago".to_owned()),
             sandbox: None,
@@ -157,6 +159,7 @@ mod tests {
         let user = UserConfig {
             name: "alice".to_owned(),
             trust: TrustLevel::Full,
+            model: None,
             r#match: vec![],
             timezone: None,
             sandbox: None,
@@ -184,6 +187,7 @@ mod tests {
         let users = vec![UserConfig {
             name: "alice".to_owned(),
             trust: TrustLevel::Full,
+            model: None,
             r#match: vec![],
             timezone: None,
             sandbox: None,

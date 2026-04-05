@@ -188,6 +188,7 @@ workspace = "./workspace"
 [[users]]
 name = "{user_name}"
 trust = "full"
+# model = "anthropic/{model_id}"  # Optional per-user default; /model still overrides it
 match = ["terminal:default"]
 
 [provider]

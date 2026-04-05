@@ -78,6 +78,8 @@ pub(crate) struct UserConfig {
     pub name: String,
     pub trust: TrustLevel,
     #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
     pub r#match: Vec<String>,
     #[serde(default)]
     pub timezone: Option<String>,
@@ -920,6 +922,7 @@ workspace = "./workspaces/default"
 [[users]]
 name = "alice"
 trust = "full"
+model = "gpt-5-codex"
 match = ["terminal:default"]
 
 [[users]]
@@ -937,6 +940,7 @@ name = "anthropic"
         assert_eq!(config.agent.id, "reid");
         assert_eq!(config.users.len(), 2);
         assert_eq!(config.users[0].trust, TrustLevel::Full);
+        assert_eq!(config.users[0].model.as_deref(), Some("gpt-5-codex"));
         assert_eq!(config.users[1].trust, TrustLevel::Inner);
         assert_eq!(
             config.channels.signal.unwrap().db_path,
@@ -1004,6 +1008,23 @@ match = ["signal:alice-uuid"]
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.users.len(), 1);
         assert_eq!(config.users[0].timezone.as_deref(), Some("America/Chicago"));
+    }
+
+    #[test]
+    fn parse_config_with_user_model() {
+        let toml_str = r#"
+[agent]
+id = "coop"
+model = "anthropic/claude-sonnet-4-20250514"
+
+[[users]]
+name = "alice"
+trust = "full"
+model = "gpt-5-codex"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.users.len(), 1);
+        assert_eq!(config.users[0].model.as_deref(), Some("gpt-5-codex"));
     }
 
     #[test]

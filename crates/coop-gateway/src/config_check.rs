@@ -6,7 +6,8 @@ use coop_core::prompt::{PromptBuilder, WorkspaceIndex};
 
 use crate::config::{Config, ProviderConfig};
 use crate::model_catalog::{
-    normalize_model_key, provider_model_candidates, resolve_default_main_model,
+    normalize_model_key, provider_model_candidates, resolve_available_model,
+    resolve_default_main_model,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1080,6 +1081,26 @@ fn check_users(report: &mut CheckReport, config: &Config) {
     }
 
     for user in &config.users {
+        if let Some(model) = &user.model {
+            let resolved = resolve_available_model(config, model);
+            report.push(CheckResult {
+                name: "users_models",
+                severity: Severity::Error,
+                passed: resolved.is_some(),
+                message: if let Some(resolved) = resolved {
+                    format!(
+                        "user '{}' model '{}' resolved via provider '{}'",
+                        user.name, resolved.model.id, resolved.provider.name
+                    )
+                } else {
+                    format!(
+                        "user '{}' model '{}' must appear in one configured provider's model list or built-in catalog",
+                        user.name, model
+                    )
+                },
+            });
+        }
+
         match crate::cron_timezone::resolve_user_timezone(user) {
             Ok(parsed) => report.push(CheckResult {
                 name: "users_timezones",
@@ -1680,6 +1701,60 @@ mod tests {
             .unwrap();
         assert!(!duplicate_check.passed);
         assert!(duplicate_check.message.contains("gpt-5-codex"));
+    }
+
+    #[test]
+    fn test_user_model_must_match_available_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        let config_path = dir.path().join("coop.toml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "[agent]\nid = \"test\"\nmodel = \"gpt-5-mini\"\nworkspace = \"{}\"\n\n[provider]\nname = \"openai\"\n\n[[users]]\nname = \"alice\"\ntrust = \"full\"\nmodel = \"gpt-5-codex\"\n",
+                workspace.display()
+            ),
+        )
+        .unwrap();
+
+        let report = validate_config(&config_path, dir.path());
+        let model_check = report
+            .results
+            .iter()
+            .find(|r| r.name == "users_models")
+            .unwrap();
+        assert!(model_check.passed);
+        assert!(model_check.message.contains("alice"));
+        assert!(model_check.message.contains("gpt-5-codex"));
+    }
+
+    #[test]
+    fn test_user_model_rejects_unknown_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        let config_path = dir.path().join("coop.toml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "[agent]\nid = \"test\"\nmodel = \"gpt-5-mini\"\nworkspace = \"{}\"\n\n[provider]\nname = \"openai\"\n\n[[users]]\nname = \"alice\"\ntrust = \"full\"\nmodel = \"missing-model\"\n",
+                workspace.display()
+            ),
+        )
+        .unwrap();
+
+        let report = validate_config(&config_path, dir.path());
+        let model_check = report
+            .results
+            .iter()
+            .find(|r| r.name == "users_models")
+            .unwrap();
+        assert!(!model_check.passed);
+        assert!(model_check.message.contains("alice"));
+        assert!(model_check.message.contains("missing-model"));
     }
 
     #[test]

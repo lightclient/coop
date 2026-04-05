@@ -191,6 +191,7 @@ workspace = "./workspace"
 [[users]]
 name = "{user_name}"
 trust = "full"
+# model = "{agent_model}"         # optional per-user default; /model still overrides it
 match = ["terminal:default"]
 
 {provider_block}

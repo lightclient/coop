@@ -66,7 +66,7 @@ fn format_status(gateway: &Gateway, session_key: &SessionKey, user_name: Option<
 
 fn format_models(gateway: &Gateway, user_name: Option<&str>) -> String {
     let current = gateway.model_name_for_user(user_name);
-    let default_model = gateway.default_model_name();
+    let default_model = gateway.configured_model_name_for_user(user_name);
     let mut lines = vec!["Available models:".to_owned()];
 
     for model in gateway.available_main_models() {

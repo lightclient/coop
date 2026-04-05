@@ -1043,6 +1043,7 @@ mod tests {
         let alice_user = UserConfig {
             name: "alice".to_owned(),
             trust: TrustLevel::Full,
+            model: None,
             r#match: vec!["terminal:default".to_owned()],
             timezone: None,
             sandbox: None,
@@ -1131,6 +1132,7 @@ mod tests {
         let alice = [UserConfig {
             name: "alice".to_owned(),
             trust: TrustLevel::Full,
+            model: None,
             r#match: vec![],
             timezone: None,
             sandbox: None,
@@ -2009,6 +2011,7 @@ mod tests {
         let users = [UserConfig {
             name: "alice".to_owned(),
             trust: TrustLevel::Full,
+            model: None,
             r#match: vec!["signal:alice-uuid".to_owned()],
             timezone: None,
             sandbox: None,
@@ -2045,6 +2048,7 @@ mod tests {
         let users = [UserConfig {
             name: "alice".to_owned(),
             trust: TrustLevel::Full,
+            model: None,
             r#match: vec![
                 "signal:alice-uuid".to_owned(),
                 "signal:group:team-chat".to_owned(),
@@ -2088,6 +2092,7 @@ mod tests {
         let users = [UserConfig {
             name: "alice".to_owned(),
             trust: TrustLevel::Full,
+            model: None,
             r#match: vec![
                 "terminal:default".to_owned(),
                 "signal:alice-uuid".to_owned(),
@@ -2128,6 +2133,7 @@ mod tests {
         let users = [UserConfig {
             name: "alice".to_owned(),
             trust: TrustLevel::Full,
+            model: None,
             r#match: vec!["signal:alice-uuid".to_owned()],
             timezone: None,
             sandbox: None,
@@ -2170,6 +2176,7 @@ mod tests {
         let users = [UserConfig {
             name: "alice".to_owned(),
             trust: TrustLevel::Full,
+            model: None,
             r#match: vec!["signal:alice-uuid".to_owned()],
             timezone: None,
             sandbox: None,
@@ -2205,6 +2212,7 @@ mod tests {
         let users = [UserConfig {
             name: "alice".to_owned(),
             trust: TrustLevel::Full,
+            model: None,
             r#match: vec![
                 "signal:alice-uuid".to_owned(),
                 "signal:group:team-chat".to_owned(),

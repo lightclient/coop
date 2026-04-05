@@ -28,7 +28,7 @@ Changes to these fields take effect immediately (hot-reload):
 
 - `agent.model` — switch models on the fly
 - `provider.models` — update the selectable model list in legacy single-provider configs
-- `users` — add/remove users, change trust levels or match patterns
+- `users` — add/remove users, change trust levels, per-user default models, or match patterns
 - `cron` — add/remove/edit scheduled tasks
 - `memory.prompt_index` — toggle prompt index, change limits
 - `memory.auto_capture` — toggle post-turn extraction and message threshold
@@ -65,6 +65,7 @@ workspace = "./workspaces/default"             # path to workspace dir (restart-
 [[users]]
 name = "alice"
 trust = "owner"
+model = "gpt-5-codex"            # optional per-user default; /model still overrides it
 timezone = "America/Chicago"       # optional: defaults to the local system timezone when omitted
 match = ["terminal:default", "signal:alice-uuid"]
 

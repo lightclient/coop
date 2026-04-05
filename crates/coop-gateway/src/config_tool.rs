@@ -376,6 +376,7 @@ mod tests {
         UserConfig {
             name: "alice".to_owned(),
             trust: TrustLevel::Full,
+            model: None,
             r#match: vec!["signal:alice-uuid".to_owned()],
             timezone: None,
             sandbox: None,
@@ -386,6 +387,7 @@ mod tests {
         UserConfig {
             name: "bob".to_owned(),
             trust: TrustLevel::Inner,
+            model: None,
             r#match: vec!["signal:bob-uuid".to_owned()],
             timezone: None,
             sandbox: None,

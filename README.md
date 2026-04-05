@@ -66,7 +66,8 @@ coop attach
 
 Inside the TUI, use `/status` to inspect the current session, `/models` to list
 available main models, and `/model <id>` to switch the current user's main
-model.
+model. Runtime selections override that user's configured default and persist
+in the workspace.
 
 The gateway install step persists the resolved runtime environment (including
 API key variables) in a per-agent env file with mode `0600`, so restarts and
@@ -124,6 +125,7 @@ workspace = "./workspaces/default"   # Path to workspace directory
 [[users]]
 name = "alice"
 trust = "full"
+model = "gpt-5-codex"             # Optional per-user default; /model can still override it
 match = ["terminal:default", "signal:alice-uuid"]
 
 [[users]]
@@ -344,6 +346,7 @@ The sender UUID in the trace is what goes in your config:
 [[users]]
 name = "alice"
 trust = "full"
+model = "gpt-5-codex"               # Optional: per-user default; /model still overrides it
 timezone = "America/Chicago"         # Optional: defaults to the local system timezone when omitted
 match = ["terminal:default", "signal:<your-uuid>"]
 ```

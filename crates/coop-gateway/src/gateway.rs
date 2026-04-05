@@ -17,7 +17,7 @@ use uuid::Uuid;
 
 use crate::compaction::{self, CompactionState};
 use crate::compaction_store::CompactionStore;
-use crate::config::{CronDeliveryMode, SharedConfig, find_group_config_by_session};
+use crate::config::{Config, CronDeliveryMode, SharedConfig, find_group_config_by_session};
 use crate::cron_delivery;
 use crate::final_reply::FinalReplyPolicy;
 use crate::group_history::{GroupHistoryBuffer, GroupHistoryEntry};
@@ -1519,8 +1519,8 @@ impl Gateway {
         }
     }
 
-    pub(crate) fn default_model_name(&self) -> String {
-        self.config.load().agent.model.clone()
+    pub(crate) fn configured_model_name_for_user(&self, user_name: Option<&str>) -> String {
+        Self::configured_model_name_from_config(&self.config.load(), user_name)
     }
 
     pub(crate) fn available_main_models(&self) -> Vec<AvailableModel> {
@@ -1531,9 +1531,27 @@ impl Gateway {
         normalize_model_key(left) == normalize_model_key(right)
     }
 
+    fn configured_model_name_from_config(config: &Config, user_name: Option<&str>) -> String {
+        let default_model = config.agent.model.clone();
+        let Some(user_name) = user_name else {
+            return default_model;
+        };
+
+        let Some(user_model) = config
+            .users
+            .iter()
+            .find(|user| user.name == user_name)
+            .and_then(|user| user.model.as_deref())
+        else {
+            return default_model;
+        };
+
+        find_available_model(config, user_model).map_or(default_model, |model| model.id)
+    }
+
     pub(crate) fn model_name_for_user(&self, user_name: Option<&str>) -> String {
         let config = self.config.load();
-        let default_model = config.agent.model.clone();
+        let default_model = Self::configured_model_name_from_config(&config, user_name);
         let Some(user_name) = user_name else {
             return default_model;
         };
@@ -1617,7 +1635,7 @@ impl Gateway {
                 "unknown model '{requested_model}'. Use /models to list options. Available: {available}"
             )
         })?;
-        let default_model = config.agent.model.clone();
+        let default_model = Self::configured_model_name_from_config(&config, Some(user_name));
         drop(config);
 
         if Self::same_model(&selected.id, &default_model) {
@@ -2388,7 +2406,7 @@ model = "test-model"
             agent_id: "coop".to_owned(),
             kind: SessionKind::Cron("heartbeat".to_owned()),
         };
-        let model = gateway.default_model_name();
+        let model = gateway.configured_model_name_for_user(None);
 
         let prompt = gateway
             .build_prompt(
@@ -2428,7 +2446,7 @@ model = "test-model"
             agent_id: "coop".to_owned(),
             kind: SessionKind::Cron("morning-briefing".to_owned()),
         };
-        let model = gateway.default_model_name();
+        let model = gateway.configured_model_name_for_user(None);
 
         let prompt = gateway
             .build_prompt(
@@ -4103,7 +4121,7 @@ model = "test-model"
         let resolved = gateway.resolve_main_model(None).unwrap();
         assert_eq!(resolved.model, "new-model");
         assert_eq!(resolved.context_limit, 256_000);
-        assert_eq!(gateway.default_model_name(), "new-model");
+        assert_eq!(gateway.configured_model_name_for_user(None), "new-model");
     }
 
     #[tokio::test]
@@ -4147,6 +4165,58 @@ models = ["anthropic/claude-opus-4-0-20250514"]
             .unwrap();
         assert_eq!(selection.model, "anthropic/claude-opus-4-0-20250514");
         assert_eq!(gateway.model_name_for_user(Some("alice")), selection.model);
+        assert_eq!(gateway.model_name_for_user(Some("bob")), "test-model");
+    }
+
+    #[tokio::test]
+    async fn user_configured_model_is_used_before_runtime_override() {
+        let workspace = test_workspace();
+        let primary: Arc<dyn Provider> =
+            Arc::new(FakeProvider::with_model("hello", "test-model", 128_000));
+        let mut providers = registry(primary);
+        providers.register(
+            "anthropic/claude-opus-4-0-20250514".to_owned(),
+            Arc::new(FakeProvider::with_model(
+                "hello",
+                "anthropic/claude-opus-4-0-20250514",
+                200_000,
+            )),
+        );
+        let config: Config = toml::from_str(
+            r#"
+[agent]
+id = "coop"
+model = "test-model"
+
+[[users]]
+name = "alice"
+trust = "full"
+model = "anthropic/claude-opus-4-0-20250514"
+
+[provider]
+name = "anthropic"
+models = ["anthropic/claude-opus-4-0-20250514"]
+"#,
+        )
+        .unwrap();
+        let gateway = Gateway::new(
+            shared_config(config),
+            workspace.path().to_path_buf(),
+            providers,
+            Arc::new(DefaultExecutor::new()),
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            gateway.configured_model_name_for_user(Some("alice")),
+            "anthropic/claude-opus-4-0-20250514"
+        );
+        assert_eq!(
+            gateway.model_name_for_user(Some("alice")),
+            "anthropic/claude-opus-4-0-20250514"
+        );
         assert_eq!(gateway.model_name_for_user(Some("bob")), "test-model");
     }
 
@@ -4241,6 +4311,64 @@ models = ["anthropic/claude-opus-4-0-20250514"]
 
         assert_eq!(selection.model, "test-model");
         assert_eq!(gateway.model_name_for_user(Some("alice")), "test-model");
+    }
+
+    #[tokio::test]
+    async fn set_user_model_clearing_user_configured_default_removes_override() {
+        let workspace = test_workspace();
+        let primary: Arc<dyn Provider> =
+            Arc::new(FakeProvider::with_model("hello", "test-model", 128_000));
+        let mut providers = registry(primary);
+        providers.register(
+            "anthropic/claude-opus-4-0-20250514".to_owned(),
+            Arc::new(FakeProvider::with_model(
+                "hello",
+                "anthropic/claude-opus-4-0-20250514",
+                200_000,
+            )),
+        );
+        let config: Config = toml::from_str(
+            r#"
+[agent]
+id = "coop"
+model = "test-model"
+
+[[users]]
+name = "alice"
+trust = "full"
+model = "anthropic/claude-opus-4-0-20250514"
+
+[provider]
+name = "anthropic"
+models = ["anthropic/claude-opus-4-0-20250514"]
+"#,
+        )
+        .unwrap();
+        let gateway = Gateway::new(
+            shared_config(config),
+            workspace.path().to_path_buf(),
+            providers,
+            Arc::new(DefaultExecutor::new()),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let selection = gateway.set_user_model(Some("alice"), "test-model").unwrap();
+        assert_eq!(selection.model, "test-model");
+        assert_eq!(gateway.model_name_for_user(Some("alice")), "test-model");
+
+        let selection = gateway
+            .set_user_model(Some("alice"), "anthropic/claude-opus-4-0-20250514")
+            .unwrap();
+        assert_eq!(selection.model, "anthropic/claude-opus-4-0-20250514");
+        assert_eq!(
+            gateway.model_name_for_user(Some("alice")),
+            "anthropic/claude-opus-4-0-20250514"
+        );
+
+        let store = std::fs::read_to_string(workspace.path().join("user-models.json")).unwrap();
+        assert_eq!(store.trim(), "{}");
     }
 
     #[test]
