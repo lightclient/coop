@@ -2095,23 +2095,80 @@ impl Gateway {
         tool_defs: &[ToolDef],
         event_tx: &mpsc::Sender<TurnEvent>,
     ) -> Result<(Message, Usage)> {
-        let mut stream = provider.stream(system_prompt, messages, tool_defs).await?;
+        let mut stream = match provider.stream(system_prompt, messages, tool_defs).await {
+            Ok(stream) => stream,
+            Err(error) => {
+                if overflow_recovery::should_force_compact_after_error(&error) {
+                    return Err(error);
+                }
+
+                let model = provider.model_info();
+                warn!(
+                    provider = provider.name(),
+                    model = %model.name,
+                    error = %error,
+                    "streaming provider request failed before first output, retrying non-streaming"
+                );
+                return self
+                    .assistant_response_non_streaming(
+                        provider,
+                        system_prompt,
+                        messages,
+                        tool_defs,
+                        event_tx,
+                    )
+                    .await;
+            }
+        };
 
         let mut response = Message::assistant();
         let mut usage = Usage::default();
+        let mut saw_stream_output = false;
 
         while let Some(item) = stream.next().await {
-            let (msg_opt, usage_opt) = item?;
-
-            if let Some(msg) = msg_opt {
-                if let Some(final_usage) = usage_opt {
-                    usage += final_usage;
-                    response = msg;
-                } else {
-                    let text = msg.text();
-                    if !text.is_empty() {
-                        let _ = event_tx.send(TurnEvent::TextDelta(text)).await;
+            match item {
+                Ok((msg_opt, usage_opt)) => {
+                    if msg_opt.is_some() || usage_opt.is_some() {
+                        saw_stream_output = true;
                     }
+
+                    if let Some(msg) = msg_opt {
+                        if let Some(final_usage) = usage_opt {
+                            usage += final_usage;
+                            response = msg;
+                        } else {
+                            let text = msg.text();
+                            if !text.is_empty() {
+                                let _ = event_tx.send(TurnEvent::TextDelta(text)).await;
+                            }
+                        }
+                    }
+                }
+                Err(error) => {
+                    if !saw_stream_output {
+                        if overflow_recovery::should_force_compact_after_error(&error) {
+                            return Err(error);
+                        }
+
+                        let model = provider.model_info();
+                        warn!(
+                            provider = provider.name(),
+                            model = %model.name,
+                            error = %error,
+                            "streaming provider request failed before first output, retrying non-streaming"
+                        );
+                        return self
+                            .assistant_response_non_streaming(
+                                provider,
+                                system_prompt,
+                                messages,
+                                tool_defs,
+                                event_tx,
+                            )
+                            .await;
+                    }
+
+                    return Err(error);
                 }
             }
         }
@@ -5232,6 +5289,13 @@ models = ["anthropic/claude-opus-4-0-20250514"]
         model: ModelInfo,
     }
 
+    #[derive(Debug)]
+    struct StreamFailsBeforeFirstChunkProvider {
+        model: ModelInfo,
+        stream_calls: Arc<std::sync::atomic::AtomicUsize>,
+        complete_calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
     impl ToolUseStopWithoutToolRequestStreamingProvider {
         fn new() -> Self {
             Self {
@@ -5239,6 +5303,22 @@ models = ["anthropic/claude-opus-4-0-20250514"]
                     name: "tool-use-stop-without-tool-request".into(),
                     context_limit: 128_000,
                 },
+            }
+        }
+    }
+
+    impl StreamFailsBeforeFirstChunkProvider {
+        fn new(
+            stream_calls: Arc<std::sync::atomic::AtomicUsize>,
+            complete_calls: Arc<std::sync::atomic::AtomicUsize>,
+        ) -> Self {
+            Self {
+                model: ModelInfo {
+                    name: "stream-fails-before-first-chunk".into(),
+                    context_limit: 128_000,
+                },
+                stream_calls,
+                complete_calls,
             }
         }
     }
@@ -5324,6 +5404,114 @@ models = ["anthropic/claude-opus-4-0-20250514"]
         fn supports_streaming(&self) -> bool {
             true
         }
+    }
+
+    #[async_trait]
+    impl Provider for StreamFailsBeforeFirstChunkProvider {
+        fn name(&self) -> &'static str {
+            "stream-fails-before-first-chunk"
+        }
+
+        fn model_info(&self) -> ModelInfo {
+            self.model.clone()
+        }
+
+        async fn complete(
+            &self,
+            _system: &[String],
+            _messages: &[Message],
+            _tools: &[ToolDef],
+        ) -> Result<(Message, Usage)> {
+            self.complete_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok((
+                Message::assistant().with_text("fallback response"),
+                Usage {
+                    input_tokens: Some(12),
+                    output_tokens: Some(4),
+                    stop_reason: Some("stop".into()),
+                    ..Default::default()
+                },
+            ))
+        }
+
+        async fn stream(
+            &self,
+            _system: &[String],
+            _messages: &[Message],
+            _tools: &[ToolDef],
+        ) -> Result<ProviderStream> {
+            self.stream_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let stream = futures::stream::once(async {
+                Err(anyhow::anyhow!(
+                    "Web stream error for model 'stream-fails-before-first-chunk'.\nCause: error sending request for url (http://10.0.0.7:11434/v1/chat/completions)"
+                ))
+            });
+            Ok(Box::pin(stream))
+        }
+
+        fn supports_streaming(&self) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn retries_non_streaming_when_stream_fails_before_first_output() {
+        let workspace = test_workspace();
+        let stream_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let complete_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider: Arc<dyn Provider> = Arc::new(StreamFailsBeforeFirstChunkProvider::new(
+            Arc::clone(&stream_calls),
+            Arc::clone(&complete_calls),
+        ));
+        let gateway = Gateway::new(
+            shared_config(test_config()),
+            workspace.path().to_path_buf(),
+            registry(provider),
+            Arc::new(DefaultExecutor::new()),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let session_key = gateway.default_session_key();
+        let (event_tx, mut event_rx) = mpsc::channel(32);
+
+        gateway
+            .run_turn_with_trust(
+                &session_key,
+                "hello",
+                TrustLevel::Full,
+                Some("alice"),
+                None,
+                event_tx,
+            )
+            .await
+            .unwrap();
+
+        let messages = gateway.messages(&session_key);
+        let assistant = messages
+            .iter()
+            .rev()
+            .find(|message| message.role == Role::Assistant)
+            .expect("assistant reply present");
+        assert_eq!(assistant.text(), "fallback response");
+        assert_eq!(stream_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(complete_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        let deltas = std::iter::from_fn(|| event_rx.try_recv().ok())
+            .filter_map(|event| match event {
+                TurnEvent::TextDelta(text) => Some(text),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            deltas
+                .iter()
+                .any(|delta| delta.contains("fallback response")),
+            "expected non-streaming fallback text delta, got {deltas:?}"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
