@@ -192,27 +192,7 @@ impl MessageRouter {
                 return Ok(decision);
             }
 
-            let cmd = msg.content.trim();
-            let response = commands::handle_slash_command(
-                &self.gateway,
-                cmd,
-                &decision.session_key,
-                decision.user_name.as_deref(),
-            )
-            .unwrap_or_else(|| format!("Unknown command: {cmd}\nType /help for a list."));
-            info!(
-                session = %decision.session_key,
-                command = cmd,
-                "channel slash command handled"
-            );
-            let _ = event_tx.send(TurnEvent::TextDelta(response)).await;
-            let _ = event_tx
-                .send(TurnEvent::Done(TurnResult {
-                    messages: Vec::new(),
-                    usage: Usage::default(),
-                    hit_limit: false,
-                }))
-                .await;
+            self.handle_command(msg, &decision, &event_tx).await;
             return Ok(decision);
         }
 
@@ -272,6 +252,38 @@ impl MessageRouter {
             .instrument(span)
             .await?;
         Ok(decision)
+    }
+
+    async fn handle_command(
+        &self,
+        msg: &InboundMessage,
+        decision: &RouteDecision,
+        event_tx: &mpsc::Sender<TurnEvent>,
+    ) {
+        let cmd = msg.content.trim();
+        let response = commands::handle_slash_command(
+            &self.gateway,
+            cmd,
+            &decision.session_key,
+            decision.trust,
+            Some(&msg.channel),
+            decision.user_name.as_deref(),
+        )
+        .await
+        .unwrap_or_else(|| format!("Unknown command: {cmd}\nType /help for a list."));
+        info!(
+            session = %decision.session_key,
+            command = cmd,
+            "channel slash command handled"
+        );
+        let _ = event_tx.send(TurnEvent::TextDelta(response)).await;
+        let _ = event_tx
+            .send(TurnEvent::Done(TurnResult {
+                messages: Vec::new(),
+                usage: Usage::default(),
+                hit_limit: false,
+            }))
+            .await;
     }
 
     /// Evaluate group trigger and decide whether to respond or buffer.

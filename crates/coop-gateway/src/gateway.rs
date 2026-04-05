@@ -1,3 +1,8 @@
+#[path = "model_switch.rs"]
+mod model_switch;
+#[path = "request_metrics.rs"]
+mod request_metrics;
+
 use anyhow::{Result, bail};
 use coop_core::prompt::{PromptBuilder, SkillEntry, WorkspaceIndex, scan_skills};
 use coop_core::{
@@ -15,6 +20,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, error, info, info_span, warn};
 use uuid::Uuid;
 
+use self::request_metrics::estimate_provider_request_metrics;
 use crate::compaction::{self, CompactionState};
 use crate::compaction_store::CompactionStore;
 use crate::config::{
@@ -79,6 +85,12 @@ pub(crate) struct SessionUsage {
 pub(crate) struct ResolvedMainModel {
     pub model: String,
     pub context_limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ModelSwitchOutcome {
+    pub selection: ResolvedMainModel,
+    pub compacted_for_handoff: bool,
 }
 
 /// Re-send interval for typing indicators. Signal's client-side timeout is
@@ -1655,6 +1667,7 @@ impl Gateway {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn set_user_model(
         &self,
         user_name: Option<&str>,
@@ -1664,27 +1677,9 @@ impl Gateway {
             bail!("model selection requires a named user");
         };
 
-        let config = self.config.load();
-        let selected = find_available_model(&config, requested_model).ok_or_else(|| {
-            let available = crate::model_catalog::available_main_models(&config)
-                .into_iter()
-                .map(|model| model.id)
-                .collect::<Vec<_>>()
-                .join(", ");
-            anyhow::anyhow!(
-                "unknown model '{requested_model}'. Use /models to list options. Available: {available}"
-            )
-        })?;
-        let default_model = Self::configured_model_name_from_config(&config, Some(user_name));
-        drop(config);
-
-        if Self::same_model(&selected.id, &default_model) {
-            self.user_models.clear(user_name)?;
-            info!(user = %user_name, model = %default_model, "cleared user model override");
-        } else {
-            self.user_models.set(user_name, &selected.id)?;
-            info!(user = %user_name, model = %selected.id, "updated user model override");
-        }
+        let (selected_model, default_model) =
+            self.resolve_user_model_selection(user_name, requested_model)?;
+        self.persist_user_model_selection(user_name, &selected_model, &default_model)?;
 
         self.resolve_main_model(Some(user_name))
     }
@@ -2071,6 +2066,7 @@ impl Gateway {
 
         let streaming =
             provider.supports_streaming() && !matches!(stream_policy, StreamPolicy::Disable);
+        let request_metrics = estimate_provider_request_metrics(system_prompt, messages, tool_defs);
         let span = info_span!(
             "provider_request",
             model = %model,
@@ -2078,6 +2074,10 @@ impl Gateway {
             tool_count = tool_defs.len(),
             streaming,
             stream_policy = %stream_policy,
+            request_estimated_bytes = request_metrics.estimated_json_bytes,
+            request_system_chars = request_metrics.system_chars,
+            request_message_chars = request_metrics.message_chars,
+            request_tool_schema_bytes = request_metrics.tool_schema_bytes,
         );
 
         let (response, usage) = async {
@@ -4611,6 +4611,154 @@ models = ["anthropic/claude-opus-4-0-20250514"]
         assert_eq!(store.trim(), "{}");
     }
 
+    #[derive(Debug)]
+    struct HandoffCompactionProvider {
+        model: ModelInfo,
+        compaction_calls: Arc<Mutex<u32>>,
+    }
+
+    impl HandoffCompactionProvider {
+        fn new(
+            model_name: impl Into<String>,
+            context_limit: usize,
+            compaction_calls: Arc<Mutex<u32>>,
+        ) -> Self {
+            Self {
+                model: ModelInfo {
+                    name: model_name.into(),
+                    context_limit,
+                },
+                compaction_calls,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Provider for HandoffCompactionProvider {
+        fn name(&self) -> &'static str {
+            "handoff-compaction"
+        }
+
+        fn model_info(&self) -> ModelInfo {
+            self.model.clone()
+        }
+
+        async fn complete(
+            &self,
+            _system: &[String],
+            messages: &[Message],
+            _tools: &[ToolDef],
+        ) -> Result<(Message, Usage)> {
+            let is_compaction_call = messages
+                .last()
+                .is_some_and(|message| message.text().contains("continuation summary"));
+
+            if is_compaction_call {
+                *self.compaction_calls.lock().unwrap() += 1;
+                return Ok((
+                    Message::assistant().with_text("<summary>handoff summary</summary>"),
+                    Usage {
+                        input_tokens: Some(40_000),
+                        output_tokens: Some(200),
+                        ..Default::default()
+                    },
+                ));
+            }
+
+            Ok((Message::assistant().with_text("ok"), Usage::default()))
+        }
+
+        async fn stream(
+            &self,
+            _system: &[String],
+            _messages: &[Message],
+            _tools: &[ToolDef],
+        ) -> Result<ProviderStream> {
+            anyhow::bail!("not supported")
+        }
+    }
+
+    #[tokio::test]
+    async fn set_user_model_for_session_compacts_before_lower_context_handoff() {
+        let workspace = test_workspace();
+        let compaction_calls = Arc::new(Mutex::new(0));
+        let primary: Arc<dyn Provider> = Arc::new(HandoffCompactionProvider::new(
+            "gpt-5.4",
+            200_000,
+            Arc::clone(&compaction_calls),
+        ));
+        let mut providers = registry(primary);
+        providers.register(
+            "gemma-4-31B-it-UD-Q8_K_XL.gguf".to_owned(),
+            Arc::new(FakeProvider::with_model(
+                "ok",
+                "gemma-4-31B-it-UD-Q8_K_XL.gguf",
+                32_000,
+            )),
+        );
+        let config: Config = toml::from_str(
+            r#"
+[agent]
+id = "coop"
+model = "gpt-5.4"
+
+[[providers]]
+name = "openai"
+models = ["gpt-5.4"]
+
+[[providers]]
+name = "openai-compatible"
+base_url = "http://localhost:11434/v1"
+models = ["gemma-4-31B-it-UD-Q8_K_XL.gguf"]
+"#,
+        )
+        .unwrap();
+        let gateway = Gateway::new(
+            shared_config(config),
+            workspace.path().to_path_buf(),
+            providers,
+            Arc::new(DefaultExecutor::new()),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let session_key = gateway.default_session_key();
+        gateway.append_message(&session_key, Message::user().with_text("old user message"));
+        gateway.append_message(
+            &session_key,
+            Message::assistant().with_text("old assistant message"),
+        );
+        gateway.set_session_usage(
+            &session_key,
+            SessionUsage {
+                cumulative: Usage::default(),
+                last_input_tokens: 150_000,
+            },
+        );
+
+        let outcome = gateway
+            .set_user_model_for_session(
+                &session_key,
+                TrustLevel::Full,
+                Some("alice"),
+                Some("signal"),
+                "gemma-4-31B-it-UD-Q8_K_XL.gguf",
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.selection.model, "gemma-4-31B-it-UD-Q8_K_XL.gguf");
+        assert_eq!(outcome.selection.context_limit, 32_000);
+        assert!(outcome.compacted_for_handoff);
+        assert_eq!(*compaction_calls.lock().unwrap(), 1);
+        assert!(gateway.get_compaction(&session_key).is_some());
+        assert_eq!(
+            gateway.model_name_for_user(Some("alice")),
+            "gemma-4-31B-it-UD-Q8_K_XL.gguf"
+        );
+    }
+
     #[test]
     fn repair_dangling_tool_use_appends_synthetic_results() {
         let workspace = test_workspace();
@@ -5942,6 +6090,77 @@ models = ["anthropic/claude-opus-4-0-20250514"]
         assert!(
             trace.contains("\"stream_policy\":\"prefer\""),
             "expected stream policy trace field"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn trace_records_provider_request_size_fields() {
+        use tracing_subscriber::fmt::format::FmtSpan;
+        use tracing_subscriber::prelude::*;
+
+        let _trace_guard = trace_test_guard().await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let trace_file = dir.path().join("traces.jsonl");
+
+        let file_appender = tracing_appender::rolling::never(dir.path(), "traces.jsonl");
+        let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+
+        let jsonl_layer = tracing_subscriber::fmt::layer()
+            .json()
+            .with_writer(non_blocking)
+            .with_span_list(true)
+            .with_file(true)
+            .with_line_number(true)
+            .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
+            .with_filter(tracing_subscriber::EnvFilter::new("debug"));
+
+        let subscriber = tracing_subscriber::Registry::default().with(jsonl_layer);
+        let dispatch = tracing::dispatcher::Dispatch::new(subscriber);
+        let default_guard = tracing::dispatcher::set_default(&dispatch);
+
+        let workspace = test_workspace();
+        let provider: Arc<dyn Provider> = Arc::new(FakeProvider::new("ok"));
+        let gateway = Gateway::new(
+            shared_config(test_config()),
+            workspace.path().to_path_buf(),
+            registry(provider),
+            Arc::new(DefaultExecutor::new()),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let session_key = gateway.default_session_key();
+        let (event_tx, _event_rx) = mpsc::channel(32);
+
+        gateway
+            .run_turn_with_trust(
+                &session_key,
+                "hello",
+                TrustLevel::Full,
+                Some("alice"),
+                None,
+                event_tx,
+            )
+            .await
+            .unwrap();
+
+        drop(default_guard);
+        drop(guard);
+
+        let trace = read_trace_file_with_retry(&trace_file, "request_estimated_bytes");
+        assert!(
+            trace.contains("\"request_estimated_bytes\":"),
+            "expected request_estimated_bytes trace field"
+        );
+        assert!(
+            trace.contains("\"request_message_chars\":"),
+            "expected request_message_chars trace field"
+        );
+        assert!(
+            trace.contains("\"request_tool_schema_bytes\":"),
+            "expected request_tool_schema_bytes trace field"
         );
     }
 

@@ -980,8 +980,11 @@ async fn cmd_chat(config_path: Option<&str>, user_flag: Option<&str>) -> Result<
                                 &gateway,
                                 &input,
                                 &session_key,
+                                coop_core::TrustLevel::Full,
+                                Some("terminal:default"),
                                 Some(&tui_user),
                             )
+                            .await
                             .unwrap_or_else(|| {
                                 format!("Unknown command: {}\nType /help for a list.", input.trim())
                             });

@@ -138,7 +138,7 @@ fn find_cut_point(messages: &[Message]) -> usize {
     0
 }
 
-fn estimate_message_chars(msg: &Message) -> usize {
+pub(crate) fn estimate_message_chars(msg: &Message) -> usize {
     msg.content
         .iter()
         .map(|c| match c {
@@ -151,6 +151,16 @@ fn estimate_message_chars(msg: &Message) -> usize {
             Content::Thinking { thinking, .. } => thinking.len(),
         })
         .sum()
+}
+
+pub(crate) fn estimate_messages_chars(messages: &[Message]) -> usize {
+    messages.iter().map(estimate_message_chars).sum()
+}
+
+pub(crate) fn estimate_messages_tokens(messages: &[Message]) -> u32 {
+    let chars = estimate_messages_chars(messages);
+    let tokens = chars / (CHARS_PER_TOKEN as usize);
+    u32::try_from(tokens).unwrap_or(u32::MAX)
 }
 
 /// Extract file operations from messages by scanning tool_request content blocks.

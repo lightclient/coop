@@ -1,11 +1,14 @@
 use coop_core::SessionKey;
+use coop_core::TrustLevel;
 
 use crate::gateway::Gateway;
 
-pub(crate) fn handle_slash_command(
+pub(crate) async fn handle_slash_command(
     gateway: &Gateway,
     input: &str,
     session_key: &SessionKey,
+    trust: TrustLevel,
+    channel: Option<&str>,
     user_name: Option<&str>,
 ) -> Option<String> {
     let trimmed = input.trim();
@@ -25,7 +28,9 @@ pub(crate) fn handle_slash_command(
         }
         "/status" => Some(format_status(gateway, session_key, user_name)),
         "/models" => Some(format_models(gateway, user_name)),
-        "/model" => Some(handle_model_command(gateway, trimmed, user_name)),
+        "/model" => Some(
+            handle_model_command(gateway, trimmed, session_key, trust, channel, user_name).await,
+        ),
         "/help" | "/?" => Some(help_text().to_owned()),
         _ => None,
     }
@@ -109,7 +114,14 @@ fn format_models(gateway: &Gateway, user_name: Option<&str>) -> String {
     lines.join("\n")
 }
 
-fn handle_model_command(gateway: &Gateway, input: &str, user_name: Option<&str>) -> String {
+async fn handle_model_command(
+    gateway: &Gateway,
+    input: &str,
+    session_key: &SessionKey,
+    trust: TrustLevel,
+    channel: Option<&str>,
+    user_name: Option<&str>,
+) -> String {
     let requested = input
         .strip_prefix("/model")
         .map(str::trim)
@@ -122,11 +134,20 @@ fn handle_model_command(gateway: &Gateway, input: &str, user_name: Option<&str>)
         );
     }
 
-    match gateway.set_user_model(user_name, requested) {
-        Ok(selection) => format!(
-            "Model set to {} ✅\nContext window: {} tokens",
-            selection.model, selection.context_limit
-        ),
+    match gateway
+        .set_user_model_for_session(session_key, trust, user_name, channel, requested)
+        .await
+    {
+        Ok(outcome) => {
+            let mut response = format!(
+                "Model set to {} ✅\nContext window: {} tokens",
+                outcome.selection.model, outcome.selection.context_limit
+            );
+            if outcome.compacted_for_handoff {
+                response.push_str("\nSession compacted before handoff ✅");
+            }
+            response
+        }
         Err(error) => format!("Could not change model: {error}"),
     }
 }
