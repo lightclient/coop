@@ -3166,6 +3166,7 @@ match = ["signal:alice-uuid"]
         let users = [UserConfig {
             name: "alice".to_owned(),
             trust: TrustLevel::Full,
+            model: None,
             r#match: vec!["signal:alice-uuid".to_owned()],
             timezone: None,
             sandbox: None,

@@ -137,17 +137,22 @@ db_path = "./db/signal.db"         # path to signal-cli database (restart-requir
 
 # Providers — use [[providers]] to let /model switch across backends.
 # When a provider entry omits models, Coop falls back to a small built-in
-# catalog for anthropic, openai, and ollama. openai-compatible backends should
+# catalog for anthropic, gemini, openai, and ollama. openai-compatible backends should
 # usually set models explicitly.
 
 [[providers]]
-name = "anthropic"                 # supported: anthropic, openai, openai-compatible, ollama
+name = "anthropic"                 # supported: anthropic, gemini, openai, openai-compatible, ollama
 # models = [
 #   "anthropic/claude-sonnet-4-20250514",
 #   "anthropic/claude-opus-4-0-20250514",
 #   "anthropic/claude-haiku-3-5-20241022",
 # ]
 # api_keys = ["env:ANTHROPIC_API_KEY", "env:ANTHROPIC_API_KEY_2", "env:ANTHROPIC_API_KEY_3"]
+
+[[providers]]
+name = "gemini"
+# models = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.5-flash-lite"]
+# api_keys = ["env:GEMINI_API_KEY", "env:GEMINI_API_KEY_2"]
 
 [[providers]]
 name = "openai"
@@ -275,7 +280,7 @@ message = "run cleanup"
 ### Validation constraints
 
 - `agent.id` and `agent.model` must be non-empty
-- `provider.name` / `providers[*].name` must be one of `anthropic`, `openai`, `openai-compatible`, `ollama`
+- `provider.name` / `providers[*].name` must be one of `anthropic`, `gemini`, `openai`, `openai-compatible`, `ollama`
 - `provider.models` / `providers[*].models` must not contain empty entries
 - In multi-provider configs, model IDs must be unique across providers and `agent.model` must belong to one configured provider catalog
 - Workspace directory must exist and contain at least SOUL.md

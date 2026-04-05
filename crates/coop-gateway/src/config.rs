@@ -231,6 +231,7 @@ impl ProviderConfig {
     pub(crate) fn default_api_key_env(&self) -> Option<&'static str> {
         match self.normalized_name().as_str() {
             "anthropic" => Some("ANTHROPIC_API_KEY"),
+            "gemini" => Some("GEMINI_API_KEY"),
             "openai" => Some("OPENAI_API_KEY"),
             _ => None,
         }
@@ -1553,6 +1554,24 @@ X-Test = "1"
         assert_eq!(
             provider.effective_api_key_env().as_deref(),
             Some("ANTHROPIC_API_KEY")
+        );
+    }
+
+    #[test]
+    fn gemini_provider_uses_default_api_key_env() {
+        let provider = ProviderConfig {
+            name: "gemini".to_owned(),
+            models: Vec::new(),
+            model_context_limits: BTreeMap::new(),
+            api_keys: Vec::new(),
+            api_key_env: None,
+            base_url: None,
+            extra_headers: BTreeMap::new(),
+            refresh_token: None,
+        };
+        assert_eq!(
+            provider.effective_api_key_env().as_deref(),
+            Some("GEMINI_API_KEY")
         );
     }
 

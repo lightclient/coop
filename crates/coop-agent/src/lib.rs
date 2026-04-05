@@ -29,7 +29,10 @@ use genai_provider::GenAiProvider;
 pub fn create_provider(spec: ProviderSpec) -> Result<Arc<dyn Provider>> {
     match spec.kind {
         ProviderKind::Anthropic => Ok(Arc::new(AnthropicProvider::from_spec(&spec)?)),
-        ProviderKind::OpenAi | ProviderKind::OpenAiCompatible | ProviderKind::Ollama => {
+        ProviderKind::Gemini
+        | ProviderKind::OpenAi
+        | ProviderKind::OpenAiCompatible
+        | ProviderKind::Ollama => {
             // If the OpenAI key is a Codex OAuth JWT, use the Codex provider.
             if spec.kind == ProviderKind::OpenAi && is_codex_oauth_token(&spec) {
                 return Ok(Arc::new(CodexProvider::new(&spec)?));

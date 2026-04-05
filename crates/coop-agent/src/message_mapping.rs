@@ -73,8 +73,16 @@ pub(crate) fn map_message(provider: ProviderKind, message: &Message) -> Vec<Chat
                 }
                 tool_responses.push(ToolResponse::new(id.clone(), content));
             }
-            Content::Thinking { thinking, .. } => {
-                regular_parts.push(ContentPart::ReasoningContent(thinking.clone()));
+            Content::Thinking {
+                thinking,
+                signature,
+            } => {
+                if let Some(signature) = signature {
+                    regular_parts.push(ContentPart::ThoughtSignature(signature.clone()));
+                }
+                if !thinking.is_empty() {
+                    regular_parts.push(ContentPart::ReasoningContent(thinking.clone()));
+                }
             }
         }
     }
@@ -112,6 +120,10 @@ pub(crate) fn map_response_message(
     for part in content.parts() {
         match part {
             ContentPart::Text(text) => message.content.push(Content::Text { text: text.clone() }),
+            ContentPart::ThoughtSignature(signature) => message.content.push(Content::Thinking {
+                thinking: String::new(),
+                signature: Some(signature.clone()),
+            }),
             ContentPart::ToolCall(tool_call) => message.content.push(Content::ToolRequest {
                 id: tool_call.call_id.clone(),
                 name: tool_call.fn_name.clone(),
@@ -121,10 +133,7 @@ pub(crate) fn map_response_message(
                 thinking: reasoning.clone(),
                 signature: None,
             }),
-            ContentPart::Binary(_)
-            | ContentPart::ToolResponse(_)
-            | ContentPart::ThoughtSignature(_)
-            | ContentPart::Custom(_) => {}
+            ContentPart::Binary(_) | ContentPart::ToolResponse(_) | ContentPart::Custom(_) => {}
         }
     }
 
@@ -183,5 +192,45 @@ mod tests {
         let mapped = map_tool(&tool);
         assert_eq!(mapped.name.to_string(), "read_file");
         assert!(mapped.schema.is_some());
+    }
+
+    #[test]
+    fn map_response_message_preserves_thought_signatures() {
+        let content = MessageContent::from_parts(vec![
+            ContentPart::ThoughtSignature("sig_1".into()),
+            ContentPart::ToolCall(ToolCall {
+                call_id: "call_1".into(),
+                fn_name: "bash".into(),
+                fn_arguments: json!({"command": "pwd"}),
+                thought_signatures: Some(vec!["sig_1".into()]),
+            }),
+        ]);
+
+        let message = map_response_message(&content, None);
+        assert!(matches!(
+            message.content.first(),
+            Some(Content::Thinking {
+                signature: Some(signature),
+                ..
+            }) if signature == "sig_1"
+        ));
+        assert_eq!(message.tool_requests()[0].name, "bash");
+    }
+
+    #[test]
+    fn map_message_emits_thought_signatures() {
+        let message = Message::assistant()
+            .with_content(Content::Thinking {
+                thinking: String::new(),
+                signature: Some("sig_1".into()),
+            })
+            .with_tool_request("call_1", "bash", json!({"command": "pwd"}));
+
+        let mapped = map_message(ProviderKind::Gemini, &message);
+        let parts = mapped[0].content.parts();
+        assert!(
+            matches!(parts[0], ContentPart::ThoughtSignature(ref signature) if signature == "sig_1")
+        );
+        assert!(matches!(parts[1], ContentPart::ToolCall(_)));
     }
 }

@@ -40,6 +40,9 @@ fn endpoint_for_spec(spec: &ProviderSpec) -> Endpoint {
 
     match spec.kind {
         ProviderKind::Anthropic => Endpoint::from_static("https://api.anthropic.com/"),
+        ProviderKind::Gemini => {
+            Endpoint::from_static("https://generativelanguage.googleapis.com/v1beta/")
+        }
         ProviderKind::OpenAi | ProviderKind::OpenAiCompatible => {
             Endpoint::from_static("https://api.openai.com/v1/")
         }
@@ -52,6 +55,7 @@ fn target_model(kind: ProviderKind, model: &str) -> ModelIden {
         ProviderKind::Anthropic => {
             ModelIden::new(AdapterKind::Anthropic, strip_prefix(model, "anthropic/"))
         }
+        ProviderKind::Gemini => ModelIden::new(AdapterKind::Gemini, strip_prefix(model, "gemini/")),
         ProviderKind::OpenAi => {
             let (adapter_kind, model_name) = openai_like_model(model);
             ModelIden::new(adapter_kind, model_name)
@@ -137,6 +141,14 @@ mod tests {
         let spec = ProviderSpec::new(ProviderKind::OpenAi, "gpt-5-codex");
         let resolved = ResolvedModel::from_spec(&spec, &spec.model, AuthData::None);
         assert_eq!(resolved.target_model.adapter_kind, AdapterKind::OpenAIResp);
+    }
+
+    #[test]
+    fn gemini_prefix_is_stripped() {
+        let spec = ProviderSpec::new(ProviderKind::Gemini, "gemini/gemini-2.5-flash");
+        let resolved = ResolvedModel::from_spec(&spec, &spec.model, AuthData::None);
+        assert_eq!(resolved.model_info_name, "gemini-2.5-flash");
+        assert_eq!(resolved.target_model.adapter_kind, AdapterKind::Gemini);
     }
 
     #[test]

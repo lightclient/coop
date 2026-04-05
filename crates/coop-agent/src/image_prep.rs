@@ -41,12 +41,13 @@ pub(crate) fn prepare_image_for_provider(
 ) -> Option<PreparedImage> {
     match kind {
         ProviderKind::Anthropic => prepare_anthropic_image(data, mime_type),
-        ProviderKind::OpenAi | ProviderKind::OpenAiCompatible | ProviderKind::Ollama => {
-            Some(PreparedImage {
-                data: data.to_owned(),
-                mime_type: mime_type.to_owned(),
-            })
-        }
+        ProviderKind::Gemini
+        | ProviderKind::OpenAi
+        | ProviderKind::OpenAiCompatible
+        | ProviderKind::Ollama => Some(PreparedImage {
+            data: data.to_owned(),
+            mime_type: mime_type.to_owned(),
+        }),
     }
 }
 

@@ -174,6 +174,9 @@ fn resolution_base_url(
         .and_then(normalize_base_url)
         .or_else(|| match kind {
             ProviderKind::Anthropic => Some("https://api.anthropic.com/".to_owned()),
+            ProviderKind::Gemini => {
+                Some("https://generativelanguage.googleapis.com/v1beta/".to_owned())
+            }
             ProviderKind::OpenAi => Some("https://api.openai.com/v1/".to_owned()),
             ProviderKind::OpenAiCompatible => None,
             ProviderKind::Ollama => Some("http://localhost:11434/v1/".to_owned()),
@@ -190,6 +193,7 @@ fn effective_provider(
     }
     match kind {
         ProviderKind::Anthropic => Some("anthropic"),
+        ProviderKind::Gemini => Some("gemini"),
         ProviderKind::OpenAi => Some("openai"),
         ProviderKind::OpenAiCompatible => {
             base_url.and_then(models_dev::infer_provider_from_base_url)

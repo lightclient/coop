@@ -6,6 +6,7 @@ use crate::resolve_key_refs;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderKind {
     Anthropic,
+    Gemini,
     OpenAi,
     OpenAiCompatible,
     Ollama,
@@ -15,6 +16,7 @@ impl ProviderKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Anthropic => "anthropic",
+            Self::Gemini => "gemini",
             Self::OpenAi => "openai",
             Self::OpenAiCompatible => "openai-compatible",
             Self::Ollama => "ollama",
@@ -24,6 +26,7 @@ impl ProviderKind {
     pub fn default_api_key_env(self) -> Option<&'static str> {
         match self {
             Self::Anthropic => Some("ANTHROPIC_API_KEY"),
+            Self::Gemini => Some("GEMINI_API_KEY"),
             Self::OpenAi => Some("OPENAI_API_KEY"),
             Self::OpenAiCompatible | Self::Ollama => None,
         }
@@ -32,6 +35,7 @@ impl ProviderKind {
     pub fn from_name(name: &str) -> Result<Self> {
         match name.trim().to_ascii_lowercase().as_str() {
             "anthropic" => Ok(Self::Anthropic),
+            "gemini" => Ok(Self::Gemini),
             "openai" => Ok(Self::OpenAi),
             "openai-compatible" => Ok(Self::OpenAiCompatible),
             "ollama" => Ok(Self::Ollama),
@@ -137,7 +141,13 @@ impl ProviderSpec {
 
 fn normalize_model_key(model: &str) -> String {
     let trimmed = model.trim();
-    for prefix in ["anthropic/", "openai/", "ollama/", "openai-compatible/"] {
+    for prefix in [
+        "anthropic/",
+        "gemini/",
+        "openai/",
+        "ollama/",
+        "openai-compatible/",
+    ] {
         if let Some(stripped) = trimmed.strip_prefix(prefix) {
             return stripped.to_owned();
         }
@@ -180,6 +190,12 @@ mod tests {
     fn anthropic_uses_default_api_key_env() {
         let spec = ProviderSpec::new(ProviderKind::Anthropic, "claude-sonnet-4-20250514");
         assert_eq!(spec.effective_api_key_env(), Some("ANTHROPIC_API_KEY"));
+    }
+
+    #[test]
+    fn gemini_uses_default_api_key_env() {
+        let spec = ProviderSpec::new(ProviderKind::Gemini, "gemini-2.5-flash");
+        assert_eq!(spec.effective_api_key_env(), Some("GEMINI_API_KEY"));
     }
 
     #[test]

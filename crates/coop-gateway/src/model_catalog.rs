@@ -50,12 +50,33 @@ pub(crate) const OPENAI_MODELS: &[ModelCatalogEntry] = &[
     },
 ];
 
+pub(crate) const GEMINI_MODELS: &[ModelCatalogEntry] = &[
+    ModelCatalogEntry {
+        id: "gemini-2.5-flash",
+        description: "fast, recommended",
+    },
+    ModelCatalogEntry {
+        id: "gemini-2.5-pro",
+        description: "strong reasoning",
+    },
+    ModelCatalogEntry {
+        id: "gemini-2.5-flash-lite",
+        description: "cheapest, fastest",
+    },
+];
+
 pub(crate) const OLLAMA_MODELS: &[ModelCatalogEntry] = &[ModelCatalogEntry {
     id: "llama3.2",
     description: "default local model",
 }];
 
-const PREFIXES: &[&str] = &["anthropic/", "openai/", "ollama/", "openai-compatible/"];
+const PREFIXES: &[&str] = &[
+    "anthropic/",
+    "gemini/",
+    "openai/",
+    "ollama/",
+    "openai-compatible/",
+];
 
 pub(crate) fn normalize_model_key(model: &str) -> String {
     let trimmed = model.trim();
@@ -70,6 +91,7 @@ pub(crate) fn normalize_model_key(model: &str) -> String {
 pub(crate) fn builtin_models(provider_name: &str) -> &'static [ModelCatalogEntry] {
     match provider_name.trim().to_ascii_lowercase().as_str() {
         "anthropic" => ANTHROPIC_MODELS,
+        "gemini" => GEMINI_MODELS,
         "openai" => OPENAI_MODELS,
         "ollama" => OLLAMA_MODELS,
         _ => &[],
@@ -212,9 +234,33 @@ mod tests {
         );
         assert_eq!(normalize_model_key("openai/gpt-5-mini"), "gpt-5-mini");
         assert_eq!(
+            normalize_model_key("gemini/gemini-2.5-flash"),
+            "gemini-2.5-flash"
+        );
+        assert_eq!(
             normalize_model_key("openai-compatible/meta-llama/Llama-3.3-70B-Instruct"),
             "meta-llama/Llama-3.3-70B-Instruct"
         );
+    }
+
+    #[test]
+    fn available_main_models_includes_gemini_builtins() {
+        let cfg = config(
+            r#"
+[agent]
+id = "test"
+model = "gemini-2.5-flash"
+
+[provider]
+name = "gemini"
+"#,
+        );
+
+        let models = available_main_models(&cfg);
+        assert_eq!(models.len(), 3);
+        assert_eq!(models[0].id, "gemini-2.5-flash");
+        assert_eq!(models[1].id, "gemini-2.5-pro");
+        assert_eq!(models[2].id, "gemini-2.5-flash-lite");
     }
 
     #[test]

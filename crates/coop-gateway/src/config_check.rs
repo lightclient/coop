@@ -344,7 +344,7 @@ fn check_provider_entry(report: &mut CheckReport, provider: &ProviderConfig, pat
     let provider_name = provider.normalized_name();
     let provider_ok = matches!(
         provider_name.as_str(),
-        "anthropic" | "openai" | "openai-compatible" | "ollama"
+        "anthropic" | "gemini" | "openai" | "openai-compatible" | "ollama"
     );
     report.push(CheckResult {
         name: "provider_known",
@@ -354,7 +354,7 @@ fn check_provider_entry(report: &mut CheckReport, provider: &ProviderConfig, pat
             format!("{path}.name: {}", provider.name)
         } else {
             format!(
-                "{path}.name '{}' is unsupported (supported: anthropic, openai, openai-compatible, ollama)",
+                "{path}.name '{}' is unsupported (supported: anthropic, gemini, openai, openai-compatible, ollama)",
                 provider.name
             )
         },
@@ -525,8 +525,8 @@ fn check_provider_entry(report: &mut CheckReport, provider: &ProviderConfig, pat
     }
 
     let effective_env = provider.effective_api_key_env();
-    let key_required =
-        matches!(provider_name.as_str(), "anthropic" | "openai") || provider.api_key_env.is_some();
+    let key_required = matches!(provider_name.as_str(), "anthropic" | "gemini" | "openai")
+        || provider.api_key_env.is_some();
 
     if let Some(env_name) = effective_env {
         let api_key_ok = std::env::var(&env_name).is_ok();
@@ -1665,6 +1665,32 @@ mod tests {
             .unwrap();
         assert!(!provider_check.passed);
         assert!(provider_check.message.contains("invalid-provider"));
+    }
+
+    #[test]
+    fn test_gemini_provider_is_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(workspace.join("SOUL.md"), "test soul").unwrap();
+
+        let config_path = dir.path().join("coop.toml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "[agent]\nid = \"test\"\nmodel = \"gemini-2.5-flash\"\nworkspace = \"{}\"\n\n[provider]\nname = \"gemini\"\napi_key_env = \"HOME\"\n",
+                workspace.display()
+            ),
+        )
+        .unwrap();
+
+        let report = validate_config(&config_path, dir.path());
+        let provider_check = report
+            .results
+            .iter()
+            .find(|r| r.name == "provider_known")
+            .unwrap();
+        assert!(provider_check.passed, "expected gemini to be accepted");
     }
 
     #[test]

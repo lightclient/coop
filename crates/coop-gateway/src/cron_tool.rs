@@ -272,6 +272,7 @@ mod tests {
         UserConfig {
             name: name.to_owned(),
             trust: TrustLevel::Inner,
+            model: None,
             r#match: vec![format!("signal:{name}-uuid")],
             timezone: None,
             sandbox: None,
@@ -282,6 +283,7 @@ mod tests {
         UserConfig {
             name: name.to_owned(),
             trust: TrustLevel::Owner,
+            model: None,
             r#match: vec![format!("signal:{name}-uuid")],
             timezone: None,
             sandbox: None,

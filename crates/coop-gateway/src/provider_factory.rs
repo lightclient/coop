@@ -98,6 +98,13 @@ mod tests {
     }
 
     #[test]
+    fn create_gemini_provider() {
+        let config = base_config("gemini", "gemini-2.5-flash");
+        let provider = create_primary_provider(&config).expect("provider creates");
+        assert_eq!(provider.name(), "gemini");
+    }
+
+    #[test]
     fn create_openai_compatible_provider() {
         let config: Config = toml::from_str(
             "[agent]\nid = \"test\"\nmodel = \"meta-llama/Llama-3.1-8B-Instruct\"\nworkspace = \".\"\n\n[provider]\nname = \"openai-compatible\"\nbase_url = \"http://localhost:8000/v1\"\n",
@@ -181,6 +188,47 @@ mod tests {
         });
 
         format!("http://{addr}/v1")
+    }
+
+    async fn spawn_gemini_server() -> (String, tokio::sync::oneshot::Receiver<String>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        let (tx, rx) = tokio::sync::oneshot::channel();
+
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let request = read_http_request(&mut socket).await;
+            let _ = tx.send(request);
+
+            let body = serde_json::json!({
+                "candidates": [{
+                    "content": {
+                        "parts": [{"text": "TRACE_OK"}]
+                    },
+                    "finishReason": "STOP"
+                }],
+                "usageMetadata": {
+                    "promptTokenCount": 12,
+                    "candidatesTokenCount": 4,
+                    "totalTokenCount": 16
+                }
+            })
+            .to_string();
+
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+        });
+
+        (format!("http://{addr}/v1beta"), rx)
     }
 
     async fn read_http_request(socket: &mut tokio::net::TcpStream) -> String {
@@ -276,6 +324,33 @@ mod tests {
         assert!(trace.contains("provider_request"));
         assert!(trace.contains("openai-compatible"));
         assert!(trace.contains("genai complete response"));
+    }
+
+    #[tokio::test]
+    async fn gemini_provider_completes_against_native_server() {
+        let (base_url, request_rx) = spawn_gemini_server().await;
+        let config: Config = toml::from_str(&format!(
+            "[agent]\nid = \"test\"\nmodel = \"gemini-2.5-flash\"\ncontext_limit = 1048576\nworkspace = \".\"\n\n[provider]\nname = \"gemini\"\nbase_url = \"{base_url}\"\napi_key_env = \"HOME\"\n"
+        ))
+        .expect("config parses");
+        let provider = create_primary_provider(&config).expect("provider creates");
+
+        let (response, usage) = provider
+            .complete(
+                &["Answer tersely".to_owned()],
+                &[Message::user().with_text("Reply with TRACE_OK")],
+                &[],
+            )
+            .await
+            .expect("provider request succeeds");
+
+        assert_eq!(response.text(), "TRACE_OK");
+        assert_eq!(usage.input_tokens, Some(12));
+        assert_eq!(usage.output_tokens, Some(4));
+
+        let request = request_rx.await.expect("request received");
+        assert!(request.contains("POST /v1beta/models/gemini-2.5-flash:generateContent"));
+        assert!(request.to_ascii_lowercase().contains("x-goog-api-key:"));
     }
 
     #[tokio::test]

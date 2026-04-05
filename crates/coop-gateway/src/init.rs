@@ -17,6 +17,11 @@ const ANTHROPIC_MODELS: &[(&str, &str)] = &[
     ("claude-opus-4-0-20250514", "smartest, slower"),
     ("claude-haiku-3-5-20241022", "cheapest, fastest"),
 ];
+const GEMINI_MODELS: &[(&str, &str)] = &[
+    ("gemini-2.5-flash", "fast, recommended"),
+    ("gemini-2.5-pro", "strong reasoning"),
+    ("gemini-2.5-flash-lite", "cheapest, fastest"),
+];
 const OPENAI_MODELS: &[(&str, &str)] = &[
     ("gpt-4o-mini", "fast, recommended"),
     ("gpt-5-mini", "smart reasoning"),
@@ -30,6 +35,7 @@ const NAME_PATTERN: &str = "^[a-z0-9][a-z0-9_-]{0,31}$";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InitProvider {
     Anthropic,
+    Gemini,
     OpenAi,
     OpenAiCompatible,
     Ollama,
@@ -39,6 +45,7 @@ impl InitProvider {
     fn provider_name(self) -> &'static str {
         match self {
             Self::Anthropic => "anthropic",
+            Self::Gemini => "gemini",
             Self::OpenAi => "openai",
             Self::OpenAiCompatible => "openai-compatible",
             Self::Ollama => "ollama",
@@ -48,6 +55,7 @@ impl InitProvider {
     fn default_api_key_env(self) -> Option<&'static str> {
         match self {
             Self::Anthropic => Some("ANTHROPIC_API_KEY"),
+            Self::Gemini => Some("GEMINI_API_KEY"),
             Self::OpenAi => Some("OPENAI_API_KEY"),
             Self::OpenAiCompatible | Self::Ollama => None,
         }
@@ -215,6 +223,10 @@ fn default_provider_models(provider: InitProvider, selected_model: &str) -> Vec<
             .iter()
             .map(|(model, _)| format!("anthropic/{model}"))
             .collect(),
+        InitProvider::Gemini => GEMINI_MODELS
+            .iter()
+            .map(|(model, _)| (*model).to_owned())
+            .collect(),
         InitProvider::OpenAi => OPENAI_MODELS
             .iter()
             .map(|(model, _)| (*model).to_owned())
@@ -315,6 +327,14 @@ fn detect_openai_api_key() -> ApiKeyStatus {
     }
 }
 
+fn detect_gemini_api_key() -> ApiKeyStatus {
+    if std::env::var("GEMINI_API_KEY").is_ok() {
+        ApiKeyStatus::EnvSet("GEMINI_API_KEY")
+    } else {
+        ApiKeyStatus::None
+    }
+}
+
 enum ApiKeyStatus {
     EnvSet(&'static str),
     ClaudeCodeCreds(PathBuf),
@@ -357,14 +377,16 @@ pub(crate) fn cmd_init(dir_arg: Option<&str>) -> anyhow::Result<()> {
     // Step 2: Provider
     println!("Choose a provider:");
     println!("  1. Anthropic");
-    println!("  2. OpenAI");
-    println!("  3. OpenAI-compatible");
-    println!("  4. Ollama\n");
+    println!("  2. Gemini");
+    println!("  3. OpenAI");
+    println!("  4. OpenAI-compatible");
+    println!("  5. Ollama\n");
 
-    let provider = match prompt_choice("Choose", 4, 1) {
+    let provider = match prompt_choice("Choose", 5, 1) {
         1 => InitProvider::Anthropic,
-        2 => InitProvider::OpenAi,
-        3 => InitProvider::OpenAiCompatible,
+        2 => InitProvider::Gemini,
+        3 => InitProvider::OpenAi,
+        4 => InitProvider::OpenAiCompatible,
         _ => InitProvider::Ollama,
     };
 
@@ -425,6 +447,15 @@ pub(crate) fn cmd_init(dir_arg: Option<&str>) -> anyhow::Result<()> {
                 prompt_continue();
             }
         },
+        InitProvider::Gemini => match detect_gemini_api_key() {
+            ApiKeyStatus::EnvSet(env_name) => {
+                println!("✓ Found {env_name} in environment.");
+            }
+            ApiKeyStatus::ClaudeCodeCreds(_) | ApiKeyStatus::None => {
+                print_manual_key_instructions(provider);
+                prompt_continue();
+            }
+        },
         InitProvider::OpenAiCompatible => {
             let base_url = prompt_input("Base URL", "http://localhost:8000/v1");
             provider_base_url = Some(base_url);
@@ -453,6 +484,7 @@ pub(crate) fn cmd_init(dir_arg: Option<&str>) -> anyhow::Result<()> {
     println!();
     let model_id = match provider {
         InitProvider::Anthropic => choose_model("Which Anthropic model?", ANTHROPIC_MODELS),
+        InitProvider::Gemini => choose_model("Which Gemini model?", GEMINI_MODELS),
         InitProvider::OpenAi => choose_model("Which OpenAI model?", OPENAI_MODELS),
         InitProvider::OpenAiCompatible => prompt_input("Model ID", OPENAI_COMPATIBLE_DEFAULT_MODEL),
         InitProvider::Ollama => prompt_input("Model ID", OLLAMA_DEFAULT_MODEL),
@@ -552,6 +584,7 @@ fn print_manual_key_instructions(provider: InitProvider) {
     let env_name = provider.default_api_key_env().unwrap_or("API_KEY_ENV");
     let example = match provider {
         InitProvider::Anthropic => "sk-ant-api...",
+        InitProvider::Gemini => "test-token",
         InitProvider::OpenAi | InitProvider::OpenAiCompatible => "sk-test-xxx",
         InitProvider::Ollama => "token-if-needed",
     };
@@ -705,6 +738,30 @@ mod tests {
         );
         assert_eq!(config.agent.model, "gpt-4o-mini");
         assert_eq!(config.provider.models, vec!["gpt-4o-mini"]);
+    }
+
+    #[test]
+    fn test_generate_gemini_config_roundtrip() {
+        let config_str = generate_config(
+            "cooper",
+            InitProvider::Gemini,
+            "gemini-2.5-flash",
+            &default_provider_models(InitProvider::Gemini, "gemini-2.5-flash"),
+            "alice",
+            None,
+            None,
+        );
+        let config: crate::config::Config = toml::from_str(&config_str).unwrap();
+        assert_eq!(config.provider.name, "gemini");
+        assert_eq!(config.agent.model, "gemini-2.5-flash");
+        assert_eq!(
+            config.provider.models,
+            vec![
+                "gemini-2.5-flash",
+                "gemini-2.5-pro",
+                "gemini-2.5-flash-lite"
+            ]
+        );
     }
 
     #[test]

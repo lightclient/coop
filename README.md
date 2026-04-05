@@ -51,8 +51,9 @@ This builds and installs the `coop` binary to `~/.cargo/bin/`.
 ```bash
 coop init
 
-# Set your API key (standard Anthropic key or Claude Code OAuth token)
-export ANTHROPIC_API_KEY="sk-ant-..."
+# Set the API key for the provider you chose during init
+# e.g. export ANTHROPIC_API_KEY="sk-ant-..."
+#   or export GEMINI_API_KEY="test-token"
 
 # Install and start the user service (systemd on Linux, launchd on macOS)
 coop gateway install
@@ -137,7 +138,7 @@ match = ["signal:bob-uuid"]
 # ---------------------------------------------------------------------------
 # Providers — LLM backends
 # ---------------------------------------------------------------------------
-# Supported provider kinds: anthropic, openai, openai-compatible, ollama
+# Supported provider kinds: anthropic, gemini, openai, openai-compatible, ollama
 #
 # For /model switching across multiple backends, use [[providers]]. Each entry
 # contributes models to /models, and /model <id> switches to whichever provider
@@ -146,7 +147,7 @@ match = ["signal:bob-uuid"]
 [[providers]]
 name = "anthropic"
 # When models is omitted, Coop falls back to a small built-in catalog for
-# anthropic, openai, and ollama. For custom openai-compatible or local setups,
+# anthropic, gemini, openai, and ollama. For custom openai-compatible or local setups,
 # set this explicitly to the models you want users to pick from.
 # models = [
 #   "anthropic/claude-sonnet-4-20250514",
@@ -156,6 +157,12 @@ name = "anthropic"
 # Optional: multiple API keys for automatic rotation on rate limits.
 # Each entry references an environment variable with the "env:" prefix.
 # api_keys = ["env:ANTHROPIC_API_KEY", "env:ANTHROPIC_API_KEY_2"]
+
+[[providers]]
+name = "gemini"
+models = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.5-flash-lite"]
+# Optional: multiple API keys for automatic rotation on rate limits.
+# api_keys = ["env:GEMINI_API_KEY", "env:GEMINI_API_KEY_2"]
 
 [[providers]]
 name = "openai"
