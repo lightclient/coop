@@ -1,8 +1,9 @@
 //! Line-aware output truncation for tool results.
 //!
 //! Two strategies: head (keep beginning, for file reads) and tail (keep end,
-//! for bash output where errors appear last). Both respect line boundaries
-//! and enforce both a line count and byte size limit.
+//! for bash output where errors appear last). Both prefer line boundaries and
+//! enforce both a line count and byte size limit. If a single line alone
+//! exceeds the byte limit, it is clipped on a UTF-8 character boundary.
 
 use std::io::Write;
 use tempfile::NamedTempFile;
@@ -17,10 +18,31 @@ pub struct TruncateResult {
     pub total_lines: usize,
 }
 
+fn clip_prefix_to_bytes(input: &str, max_bytes: usize) -> String {
+    if input.len() <= max_bytes {
+        return input.to_owned();
+    }
+
+    let end = input.floor_char_boundary(max_bytes);
+    input[..end].to_owned()
+}
+
+fn clip_suffix_to_bytes(input: &str, max_bytes: usize) -> String {
+    if input.len() <= max_bytes {
+        return input.to_owned();
+    }
+
+    let mut start = input.len().saturating_sub(max_bytes);
+    while start < input.len() && !input.is_char_boundary(start) {
+        start += 1;
+    }
+    input[start..].to_owned()
+}
+
 /// Truncate keeping the HEAD (beginning) of output.
 ///
 /// Used for file reads — the start of a file is most relevant.
-/// Never breaks mid-line.
+/// Never breaks mid-line unless a single line alone exceeds the byte cap.
 pub fn truncate_head(input: &str) -> TruncateResult {
     let lines: Vec<&str> = input.lines().collect();
     let total_lines = lines.len();
@@ -45,9 +67,12 @@ pub fn truncate_head(input: &str) -> TruncateResult {
         kept += 1;
     }
 
-    // Ensure we keep at least one line even if it alone exceeds MAX_BYTES
     if kept == 0 && !lines.is_empty() {
-        kept = 1;
+        return TruncateResult {
+            output: clip_prefix_to_bytes(lines[0], MAX_BYTES),
+            was_truncated: true,
+            total_lines,
+        };
     }
 
     let output = lines[..kept].join("\n");
@@ -61,7 +86,7 @@ pub fn truncate_head(input: &str) -> TruncateResult {
 /// Truncate keeping the TAIL (end) of output.
 ///
 /// Used for bash — errors and final state appear at the end.
-/// Never breaks mid-line.
+/// Never breaks mid-line unless a single line alone exceeds the byte cap.
 pub fn truncate_tail(input: &str) -> TruncateResult {
     let lines: Vec<&str> = input.lines().collect();
     let total_lines = lines.len();
@@ -86,9 +111,12 @@ pub fn truncate_tail(input: &str) -> TruncateResult {
         kept += 1;
     }
 
-    // Ensure we keep at least one line
     if kept == 0 && !lines.is_empty() {
-        kept = 1;
+        return TruncateResult {
+            output: clip_suffix_to_bytes(lines[total_lines - 1], MAX_BYTES),
+            was_truncated: true,
+            total_lines,
+        };
     }
 
     let start = total_lines - kept;
@@ -244,5 +272,40 @@ mod tests {
         let read_back = std::fs::read_to_string(&path).expect("should read back");
         assert_eq!(read_back, content);
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn head_clips_single_overlong_line() {
+        let input = "x".repeat(MAX_BYTES * 2);
+
+        let r = truncate_head(&input);
+        assert!(r.was_truncated);
+        assert_eq!(r.total_lines, 1);
+        assert!(r.output.len() <= MAX_BYTES);
+        assert_eq!(r.output, "x".repeat(MAX_BYTES));
+    }
+
+    #[test]
+    fn tail_clips_single_overlong_line() {
+        let input = format!("{}TAIL", "x".repeat(MAX_BYTES * 2));
+
+        let r = truncate_tail(&input);
+        assert!(r.was_truncated);
+        assert_eq!(r.total_lines, 1);
+        assert!(r.output.len() <= MAX_BYTES);
+        assert!(r.output.ends_with("TAIL"));
+    }
+
+    #[test]
+    fn clipping_preserves_utf8_boundaries() {
+        let input = "🦀".repeat(MAX_BYTES);
+
+        let head = truncate_head(&input);
+        assert!(head.was_truncated);
+        assert!(std::str::from_utf8(head.output.as_bytes()).is_ok());
+
+        let tail = truncate_tail(&input);
+        assert!(tail.was_truncated);
+        assert!(std::str::from_utf8(tail.output.as_bytes()).is_ok());
     }
 }

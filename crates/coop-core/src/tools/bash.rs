@@ -222,4 +222,26 @@ mod tests {
         assert!(!output.is_error);
         assert_eq!(output.content.trim(), "found");
     }
+
+    #[tokio::test]
+    async fn single_line_output_is_clipped_to_byte_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(dir.path());
+        let tool = BashTool;
+
+        let output = tool
+            .execute(
+                serde_json::json!({
+                    "command": "python3 - <<'PY'\nprint('x' * 120000)\nPY"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert!(!output.is_error);
+        assert!(output.content.contains("[output truncated"));
+        assert!(output.content.len() < 60_000);
+        assert!(!output.content.contains(&"x".repeat(80_000)));
+    }
 }
