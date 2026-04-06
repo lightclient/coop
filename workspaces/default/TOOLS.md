@@ -370,6 +370,10 @@ The only behavioral difference between `owner` and `full` is sandbox bypass. Whe
 
 When sandbox is enabled and no user matches the terminal, the terminal defaults to `owner` trust (the person at the keyboard is the machine owner). For all other channels, unmatched senders remain `public`.
 
+### Bash timeout
+
+`bash` defaults to a 120s timeout per call. Use the tool's `timeout` field when a build, install, or script needs longer. The command returns as soon as it finishes, so raise the timeout only when needed.
+
 ### Check sandbox status
 
 Use `coop sandbox status` to see platform capabilities:

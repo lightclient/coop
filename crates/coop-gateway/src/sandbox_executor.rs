@@ -1,16 +1,14 @@
 use anyhow::Result;
 use async_trait::async_trait;
+use coop_core::tools::bash::timeout_from_arguments;
 use coop_core::tools::truncate;
 use coop_core::traits::{ToolContext, ToolExecutor};
 use coop_core::types::{ToolDef, ToolOutput, TrustLevel};
 use coop_sandbox::{NetworkMode, SandboxPolicy};
 use std::sync::Arc;
-use std::time::Duration;
 use tracing::{debug, info};
 
 use crate::config::SharedConfig;
-
-const SANDBOX_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub(crate) struct SandboxExecutor {
     inner: Arc<dyn ToolExecutor>,
@@ -148,10 +146,16 @@ impl SandboxExecutor {
             return Ok(ToolOutput::error(error.to_string()));
         }
 
+        let timeout = match timeout_from_arguments(&arguments) {
+            Ok(timeout) => timeout,
+            Err(error) => return Ok(ToolOutput::error(error.to_string())),
+        };
+
         let policy = self.resolve_policy(ctx);
 
         debug!(
             command_len = command.len(),
+            timeout_seconds = timeout.as_secs(),
             trust = ?ctx.trust,
             workspace = %ctx.workspace.display(),
             "sandbox: routing bash through sandboxed exec"
@@ -160,7 +164,7 @@ impl SandboxExecutor {
         let result = coop_sandbox::exec_with_user_context(
             &policy,
             command,
-            SANDBOX_TIMEOUT,
+            timeout,
             ctx.user_name.as_deref(),
             Some(ctx.trust),
         )

@@ -7,19 +7,58 @@ use std::time::Duration;
 use tokio::process::Command;
 use tracing::debug;
 
-const TIMEOUT: Duration = Duration::from_secs(120);
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
+const TIMEOUT_FIELD: &str = "timeout";
+const TIMEOUT_SECONDS_FIELD: &str = "timeout_seconds";
+
+pub fn timeout_from_arguments(arguments: &serde_json::Value) -> Result<Duration> {
+    if let Some(timeout) = arguments
+        .get(TIMEOUT_FIELD)
+        .filter(|value| !value.is_null())
+    {
+        return parse_timeout_value(TIMEOUT_FIELD, timeout);
+    }
+
+    if let Some(timeout) = arguments
+        .get(TIMEOUT_SECONDS_FIELD)
+        .filter(|value| !value.is_null())
+    {
+        return parse_timeout_value(TIMEOUT_SECONDS_FIELD, timeout);
+    }
+
+    Ok(DEFAULT_TIMEOUT)
+}
+
+fn parse_timeout_value(field: &str, value: &serde_json::Value) -> Result<Duration> {
+    let timeout_seconds = value
+        .as_u64()
+        .filter(|seconds| *seconds > 0)
+        .ok_or_else(|| anyhow::anyhow!("{field} must be a positive integer"))?;
+
+    Ok(Duration::from_secs(timeout_seconds))
+}
 
 #[derive(Debug)]
 pub struct BashTool;
 
 impl BashTool {
     fn schema() -> serde_json::Value {
+        let timeout_description = format!(
+            "Optional per-call timeout in seconds (defaults to {}s; `timeout_seconds` alias also accepted)",
+            DEFAULT_TIMEOUT.as_secs()
+        );
+
         serde_json::json!({
             "type": "object",
             "properties": {
                 "command": {
                     "type": "string",
                     "description": "The shell command to execute"
+                },
+                "timeout": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": timeout_description
                 }
             },
             "required": ["command"]
@@ -32,7 +71,10 @@ impl Tool for BashTool {
     fn definition(&self) -> ToolDef {
         ToolDef::new(
             "bash",
-            "Execute a shell command and return stdout/stderr",
+            format!(
+                "Execute a shell command and return stdout/stderr. Optional timeout overrides the {}s default.",
+                DEFAULT_TIMEOUT.as_secs()
+            ),
             Self::schema(),
         )
     }
@@ -57,8 +99,19 @@ impl Tool for BashTool {
             return Ok(ToolOutput::error(error.to_string()));
         }
 
+        let timeout = match timeout_from_arguments(&arguments) {
+            Ok(timeout) => timeout,
+            Err(error) => return Ok(ToolOutput::error(error.to_string())),
+        };
+
+        debug!(
+            command_len = command.len(),
+            timeout_seconds = timeout.as_secs(),
+            "bash starting"
+        );
+
         let result = tokio::time::timeout(
-            TIMEOUT,
+            timeout,
             Command::new("sh")
                 .arg("-c")
                 .arg(command)
@@ -70,7 +123,7 @@ impl Tool for BashTool {
         match result {
             Err(_) => Ok(ToolOutput::error(format!(
                 "command timed out after {}s",
-                TIMEOUT.as_secs()
+                timeout.as_secs()
             ))),
             Ok(Err(e)) => Ok(ToolOutput::error(format!("failed to execute command: {e}"))),
             Ok(Ok(output)) => {
@@ -148,6 +201,48 @@ mod tests {
 
         assert!(!output.is_error);
         assert_eq!(output.content.trim(), "hello");
+    }
+
+    #[test]
+    fn timeout_defaults_to_120_seconds() {
+        assert_eq!(
+            timeout_from_arguments(&serde_json::json!({})).unwrap(),
+            DEFAULT_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn timeout_seconds_alias_is_supported() {
+        assert_eq!(
+            timeout_from_arguments(&serde_json::json!({"timeout_seconds": 7})).unwrap(),
+            Duration::from_secs(7)
+        );
+    }
+
+    #[test]
+    fn timeout_rejects_non_positive_values() {
+        assert!(timeout_from_arguments(&serde_json::json!({"timeout": 0})).is_err());
+    }
+
+    #[tokio::test]
+    async fn custom_timeout_is_honored() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(dir.path());
+        let tool = BashTool;
+
+        let output = tool
+            .execute(
+                serde_json::json!({
+                    "command": "sleep 2",
+                    "timeout": 1
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert!(output.is_error);
+        assert!(output.content.contains("timed out after 1s"));
     }
 
     #[tokio::test]

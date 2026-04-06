@@ -608,7 +608,7 @@ impl ToolExecutor for SandboxExecutor {
 **`exec_bash_sandboxed`:**
 1. Extract `command` from arguments.
 2. Build a `SandboxPolicy` from the base policy + any per-user overrides from context.
-3. Call `coop_sandbox::exec(&policy, &command, TIMEOUT)`.
+3. Call `coop_sandbox::exec(&policy, &command, timeout)`.
 4. Apply the same output truncation as `BashTool` (reuse `coop_core::tools::truncate`).
 5. Return `ToolOutput` with appropriate success/error status based on exit code.
 
@@ -628,7 +628,7 @@ async fn exec_bash_sandboxed(&self, arguments: Value, ctx: &ToolContext) -> Resu
         ..self.base_policy.clone()
     };
 
-    let result = coop_sandbox::exec(&policy, command, TIMEOUT).await;
+    let result = coop_sandbox::exec(&policy, command, timeout).await;
 
     match result {
         Err(e) => Ok(ToolOutput::error(format!("sandbox exec failed: {e}"))),

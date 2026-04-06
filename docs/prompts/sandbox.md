@@ -186,7 +186,7 @@ docker run -d \
 docker exec -w {workdir} {container_id} sh -c {command}
 ```
 
-Capture stdout and stderr separately. Apply the same timeout and output-size limits as the current `BashTool`.
+Capture stdout and stderr separately. Apply the same timeout and output-size limits as the current `BashTool` (default 120s, overridable with per-call `timeout`).
 
 **destroy:**
 ```
@@ -321,7 +321,7 @@ impl ToolExecutor for SandboxExecutor {
 }
 ```
 
-**bash:** Extract the `command` argument. Call `manager.exec(session_id, &["sh", "-c", command], "/work")`. Apply the same 120s timeout and 100KB output limit as the current `BashTool`. If the command looks like an install (`apt install`, `pip install`, `cargo install`, `npm install -g`, `rustup`, `curl ... | sh`), call `manager.mark_install(session_id)`.
+**bash:** Extract the `command` argument. Call `manager.exec(session_id, &["sh", "-c", command], "/work")`. Apply the same default 120s timeout and 100KB output limit as the current `BashTool`, and honor per-call `timeout` overrides when present. If the command looks like an install (`apt install`, `pip install`, `cargo install`, `npm install -g`, `rustup`, `curl ... | sh`), call `manager.mark_install(session_id)`.
 
 **read_file / write_file / edit_file:** These operate on the workspace, which is bind-mounted. Two implementation options:
 

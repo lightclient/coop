@@ -268,7 +268,7 @@ watched — most changes take effect within seconds without a restart.
 - `read_file` — read file contents (params: path, optional offset/limit)
 - `write_file` — create or overwrite a file
 - `edit_file` — find-and-replace in a file
-- `bash` — execute a shell command (120s timeout)
+- `bash` — execute a shell command (default 120s timeout; override with `timeout`)
 
 ## Memory tools
 
