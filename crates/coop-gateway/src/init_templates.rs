@@ -36,6 +36,7 @@ pub(crate) const TOOLS_MD_INIT: &str = "\
 <!-- Use agent.subagents profiles for specialized models, delegated child work, and image workflows. -->
 <!-- Model capability metadata can hide specialist models from /models and keep them subagent-only. -->
 <!-- image_generate works with direct Gemini providers and OpenAI-compatible image models. -->
+<!-- For image edits, pass attachment paths into a media subagent and have the parent send returned artifacts itself. -->
 <!-- To fully replace the defaults, put <!-- override --> on the first line. -->
 ";
 

@@ -26,17 +26,20 @@ pub async fn generate_openai_compatible_image(
         .ok_or_else(|| anyhow::anyhow!("image generation requires a configured base_url"))?;
     let endpoint = format!("{base_url}chat/completions");
 
-    let mut content = vec![json!({
+    let mut content = reference_images
+        .iter()
+        .map(|image| {
+            json!({
+                "type": "image_url",
+                "image_url": {
+                    "url": format!("data:{};base64,{}", image.mime_type, image.data),
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    content.push(json!({
         "type": "text",
         "text": prompt.trim(),
-    })];
-    content.extend(reference_images.iter().map(|image| {
-        json!({
-            "type": "image_url",
-            "image_url": {
-                "url": format!("data:{};base64,{}", image.mime_type, image.data),
-            }
-        })
     }));
 
     let body = json!({
@@ -95,28 +98,38 @@ pub async fn generate_openai_compatible_image(
 }
 
 fn parse_generation_response(body: &Value) -> Result<GeminiImageGenerationResult> {
-    let choices = body
-        .get("choices")
-        .and_then(Value::as_array)
-        .ok_or_else(|| anyhow::anyhow!("image response missing choices"))?;
-
     let mut text = String::new();
     let mut images = Vec::new();
 
-    for choice in choices {
-        let Some(message) = choice.get("message") else {
-            continue;
-        };
+    if let Some(choices) = body.get("choices").and_then(Value::as_array) {
+        for choice in choices {
+            let Some(message) = choice.get("message") else {
+                continue;
+            };
 
-        if let Some(content) = message.get("content") {
-            append_text_and_images_from_content(content, &mut text, &mut images)?;
-        }
+            if let Some(content) = message.get("content") {
+                append_text_and_images_from_content(content, &mut text, &mut images)?;
+            }
 
-        if let Some(message_images) = message.get("images").and_then(Value::as_array) {
-            for image in message_images {
-                if let Some(parsed) = parse_generated_image(image)? {
-                    images.push(parsed);
+            if let Some(message_images) = message.get("images").and_then(Value::as_array) {
+                for image in message_images {
+                    if let Some(parsed) = parse_generated_image(image)? {
+                        images.push(parsed);
+                    }
                 }
+            }
+        }
+    }
+
+    if let Some(data) = body.get("data").and_then(Value::as_array) {
+        for item in data {
+            if let Some(parsed) = parse_generated_image(item)? {
+                images.push(parsed);
+            }
+            if text.trim().is_empty()
+                && let Some(revised_prompt) = item.get("revised_prompt").and_then(Value::as_str)
+            {
+                text.push_str(revised_prompt);
             }
         }
     }
@@ -164,6 +177,25 @@ fn append_text_and_images_from_content(
 }
 
 fn parse_generated_image(value: &Value) -> Result<Option<GeneratedImage>> {
+    if let Some(data) = value
+        .get("b64_json")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("base64").and_then(Value::as_str))
+        .or_else(|| value.get("data").and_then(Value::as_str))
+    {
+        let mime_type = value
+            .get("mime_type")
+            .or_else(|| value.get("media_type"))
+            .and_then(Value::as_str)
+            .filter(|mime| !mime.trim().is_empty())
+            .unwrap_or("image/png");
+
+        return Ok(Some(GeneratedImage {
+            mime_type: mime_type.to_owned(),
+            data: data.to_owned(),
+        }));
+    }
+
     let url = value
         .get("image_url")
         .and_then(|image_url| {
@@ -258,6 +290,23 @@ mod tests {
         assert_eq!(parsed.images.len(), 1);
     }
 
+    #[test]
+    fn parses_generated_images_from_data_array() {
+        let body = json!({
+            "data": [{
+                "b64_json": "YWJj",
+                "revised_prompt": "edited",
+                "mime_type": "image/png"
+            }]
+        });
+
+        let parsed = parse_generation_response(&body).unwrap();
+        assert_eq!(parsed.text.as_deref(), Some("edited"));
+        assert_eq!(parsed.images.len(), 1);
+        assert_eq!(parsed.images[0].mime_type, "image/png");
+        assert_eq!(parsed.images[0].data, "YWJj");
+    }
+
     #[tokio::test]
     async fn generate_openai_compatible_image_sends_modalities_and_parses_images() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -306,6 +355,9 @@ mod tests {
         assert!(request.starts_with("POST /v1/chat/completions "));
         assert!(request.contains("\"modalities\":[\"text\",\"image\"]"));
         assert!(request.contains("data:image/png;base64,YWJj"));
+        let image_pos = request.find("\"type\":\"image_url\"").unwrap();
+        let text_pos = request.find("\"type\":\"text\"").unwrap();
+        assert!(image_pos < text_pos);
         assert_eq!(result.text.as_deref(), Some("generated"));
         assert_eq!(result.images.len(), 1);
     }

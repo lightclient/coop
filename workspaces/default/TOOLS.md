@@ -97,6 +97,15 @@ inherit_memory = false
 # image_generate to save outputs under ./generated/. The tool works with direct
 # Gemini providers and OpenAI-compatible image models such as OpenRouter-hosted
 # Gemini image models.
+#
+# Image-edit workflow with subagents:
+# - keep the parent session on a normal tool-capable model
+# - spawn a bounded media subagent in wait mode
+# - pass attachment/file paths through subagent_spawn.paths
+# - in the child, call image_generate with reference_paths set to those paths
+# - if the child model is not itself image-capable, pass an explicit image model
+# - let the parent send returned artifacts back to the user (for Signal, children
+#   cannot call signal_send_image directly)
 
 # Users and trust levels
 # Trust levels: owner > full > inner > familiar > public
