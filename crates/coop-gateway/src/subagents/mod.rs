@@ -22,6 +22,7 @@ pub(crate) enum SubagentMode {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SubagentSpawnRequest {
     pub task: String,
     #[serde(default)]
@@ -51,6 +52,7 @@ pub(crate) enum SubagentControlAction {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SubagentsControlRequest {
     pub action: SubagentControlAction,
     #[serde(default)]

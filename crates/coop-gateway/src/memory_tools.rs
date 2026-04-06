@@ -2,6 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use coop_core::TrustLevel;
+use coop_core::tool_args::reject_unknown_fields;
 use coop_core::traits::{ToolContext, ToolExecutor};
 use coop_core::types::{ToolDef, ToolOutput};
 use coop_memory::{
@@ -190,6 +191,10 @@ impl MemoryToolExecutor {
 
     #[instrument(skip(self, arguments, ctx))]
     async fn exec_search(&self, arguments: Value, ctx: &ToolContext) -> Result<ToolOutput> {
+        if let Some(output) = reject_unknown_memory_fields("memory_search", &arguments) {
+            return Ok(output);
+        }
+
         let allowed = accessible_stores(ctx.trust);
         if allowed.is_empty() {
             return Ok(ToolOutput::success("{\"count\":0,\"results\":[]}"));
@@ -279,6 +284,10 @@ impl MemoryToolExecutor {
 
     #[instrument(skip(self, arguments, ctx))]
     async fn exec_files(&self, arguments: Value, ctx: &ToolContext) -> Result<ToolOutput> {
+        if let Some(output) = reject_unknown_memory_fields("memory_files", &arguments) {
+            return Ok(output);
+        }
+
         let raw_path = arguments
             .get("path")
             .and_then(Value::as_str)
@@ -379,6 +388,10 @@ impl MemoryToolExecutor {
 
     #[instrument(skip(self, arguments, ctx))]
     async fn exec_timeline(&self, arguments: Value, ctx: &ToolContext) -> Result<ToolOutput> {
+        if let Some(output) = reject_unknown_memory_fields("memory_timeline", &arguments) {
+            return Ok(output);
+        }
+
         let anchor = arguments
             .get("anchor")
             .and_then(Value::as_i64)
@@ -409,6 +422,10 @@ impl MemoryToolExecutor {
 
     #[instrument(skip(self, arguments, ctx))]
     async fn exec_get(&self, arguments: Value, ctx: &ToolContext) -> Result<ToolOutput> {
+        if let Some(output) = reject_unknown_memory_fields("memory_get", &arguments) {
+            return Ok(output);
+        }
+
         let ids = int64_array(arguments.get("ids"));
         if ids.is_empty() {
             return Ok(ToolOutput::error("missing required parameter: ids"));
@@ -427,6 +444,10 @@ impl MemoryToolExecutor {
 
     #[instrument(skip(self, arguments, ctx))]
     async fn exec_write(&self, arguments: Value, ctx: &ToolContext) -> Result<ToolOutput> {
+        if let Some(output) = reject_unknown_memory_fields("memory_write", &arguments) {
+            return Ok(output);
+        }
+
         let title = arguments
             .get("title")
             .and_then(Value::as_str)
@@ -499,6 +520,10 @@ impl MemoryToolExecutor {
 
     #[instrument(skip(self, arguments, ctx))]
     async fn exec_history(&self, arguments: Value, ctx: &ToolContext) -> Result<ToolOutput> {
+        if let Some(output) = reject_unknown_memory_fields("memory_history", &arguments) {
+            return Ok(output);
+        }
+
         let observation_id = arguments
             .get("observation_id")
             .and_then(Value::as_i64)
@@ -526,6 +551,10 @@ impl MemoryToolExecutor {
 
     #[instrument(skip(self, arguments, ctx))]
     async fn exec_people(&self, arguments: Value, ctx: &ToolContext) -> Result<ToolOutput> {
+        if let Some(output) = reject_unknown_memory_fields("memory_people", &arguments) {
+            return Ok(output);
+        }
+
         let query = arguments
             .get("query")
             .and_then(Value::as_str)
@@ -544,6 +573,10 @@ impl MemoryToolExecutor {
 
     #[instrument(skip(self, arguments, ctx))]
     async fn exec_alias(&self, arguments: Value, ctx: &ToolContext) -> Result<ToolOutput> {
+        if let Some(output) = reject_unknown_memory_fields("memory_alias", &arguments) {
+            return Ok(output);
+        }
+
         if ctx.trust > TrustLevel::Inner {
             return Ok(ToolOutput::error(
                 "memory_alias requires at least inner trust",
@@ -574,6 +607,10 @@ impl MemoryToolExecutor {
 
     #[instrument(skip(self, arguments, ctx))]
     async fn exec_sessions(&self, arguments: Value, ctx: &ToolContext) -> Result<ToolOutput> {
+        if let Some(output) = reject_unknown_memory_fields("memory_sessions", &arguments) {
+            return Ok(output);
+        }
+
         if ctx.trust > TrustLevel::Full {
             return Ok(ToolOutput::success("{\"count\":0,\"sessions\":[]}"));
         }
@@ -614,6 +651,46 @@ impl ToolExecutor for MemoryToolExecutor {
     fn tools(&self) -> Vec<ToolDef> {
         Self::defs()
     }
+}
+
+fn reject_unknown_memory_fields(tool_name: &str, arguments: &Value) -> Option<ToolOutput> {
+    let allowed_fields = match tool_name {
+        "memory_search" => &[
+            "query",
+            "stores",
+            "types",
+            "people",
+            "file",
+            "after_ms",
+            "before_ms",
+            "limit",
+            "max_tokens",
+        ][..],
+        "memory_files" => &["path", "prefix", "limit", "check_exists"][..],
+        "memory_timeline" => &["anchor", "before", "after"][..],
+        "memory_get" => &["ids"][..],
+        "memory_write" => &[
+            "store",
+            "type",
+            "title",
+            "narrative",
+            "facts",
+            "tags",
+            "related_files",
+            "related_people",
+            "source",
+            "token_count",
+            "expires_at_ms",
+            "session_key",
+        ][..],
+        "memory_history" => &["observation_id"][..],
+        "memory_people" => &["query"][..],
+        "memory_sessions" => &["limit"][..],
+        "memory_alias" => &["name", "alias"][..],
+        _ => return Some(ToolOutput::error(format!("unknown tool: {tool_name}"))),
+    };
+
+    reject_unknown_fields(tool_name, arguments, allowed_fields)
 }
 
 fn string_array(value: Option<&Value>) -> Vec<String> {

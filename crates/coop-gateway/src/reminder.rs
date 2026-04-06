@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use coop_core::tool_args::reject_unknown_fields;
 use coop_core::traits::{Tool, ToolContext, ToolExecutor};
 use coop_core::types::{ToolDef, ToolOutput, TrustLevel};
 use serde::{Deserialize, Serialize};
@@ -194,6 +195,12 @@ impl ReminderTool {
     }
 
     fn handle_set(&self, arguments: &serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
+        if let Some(output) =
+            reject_unknown_fields("reminder", arguments, &["action", "time", "message"])
+        {
+            return Ok(output);
+        }
+
         let time_str = arguments
             .get("time")
             .and_then(|v| v.as_str())
@@ -268,6 +275,10 @@ impl ReminderTool {
     }
 
     fn handle_cancel(&self, arguments: &serde_json::Value) -> Result<ToolOutput> {
+        if let Some(output) = reject_unknown_fields("reminder", arguments, &["action", "id"]) {
+            return Ok(output);
+        }
+
         let id = arguments
             .get("id")
             .and_then(|v| v.as_str())
@@ -345,7 +356,12 @@ impl Tool for ReminderTool {
 
         match action {
             "set" => self.handle_set(&arguments, ctx),
-            "list" => Ok(self.handle_list(ctx)),
+            "list" => {
+                if let Some(output) = reject_unknown_fields("reminder", &arguments, &["action"]) {
+                    return Ok(output);
+                }
+                Ok(self.handle_list(ctx))
+            }
             "cancel" => self.handle_cancel(&arguments),
             other => Ok(ToolOutput::error(format!("unknown action: {other}"))),
         }

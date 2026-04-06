@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use coop_core::tool_args::reject_unknown_fields;
 use coop_core::traits::{ToolContext, ToolExecutor};
 use coop_core::types::{ToolDef, ToolOutput};
 use tracing::{debug, warn};
@@ -129,6 +130,14 @@ impl WebToolExecutor {
     }
 
     async fn handle_search(&self, arguments: serde_json::Value) -> Result<ToolOutput> {
+        if let Some(output) = reject_unknown_fields(
+            "web_search",
+            &arguments,
+            &["query", "count", "country", "freshness"],
+        ) {
+            return Ok(output);
+        }
+
         let query = arguments
             .get("query")
             .and_then(|v| v.as_str())
@@ -189,6 +198,14 @@ impl WebToolExecutor {
     async fn handle_fetch(&self, arguments: serde_json::Value) -> Result<ToolOutput> {
         if !self.fetch_enabled {
             return Ok(ToolOutput::error("web_fetch is disabled in config"));
+        }
+
+        if let Some(output) = reject_unknown_fields(
+            "web_fetch",
+            &arguments,
+            &["url", "extract_mode", "max_chars"],
+        ) {
+            return Ok(output);
         }
 
         let url = arguments

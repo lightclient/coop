@@ -1,5 +1,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
+use coop_core::tool_args::reject_unknown_fields;
 use coop_core::traits::{Tool, ToolContext, ToolExecutor};
 use coop_core::types::{ToolDef, ToolOutput, TrustLevel};
 use std::path::PathBuf;
@@ -36,13 +37,13 @@ impl Tool for ConfigReadTool {
         )
     }
 
-    async fn execute(
-        &self,
-        _arguments: serde_json::Value,
-        ctx: &ToolContext,
-    ) -> Result<ToolOutput> {
+    async fn execute(&self, arguments: serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
         if ctx.trust > TrustLevel::Full {
             return Ok(ToolOutput::error("config_read requires Full trust level"));
+        }
+
+        if let Some(output) = reject_unknown_fields("config_read", &arguments, &[]) {
+            return Ok(output);
         }
 
         match std::fs::read_to_string(&self.config_path) {
@@ -98,6 +99,10 @@ impl Tool for ConfigWriteTool {
     async fn execute(&self, arguments: serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
         if ctx.trust > TrustLevel::Full {
             return Ok(ToolOutput::error("config_write requires Full trust level"));
+        }
+
+        if let Some(output) = reject_unknown_fields("config_write", &arguments, &["content"]) {
+            return Ok(output);
         }
 
         let content = arguments
@@ -648,6 +653,25 @@ mod tests {
 
         assert!(output.is_error);
         assert!(output.content.contains("failed to read"));
+    }
+
+    #[tokio::test]
+    async fn test_config_read_rejects_unknown_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("nonexistent.toml");
+
+        let tool = ConfigReadTool::new(config_path);
+        let output = tool
+            .execute(
+                serde_json::json!({"unexpected": true}),
+                &tool_context(TrustLevel::Full),
+            )
+            .await
+            .unwrap();
+
+        assert!(output.is_error);
+        assert!(output.content.contains("unknown field"));
+        assert!(output.content.contains("unexpected"));
     }
 
     #[tokio::test]

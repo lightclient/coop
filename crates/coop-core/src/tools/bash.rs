@@ -1,3 +1,4 @@
+use crate::tool_args::reject_unknown_fields;
 use crate::tools::truncate;
 use crate::traits::{Tool, ToolContext};
 use crate::types::{ToolDef, ToolOutput, TrustLevel};
@@ -59,6 +60,11 @@ impl BashTool {
                     "type": "integer",
                     "minimum": 1,
                     "description": timeout_description
+                },
+                "timeout_seconds": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Alias for timeout"
                 }
             },
             "required": ["command"]
@@ -84,6 +90,14 @@ impl Tool for BashTool {
             return Ok(ToolOutput::error(
                 "bash tool requires Full or Inner trust level",
             ));
+        }
+
+        if let Some(output) = reject_unknown_fields(
+            "bash",
+            &arguments,
+            &["command", "timeout", "timeout_seconds"],
+        ) {
+            return Ok(output);
         }
 
         let command = arguments
@@ -217,6 +231,25 @@ mod tests {
             timeout_from_arguments(&serde_json::json!({"timeout_seconds": 7})).unwrap(),
             Duration::from_secs(7)
         );
+    }
+
+    #[tokio::test]
+    async fn reject_unknown_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(dir.path());
+        let tool = BashTool;
+
+        let output = tool
+            .execute(
+                serde_json::json!({"command": "echo hello", "unexpected": true}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert!(output.is_error);
+        assert!(output.content.contains("unknown field"));
+        assert!(output.content.contains("unexpected"));
     }
 
     #[test]

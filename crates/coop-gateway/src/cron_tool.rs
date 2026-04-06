@@ -12,6 +12,7 @@ use crate::cron_runner::{CronCommand, CronCommandSender, CronTriggerResult, Cron
 use crate::trust::resolve_trust;
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CronTriggerArgs {
     name: String,
     #[serde(default)]

@@ -1023,6 +1023,19 @@ workspace = "."
         );
     }
 
+    #[test]
+    fn subagent_spawn_rejects_unknown_fields() {
+        let error = serde_json::from_value::<SubagentSpawnRequest>(serde_json::json!({
+            "task": "Write a concise summary",
+            "reference_paths": ["./attachments/photo.jpg"]
+        }))
+        .unwrap_err();
+
+        let error = error.to_string();
+        assert!(error.contains("unknown field"));
+        assert!(error.contains("reference_paths"));
+    }
+
     #[tokio::test]
     async fn background_mode_appends_completion_to_parent_session() {
         let harness = harness("Summary:\nBackground work finished.");

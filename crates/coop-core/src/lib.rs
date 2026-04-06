@@ -2,6 +2,7 @@ pub mod fakes;
 pub mod image_artifacts;
 pub mod images;
 pub mod prompt;
+pub mod tool_args;
 pub mod tools;
 pub mod traits;
 pub mod types;

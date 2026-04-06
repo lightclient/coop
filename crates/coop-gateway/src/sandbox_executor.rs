@@ -1,5 +1,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
+use coop_core::tool_args::reject_unknown_fields;
 use coop_core::tools::bash::timeout_from_arguments;
 use coop_core::tools::truncate;
 use coop_core::traits::{ToolContext, ToolExecutor};
@@ -131,6 +132,14 @@ impl SandboxExecutor {
             return Ok(ToolOutput::error(
                 "bash tool requires Full or Inner trust level",
             ));
+        }
+
+        if let Some(output) = reject_unknown_fields(
+            "bash",
+            &arguments,
+            &["command", "timeout", "timeout_seconds"],
+        ) {
+            return Ok(output);
         }
 
         let command = arguments

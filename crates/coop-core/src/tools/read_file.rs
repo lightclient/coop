@@ -1,3 +1,4 @@
+use crate::tool_args::reject_unknown_fields;
 use crate::tools::truncate;
 use crate::traits::{Tool, ToolContext};
 use crate::types::{ToolDef, ToolOutput};
@@ -49,6 +50,12 @@ impl Tool for ReadFileTool {
     }
 
     async fn execute(&self, arguments: serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
+        if let Some(output) =
+            reject_unknown_fields("read_file", &arguments, &["path", "offset", "limit"])
+        {
+            return Ok(output);
+        }
+
         let path_str = arguments
             .get("path")
             .and_then(serde_json::Value::as_str)
@@ -188,6 +195,25 @@ mod tests {
             .unwrap();
 
         assert!(output.is_error);
+    }
+
+    #[tokio::test]
+    async fn reject_unknown_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(dir.path());
+        let tool = ReadFileTool;
+
+        let output = tool
+            .execute(
+                serde_json::json!({"path": "hello.txt", "unexpected": true}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert!(output.is_error);
+        assert!(output.content.contains("unknown field"));
+        assert!(output.content.contains("unexpected"));
     }
 
     #[tokio::test]

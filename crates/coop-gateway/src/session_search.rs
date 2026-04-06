@@ -7,6 +7,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+use coop_core::tool_args::reject_unknown_fields;
 use coop_core::traits::{Provider, ToolContext, ToolExecutor};
 use coop_core::types::{Content, Message, Role, ToolDef, ToolOutput, TrustLevel};
 use coop_memory::{Memory, SessionMessage};
@@ -100,6 +101,10 @@ async fn exec_session_search(
         return Ok(ToolOutput::error(
             "session_search requires Inner trust or higher",
         ));
+    }
+
+    if let Some(output) = reject_unknown_fields("session_search", &arguments, &["query", "limit"]) {
+        return Ok(output);
     }
 
     let query = arguments

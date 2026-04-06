@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use coop_agent::{
     InputImage, ProviderKind, generate_gemini_image, generate_openai_compatible_image,
 };
+use coop_core::tool_args::reject_unknown_fields;
 use coop_core::traits::{ToolContext, ToolExecutor};
 use coop_core::types::{ToolDef, ToolOutput};
 use coop_core::{SessionKind, TrustLevel, save_base64_image};
@@ -73,6 +74,20 @@ impl ImageToolExecutor {
             return Ok(ToolOutput::error(
                 "image_generate tool requires Full or Inner trust level",
             ));
+        }
+
+        if let Some(output) = reject_unknown_fields(
+            "image_generate",
+            &arguments,
+            &[
+                "prompt",
+                "model",
+                "reference_paths",
+                "output_dir",
+                "file_stem",
+            ],
+        ) {
+            return Ok(output);
         }
 
         let prompt = arguments
@@ -492,6 +507,52 @@ output_modalities = ["text", "image"]
         assert!(path.starts_with("./generated/images/image"));
         assert!(workspace.path().join("generated/images/image.png").exists());
         assert_eq!(value["text"], "generated");
+    }
+
+    #[tokio::test]
+    async fn image_generate_rejects_unknown_fields() {
+        let workspace = tempfile::tempdir().unwrap();
+        let config: crate::config::Config = toml::from_str(
+            r#"
+[agent]
+id = "test"
+model = "gpt-5.4"
+workspace = "."
+
+[provider]
+name = "openai-compatible"
+models = ["google/gemini-3-pro-image-preview"]
+base_url = "http://127.0.0.1:9/v1"
+api_keys = ["env:HOME"]
+
+[provider.model_capabilities."google/gemini-3-pro-image-preview"]
+output_modalities = ["text", "image"]
+"#,
+        )
+        .unwrap();
+
+        let executor = ImageToolExecutor::new(shared_config(config));
+        let ctx = ToolContext::new(
+            "session",
+            SessionKind::Main,
+            TrustLevel::Full,
+            workspace.path(),
+            Some("alice"),
+        )
+        .with_model("google/gemini-3-pro-image-preview");
+
+        let output = executor
+            .execute(
+                "image_generate",
+                serde_json::json!({"prompt": "draw a test image", "unexpected": true}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert!(output.is_error);
+        assert!(output.content.contains("unknown field"));
+        assert!(output.content.contains("unexpected"));
     }
 
     async fn read_http_request(socket: &mut tokio::net::TcpStream) -> String {

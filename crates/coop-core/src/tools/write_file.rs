@@ -1,3 +1,4 @@
+use crate::tool_args::reject_unknown_fields;
 use crate::traits::{Tool, ToolContext};
 use crate::types::{ToolDef, ToolOutput, TrustLevel};
 use anyhow::Result;
@@ -41,6 +42,11 @@ impl Tool for WriteFileTool {
             return Ok(ToolOutput::error(
                 "write_file tool requires Full or Inner trust level",
             ));
+        }
+
+        if let Some(output) = reject_unknown_fields("write_file", &arguments, &["path", "content"])
+        {
+            return Ok(output);
         }
 
         let path_str = arguments
