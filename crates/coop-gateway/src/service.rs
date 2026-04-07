@@ -1720,6 +1720,7 @@ mod tests {
                 extra_headers: BTreeMap::new(),
                 stream_policy: crate::config::StreamPolicy::Prefer,
                 refresh_token: None,
+                reasoning: None,
             },
             providers: Vec::new(),
             models: crate::config::ModelsConfig::default(),

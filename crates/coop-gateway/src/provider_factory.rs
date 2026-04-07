@@ -83,6 +83,7 @@ pub(crate) fn provider_spec(config: &Config, model: &str) -> Result<ProviderSpec
         base_url: provider.base_url.clone(),
         extra_headers: provider.extra_headers.clone(),
         refresh_token: provider.refresh_token.clone(),
+        reasoning: provider.reasoning.clone(),
     })
 }
 
@@ -156,6 +157,25 @@ mod tests {
         let provider = create_primary_provider(&config).expect("provider creates");
         assert_eq!(provider.name(), "openai");
         assert_eq!(provider.model_info().name, "gpt-5-codex");
+    }
+
+    #[test]
+    fn provider_spec_includes_openai_reasoning_config() {
+        let config: Config = toml::from_str(
+            "[agent]\nid = \"test\"\nmodel = \"gpt-5.4\"\nworkspace = \".\"\n\n[provider]\nname = \"openai\"\nmodels = [\"gpt-5.4\"]\n\n[provider.reasoning]\neffort = \"high\"\nsummary = \"concise\"\n",
+        )
+        .expect("config parses");
+
+        let spec = provider_spec(&config, "gpt-5.4").expect("provider spec");
+        let reasoning = spec.reasoning.expect("reasoning config present");
+        assert_eq!(
+            reasoning.effort,
+            Some(coop_agent::OpenAiReasoningEffort::High)
+        );
+        assert_eq!(
+            reasoning.summary,
+            Some(coop_agent::OpenAiReasoningSummary::Concise)
+        );
     }
 
     async fn spawn_openai_compatible_server() -> String {

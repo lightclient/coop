@@ -32,6 +32,7 @@ async fn live_openai_auth_roundtrip() {
         base_url: None,
         extra_headers: Default::default(),
         refresh_token: None,
+        reasoning: None,
     };
 
     // Ensure env var is set for resolve_key_refs

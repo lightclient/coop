@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use arc_swap::ArcSwap;
+use coop_agent::OpenAiReasoningConfig;
 use coop_core::TrustLevel;
 use coop_core::prompt::{CacheHint, PromptFileConfig};
 use coop_memory::MemoryMaintenanceConfig;
@@ -328,6 +329,10 @@ pub(crate) struct ProviderConfig {
     /// access token, the provider auto-refreshes before expiry.
     #[serde(default)]
     pub refresh_token: Option<String>,
+    /// Optional OpenAI Codex reasoning configuration. Applies to the Codex
+    /// OAuth backend and maps to the Responses API `reasoning` field.
+    #[serde(default)]
+    pub reasoning: Option<OpenAiReasoningConfig>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -1746,6 +1751,33 @@ models = ["gpt-5.4"]
     }
 
     #[test]
+    fn parse_config_with_openai_reasoning() {
+        let toml_str = r#"
+[agent]
+id = "test"
+model = "gpt-5.4"
+
+[provider]
+name = "openai"
+models = ["gpt-5.4"]
+
+[provider.reasoning]
+effort = "minimal"
+summary = "detailed"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let reasoning = config.provider.reasoning.as_ref().unwrap();
+        assert_eq!(
+            reasoning.effort,
+            Some(coop_agent::OpenAiReasoningEffort::Minimal)
+        );
+        assert_eq!(
+            reasoning.summary,
+            Some(coop_agent::OpenAiReasoningSummary::Detailed)
+        );
+    }
+
+    #[test]
     fn parse_config_with_multiple_main_providers() {
         let toml_str = r#"
 [agent]
@@ -1830,6 +1862,7 @@ stream_policy = "require"
             extra_headers: BTreeMap::new(),
             stream_policy: StreamPolicy::Prefer,
             refresh_token: None,
+            reasoning: None,
         };
         assert_eq!(
             provider.effective_api_key_env().as_deref(),
@@ -1850,6 +1883,7 @@ stream_policy = "require"
             extra_headers: BTreeMap::new(),
             stream_policy: StreamPolicy::Prefer,
             refresh_token: None,
+            reasoning: None,
         };
         assert_eq!(
             provider.effective_api_key_env().as_deref(),
@@ -1870,6 +1904,7 @@ stream_policy = "require"
             extra_headers: BTreeMap::new(),
             stream_policy: StreamPolicy::Prefer,
             refresh_token: None,
+            reasoning: None,
         };
         assert_eq!(
             provider.effective_api_key_env().as_deref(),

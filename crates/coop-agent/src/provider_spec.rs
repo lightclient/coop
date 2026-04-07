@@ -1,7 +1,63 @@
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use crate::resolve_key_refs;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct OpenAiReasoningConfig {
+    #[serde(default)]
+    pub effort: Option<OpenAiReasoningEffort>,
+    #[serde(default)]
+    pub summary: Option<OpenAiReasoningSummary>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenAiReasoningEffort {
+    None,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    #[serde(rename = "xhigh")]
+    Xhigh,
+}
+
+impl OpenAiReasoningEffort {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Xhigh => "xhigh",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenAiReasoningSummary {
+    Auto,
+    Concise,
+    Detailed,
+    Off,
+    On,
+}
+
+impl OpenAiReasoningSummary {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Concise => "concise",
+            Self::Detailed => "detailed",
+            Self::Off => "off",
+            Self::On => "on",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderKind {
@@ -56,6 +112,7 @@ pub struct ProviderSpec {
     pub base_url: Option<String>,
     pub extra_headers: BTreeMap<String, String>,
     pub refresh_token: Option<String>,
+    pub reasoning: Option<OpenAiReasoningConfig>,
 }
 
 impl ProviderSpec {
@@ -71,6 +128,7 @@ impl ProviderSpec {
             base_url: None,
             extra_headers: BTreeMap::new(),
             refresh_token: None,
+            reasoning: None,
         }
     }
 

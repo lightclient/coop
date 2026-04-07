@@ -10,6 +10,7 @@ use coop_core::types::{Message, ModelInfo, ToolDef, Usage};
 use crate::model_context::{ContextLimitInput, resolve_context_limit};
 use crate::openai_codex::{CodexRequest, OpenAiAuthMode, api_model_name, complete_codex};
 use crate::openai_refresh::RefreshState;
+use crate::provider_spec::OpenAiReasoningConfig;
 use crate::provider_spec::ProviderSpec;
 
 pub(crate) struct CodexProvider {
@@ -17,6 +18,7 @@ pub(crate) struct CodexProvider {
     api_key: String,
     auth_mode: OpenAiAuthMode,
     refresh: Option<RefreshState>,
+    reasoning: Option<OpenAiReasoningConfig>,
     model: RwLock<ModelInfo>,
 }
 
@@ -69,6 +71,7 @@ impl CodexProvider {
             api_key,
             auth_mode,
             refresh,
+            reasoning: spec.reasoning.clone(),
             model: RwLock::new(model),
         })
     }
@@ -85,6 +88,7 @@ impl std::fmt::Debug for CodexProvider {
             .field("model", &model.name)
             .field("auth_mode", &self.auth_mode.label())
             .field("has_refresh", &self.refresh.is_some())
+            .field("reasoning", &self.reasoning)
             .finish_non_exhaustive()
     }
 }
@@ -117,6 +121,16 @@ impl Provider for CodexProvider {
         let model_name = self.model_snapshot().name;
         let auth_mode = self.auth_mode.label();
         let has_refresh = self.refresh.is_some();
+        let reasoning_effort = self
+            .reasoning
+            .as_ref()
+            .and_then(|value| value.effort)
+            .map_or("default", |value| value.as_str());
+        let reasoning_summary = self
+            .reasoning
+            .as_ref()
+            .and_then(|value| value.summary)
+            .map_or("default", |value| value.as_str());
         let span = info_span!(
             "codex_request",
             model = %model_name,
@@ -124,6 +138,8 @@ impl Provider for CodexProvider {
             has_refresh,
             message_count = messages.len(),
             tool_count = tools.len(),
+            reasoning_effort,
+            reasoning_summary,
         );
 
         async {
@@ -152,6 +168,7 @@ impl Provider for CodexProvider {
                     system,
                     messages,
                     tools,
+                    reasoning: self.reasoning.as_ref(),
                 },
             )
             .await?;

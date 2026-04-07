@@ -9,6 +9,7 @@ mod model_context;
 mod model_mapping;
 mod models_dev;
 mod openai_codex;
+mod openai_codex_parser;
 mod openai_compatible_images;
 mod openai_refresh;
 mod provider_spec;
@@ -29,7 +30,10 @@ pub use gemini_images::{
 };
 pub use key_pool::{KeyPool, resolve_key_refs};
 pub use openai_compatible_images::generate_openai_compatible_image;
-pub use provider_spec::{ProviderKind, ProviderSpec};
+pub use provider_spec::{
+    OpenAiReasoningConfig, OpenAiReasoningEffort, OpenAiReasoningSummary, ProviderKind,
+    ProviderSpec,
+};
 
 use codex_provider::CodexProvider;
 use genai_provider::GenAiProvider;

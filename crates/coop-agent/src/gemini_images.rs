@@ -181,6 +181,7 @@ mod tests {
             base_url: Some(base_url),
             extra_headers: std::collections::BTreeMap::default(),
             refresh_token: None,
+            reasoning: None,
         }
     }
 

@@ -665,6 +665,7 @@ mod tests {
             base_url: None,
             extra_headers: BTreeMap::new(),
             refresh_token: None,
+            reasoning: None,
         })
         .unwrap();
 
@@ -685,6 +686,7 @@ mod tests {
             base_url: Some("http://localhost:8000/v1".into()),
             extra_headers: BTreeMap::new(),
             refresh_token: None,
+            reasoning: None,
         })
         .unwrap();
 

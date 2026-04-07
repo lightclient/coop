@@ -524,6 +524,38 @@ fn check_provider_entry(report: &mut CheckReport, provider: &ProviderConfig, pat
         message: format!("{path}.stream_policy: {}", provider.stream_policy),
     });
 
+    let reasoning_check = match provider.reasoning.as_ref() {
+        None => CheckResult {
+            name: "provider_reasoning",
+            severity: Severity::Info,
+            passed: true,
+            message: format!("{path}.reasoning: not configured"),
+        },
+        Some(_reasoning) if provider_name != "openai" => CheckResult {
+            name: "provider_reasoning",
+            severity: Severity::Error,
+            passed: false,
+            message: format!("{path}.reasoning is only supported for openai providers"),
+        },
+        Some(reasoning) if reasoning.effort.is_none() => CheckResult {
+            name: "provider_reasoning",
+            severity: Severity::Error,
+            passed: false,
+            message: format!("{path}.reasoning.effort must be set when reasoning is configured"),
+        },
+        Some(reasoning) => CheckResult {
+            name: "provider_reasoning",
+            severity: Severity::Info,
+            passed: true,
+            message: format!(
+                "{path}.reasoning: effort={}, summary={}",
+                reasoning.effort.map_or("default", |value| value.as_str()),
+                reasoning.summary.map_or("auto", |value| value.as_str())
+            ),
+        },
+    };
+    report.push(reasoning_check);
+
     let empty_models = provider.models.iter().any(|model| model.trim().is_empty());
     report.push(CheckResult {
         name: "provider_models_valid",
@@ -2914,6 +2946,66 @@ mod tests {
         assert!(check.is_some(), "should pass when env var is set");
         assert!(check.unwrap().message.contains("1 API keys configured"));
         assert!(check.unwrap().message.contains("rotation enabled"));
+    }
+
+    #[test]
+    fn test_config_check_rejects_openai_reasoning_without_effort() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(workspace.join("SOUL.md"), "test").unwrap();
+
+        let config_path = dir.path().join("coop.toml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "[agent]\nid = \"test\"\nmodel = \"gpt-5.4\"\nworkspace = \"{}\"\n\n[provider]\nname = \"openai\"\nmodels = [\"gpt-5.4\"]\n\n[provider.reasoning]\nsummary = \"concise\"\n",
+                workspace.display()
+            ),
+        )
+        .unwrap();
+
+        let report = validate_config(&config_path, dir.path());
+        let check = report
+            .results
+            .iter()
+            .find(|r| r.name == "provider_reasoning" && !r.passed);
+        assert!(check.is_some(), "should reject reasoning without effort");
+        assert!(
+            check
+                .unwrap()
+                .message
+                .contains("reasoning.effort must be set")
+        );
+    }
+
+    #[test]
+    fn test_config_check_rejects_reasoning_for_non_openai_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(workspace.join("SOUL.md"), "test").unwrap();
+
+        let config_path = dir.path().join("coop.toml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "[agent]\nid = \"test\"\nmodel = \"claude-sonnet-4-20250514\"\nworkspace = \"{}\"\n\n[provider]\nname = \"anthropic\"\n\n[provider.reasoning]\neffort = \"high\"\n",
+                workspace.display()
+            ),
+        )
+        .unwrap();
+
+        let report = validate_config(&config_path, dir.path());
+        let check = report
+            .results
+            .iter()
+            .find(|r| r.name == "provider_reasoning" && !r.passed);
+        assert!(
+            check.is_some(),
+            "should reject reasoning for non-openai provider"
+        );
+        assert!(check.unwrap().message.contains("only supported for openai"));
     }
 
     fn write_config_with_groups(dir: &Path, groups_toml: &str) -> std::path::PathBuf {

@@ -1,9 +1,10 @@
+use crate::openai_codex_parser::parse_codex_sse;
+use crate::provider_spec::{OpenAiReasoningConfig, OpenAiReasoningEffort};
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use coop_core::{Content, Message, ToolDef, Usage};
 use reqwest::{Client, StatusCode};
 use serde_json::{Value, json};
-use tracing::warn;
 
 const CODEX_RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
 const JWT_CLAIM_PATH: &str = "https://api.openai.com/auth";
@@ -41,6 +42,7 @@ pub(super) struct CodexRequest<'a> {
     pub system: &'a [String],
     pub messages: &'a [Message],
     pub tools: &'a [ToolDef],
+    pub reasoning: Option<&'a OpenAiReasoningConfig>,
 }
 
 pub(super) async fn complete_codex(
@@ -54,6 +56,7 @@ pub(super) async fn complete_codex(
         request.system,
         request.messages,
         request.tools,
+        request.reasoning,
     );
     let response = client
         .post(CODEX_RESPONSES_URL)
@@ -116,6 +119,7 @@ fn build_codex_body(
     system: &[String],
     messages: &[Message],
     tools: &[ToolDef],
+    reasoning: Option<&OpenAiReasoningConfig>,
 ) -> Value {
     let mut body = json!({
         "model": model,
@@ -133,7 +137,42 @@ fn build_codex_body(
         body["tools"] = json!(format_codex_tools(tools));
     }
 
+    if let Some(reasoning) = reasoning.and_then(|value| format_codex_reasoning(model, value)) {
+        body["reasoning"] = reasoning;
+    }
+
     body
+}
+
+fn format_codex_reasoning(model: &str, reasoning: &OpenAiReasoningConfig) -> Option<Value> {
+    let effort = reasoning.effort?;
+    Some(json!({
+        "effort": clamp_codex_reasoning_effort(model, effort),
+        "summary": reasoning.summary.map_or("auto", |value| value.as_str()),
+    }))
+}
+
+fn clamp_codex_reasoning_effort(model: &str, effort: OpenAiReasoningEffort) -> &'static str {
+    let model_id = model.rsplit('/').next().unwrap_or(model);
+    if (model_id.starts_with("gpt-5.2")
+        || model_id.starts_with("gpt-5.3")
+        || model_id.starts_with("gpt-5.4"))
+        && matches!(effort, OpenAiReasoningEffort::Minimal)
+    {
+        return OpenAiReasoningEffort::Low.as_str();
+    }
+    if model_id == "gpt-5.1" && matches!(effort, OpenAiReasoningEffort::Xhigh) {
+        return OpenAiReasoningEffort::High.as_str();
+    }
+    if model_id == "gpt-5.1-codex-mini" {
+        return match effort {
+            OpenAiReasoningEffort::High | OpenAiReasoningEffort::Xhigh => {
+                OpenAiReasoningEffort::High.as_str()
+            }
+            _ => OpenAiReasoningEffort::Medium.as_str(),
+        };
+    }
+    effort.as_str()
 }
 
 fn build_codex_input(messages: &[Message]) -> Vec<Value> {
@@ -262,179 +301,6 @@ fn split_tool_call_id(id: &str) -> (&str, Option<&str>) {
     }
 }
 
-fn parse_codex_sse(body: &str) -> Result<(Message, Usage)> {
-    let normalized = body.replace("\r\n", "\n");
-    let mut final_response = None;
-
-    for chunk in normalized.split("\n\n") {
-        let data_lines: Vec<&str> = chunk
-            .lines()
-            .filter_map(|line| line.trim_start().strip_prefix("data:"))
-            .map(str::trim)
-            .filter(|line| !line.is_empty() && *line != "[DONE]")
-            .collect();
-        if data_lines.is_empty() {
-            continue;
-        }
-
-        let data = data_lines.join("\n");
-        let event: Value = match serde_json::from_str(&data) {
-            Ok(event) => event,
-            Err(_) => continue,
-        };
-
-        match event.get("type").and_then(Value::as_str) {
-            Some("error") => {
-                let message = event
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .unwrap_or("OpenAI Codex stream error");
-                anyhow::bail!("{message}");
-            }
-            Some("response.failed") => {
-                let message = event
-                    .get("response")
-                    .and_then(|response| response.get("error"))
-                    .and_then(|error| error.get("message"))
-                    .and_then(Value::as_str)
-                    .or_else(|| {
-                        event
-                            .get("response")
-                            .and_then(|response| response.get("incomplete_details"))
-                            .and_then(|details| details.get("reason"))
-                            .and_then(Value::as_str)
-                    })
-                    .unwrap_or("OpenAI Codex response failed");
-                anyhow::bail!("{message}");
-            }
-            Some("response.completed" | "response.incomplete") => {
-                final_response = event.get("response").cloned();
-                break;
-            }
-            _ => {}
-        }
-    }
-
-    let response = final_response
-        .ok_or_else(|| anyhow::anyhow!("OpenAI Codex stream ended without a completed response"))?;
-    Ok(parse_codex_response(&response))
-}
-
-fn parse_codex_response(response: &Value) -> (Message, Usage) {
-    let mut message = Message::assistant();
-
-    for item in response
-        .get("output")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
-        match item.get("type").and_then(Value::as_str) {
-            Some("message") => {
-                let text = item
-                    .get("content")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|part| match part.get("type").and_then(Value::as_str) {
-                        Some("output_text") => part.get("text").and_then(Value::as_str),
-                        Some("refusal") => part.get("refusal").and_then(Value::as_str),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("");
-                if !text.is_empty() {
-                    message = message.with_text(text);
-                }
-            }
-            Some("function_call") => {
-                let call_id = item
-                    .get("call_id")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                let item_id = item.get("id").and_then(Value::as_str);
-                let tool_name = item.get("name").and_then(Value::as_str).unwrap_or_default();
-                let raw_arguments = item
-                    .get("arguments")
-                    .and_then(Value::as_str)
-                    .unwrap_or("{}");
-                let arguments =
-                    serde_json::from_str::<Value>(raw_arguments).unwrap_or_else(|error| {
-                        warn!(
-                            tool_name,
-                            %error,
-                            raw = raw_arguments,
-                            "failed to parse OpenAI Codex tool arguments, using empty object"
-                        );
-                        json!({})
-                    });
-                let tool_id = item_id.map_or_else(
-                    || call_id.to_owned(),
-                    |item_id| format!("{call_id}|{item_id}"),
-                );
-                message = message.with_tool_request(tool_id, tool_name, arguments);
-            }
-            Some("reasoning") => {
-                let thinking = item
-                    .get("summary")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|part| part.get("text").and_then(Value::as_str))
-                    .collect::<Vec<_>>()
-                    .join("\n\n");
-                if !thinking.is_empty() {
-                    message = message.with_content(Content::Thinking {
-                        thinking,
-                        signature: Some(item.to_string()),
-                    });
-                }
-            }
-            _ => {}
-        }
-    }
-
-    let usage = Usage {
-        input_tokens: response
-            .get("usage")
-            .and_then(|usage| usage.get("input_tokens"))
-            .and_then(Value::as_u64)
-            .and_then(|value| u32::try_from(value).ok()),
-        output_tokens: response
-            .get("usage")
-            .and_then(|usage| usage.get("output_tokens"))
-            .and_then(Value::as_u64)
-            .and_then(|value| u32::try_from(value).ok()),
-        cache_read_tokens: response
-            .get("usage")
-            .and_then(|usage| usage.get("input_tokens_details"))
-            .and_then(|details| details.get("cached_tokens"))
-            .and_then(Value::as_u64)
-            .and_then(|value| u32::try_from(value).ok()),
-        stop_reason: Some(stop_reason(response, &message)),
-        ..Default::default()
-    };
-
-    (message, usage)
-}
-
-fn stop_reason(response: &Value, message: &Message) -> String {
-    let status = response
-        .get("status")
-        .and_then(Value::as_str)
-        .unwrap_or("completed");
-    if status == "completed" && message.has_tool_requests() {
-        return "tool_use".to_owned();
-    }
-
-    match status {
-        "incomplete" => "length",
-        "failed" | "cancelled" => "error",
-        _ => "stop",
-    }
-    .to_owned()
-}
-
 fn format_codex_error(status: StatusCode, body: &str) -> String {
     if let Ok(parsed) = serde_json::from_str::<Value>(body) {
         if let Some(detail) = parsed.get("detail").and_then(Value::as_str) {
@@ -507,6 +373,23 @@ mod tests {
         assert_eq!(usage.input_tokens, Some(12));
         assert_eq!(usage.output_tokens, Some(3));
         assert_eq!(usage.stop_reason.as_deref(), Some("stop"));
+    }
+
+    #[test]
+    fn build_codex_body_includes_reasoning_config() {
+        let body = build_codex_body(
+            "gpt-5.4",
+            &[],
+            &[],
+            &[],
+            Some(&OpenAiReasoningConfig {
+                effort: Some(OpenAiReasoningEffort::Minimal),
+                summary: None,
+            }),
+        );
+
+        assert_eq!(body["reasoning"]["effort"], "low");
+        assert_eq!(body["reasoning"]["summary"], "auto");
     }
 
     #[test]

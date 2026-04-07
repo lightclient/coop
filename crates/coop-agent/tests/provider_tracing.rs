@@ -101,6 +101,7 @@ async fn provider_trace_logs_request_shape_and_transport_details() {
         base_url: Some(unused_openai_base_url()),
         extra_headers: BTreeMap::new(),
         refresh_token: None,
+        reasoning: None,
     })
     .expect("provider creates");
 
@@ -187,6 +188,7 @@ async fn provider_failure_probe_can_show_models_endpoint_is_up() {
         base_url: Some(base_url),
         extra_headers: BTreeMap::new(),
         refresh_token: None,
+        reasoning: None,
     })
     .expect("provider creates");
 

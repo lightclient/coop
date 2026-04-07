@@ -433,6 +433,7 @@ mod tests {
             base_url: Some("http://127.0.0.1:11434/v1".into()),
             extra_headers: BTreeMap::from([("x-test".into(), "1".into())]),
             refresh_token: None,
+            reasoning: None,
         };
 
         let trace = summarize_provider_trace(ProviderKind::OpenAiCompatible, &spec, false);

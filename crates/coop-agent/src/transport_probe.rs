@@ -653,6 +653,7 @@ mod tests {
             base_url: Some("http://127.0.0.1:11434/v1".into()),
             extra_headers: BTreeMap::new(),
             refresh_token: None,
+            reasoning: None,
         };
         let transport = TransportErrorTrace {
             variant: "web_model_call",
