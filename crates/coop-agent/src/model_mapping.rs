@@ -13,9 +13,8 @@ pub(crate) struct ResolvedModel {
 
 impl ResolvedModel {
     pub(crate) fn from_spec(spec: &ProviderSpec, model: &str, _auth: AuthData) -> Self {
-        let target_model = target_model(spec.kind, model);
+        let (target_model, model_info_name) = target_model(spec.kind, model);
         let endpoint = endpoint_for_spec(spec);
-        let model_info_name = target_model.model_name.to_string();
 
         Self {
             model_info_name,
@@ -50,21 +49,38 @@ fn endpoint_for_spec(spec: &ProviderSpec) -> Endpoint {
     }
 }
 
-fn target_model(kind: ProviderKind, model: &str) -> ModelIden {
+fn target_model(kind: ProviderKind, model: &str) -> (ModelIden, String) {
     match kind {
         ProviderKind::Anthropic => {
-            ModelIden::new(AdapterKind::Anthropic, strip_prefix(model, "anthropic/"))
+            let model_name = strip_prefix(model, "anthropic/");
+            (
+                ModelIden::new(AdapterKind::Anthropic, model_name.clone()),
+                model_name,
+            )
         }
-        ProviderKind::Gemini => ModelIden::new(AdapterKind::Gemini, strip_prefix(model, "gemini/")),
+        ProviderKind::Gemini => {
+            let model_name = strip_prefix(model, "gemini/");
+            (
+                ModelIden::new(AdapterKind::Gemini, model_name.clone()),
+                model_name,
+            )
+        }
         ProviderKind::OpenAi => {
             let (adapter_kind, model_name) = openai_like_model(model);
-            ModelIden::new(adapter_kind, model_name)
+            let info_name = model_name.clone();
+            (ModelIden::new(adapter_kind, model_name), info_name)
         }
         ProviderKind::OpenAiCompatible => {
-            let (adapter_kind, model_name) = openai_compatible_model(model);
-            ModelIden::new(adapter_kind, model_name)
+            let (adapter_kind, model_name, info_name) = openai_compatible_model(model);
+            (ModelIden::new(adapter_kind, model_name), info_name)
         }
-        ProviderKind::Ollama => ModelIden::new(AdapterKind::Ollama, strip_ollama_prefix(model)),
+        ProviderKind::Ollama => {
+            let model_name = strip_ollama_prefix(model);
+            (
+                ModelIden::new(AdapterKind::Ollama, model_name.clone()),
+                model_name,
+            )
+        }
     }
 }
 
@@ -80,26 +96,37 @@ fn openai_like_model(model: &str) -> (AdapterKind, String) {
     infer_openai_adapter(&normalized)
 }
 
-fn openai_compatible_model(model: &str) -> (AdapterKind, String) {
+fn openai_compatible_model(model: &str) -> (AdapterKind, String, String) {
     let normalized = strip_prefix(model, "openai-compatible/");
-    let normalized = strip_prefix(&normalized, "openai/");
     if let Some((namespace, name)) = normalized.split_once("::") {
         return match namespace {
-            "openai_resp" => (AdapterKind::OpenAIResp, name.to_owned()),
-            _ => (AdapterKind::OpenAI, name.to_owned()),
+            "openai_resp" => (AdapterKind::OpenAIResp, name.to_owned(), name.to_owned()),
+            "openai" => (AdapterKind::OpenAI, name.to_owned(), name.to_owned()),
+            _ => {
+                let (adapter_kind, model_name) = infer_openai_adapter(&normalized);
+                (adapter_kind, model_name.clone(), model_name)
+            }
         };
     }
-    infer_openai_adapter(&normalized)
+    let (adapter_kind, model_name) = infer_openai_adapter(&normalized);
+    (adapter_kind, model_name.clone(), model_name)
 }
 
 fn infer_openai_adapter(model: &str) -> (AdapterKind, String) {
-    let uses_responses = (model.starts_with("gpt")
-        && (model.contains("codex") || model.contains("pro")))
-        || model.starts_with("o1")
-        || model.starts_with("o3")
-        || model.starts_with("o4")
-        || model.starts_with("chatgpt")
-        || model.starts_with("codex");
+    let inference_key = model
+        .rsplit_once("::")
+        .map_or(model, |(_, tail)| tail)
+        .rsplit('/')
+        .next()
+        .unwrap_or(model);
+
+    let uses_responses = (inference_key.starts_with("gpt")
+        && (inference_key.contains("codex") || inference_key.contains("pro")))
+        || inference_key.starts_with("o1")
+        || inference_key.starts_with("o3")
+        || inference_key.starts_with("o4")
+        || inference_key.starts_with("chatgpt")
+        || inference_key.starts_with("codex");
 
     let adapter_kind = if uses_responses {
         AdapterKind::OpenAIResp
@@ -159,25 +186,43 @@ mod tests {
         );
         let resolved = ResolvedModel::from_spec(&spec, &spec.model, AuthData::None);
         assert_eq!(resolved.target_model.adapter_kind, AdapterKind::OpenAI);
+        assert_eq!(
+            resolved.model_info_name,
+            "meta-llama/Llama-3.3-70B-Instruct"
+        );
     }
 
     #[test]
-    fn openai_compatible_strips_openai_prefix_alias() {
+    fn openai_compatible_preserves_openai_namespace_in_model_name() {
         let spec = ProviderSpec::new(
             ProviderKind::OpenAiCompatible,
             "openai/gemma-4-31B-it-UD-Q8_K_XL.gguf",
         );
         let resolved = ResolvedModel::from_spec(&spec, &spec.model, AuthData::None);
         assert_eq!(resolved.target_model.adapter_kind, AdapterKind::OpenAI);
-        assert_eq!(resolved.model_info_name, "gemma-4-31B-it-UD-Q8_K_XL.gguf");
+        assert_eq!(
+            resolved.model_info_name,
+            "openai/gemma-4-31B-it-UD-Q8_K_XL.gguf"
+        );
+    }
+
+    #[test]
+    fn openai_compatible_infers_responses_adapter_from_namespaced_openai_model() {
+        let spec = ProviderSpec::new(ProviderKind::OpenAiCompatible, "openai/gpt-5-codex");
+        let resolved = ResolvedModel::from_spec(&spec, &spec.model, AuthData::None);
+        assert_eq!(resolved.target_model.adapter_kind, AdapterKind::OpenAIResp);
+        assert_eq!(resolved.model_info_name, "openai/gpt-5-codex");
     }
 
     #[test]
     fn openai_compatible_respects_explicit_responses_namespace() {
-        let spec = ProviderSpec::new(ProviderKind::OpenAiCompatible, "openai_resp::gpt-5-mini");
+        let spec = ProviderSpec::new(
+            ProviderKind::OpenAiCompatible,
+            "openai_resp::openai/gpt-5-mini",
+        );
         let resolved = ResolvedModel::from_spec(&spec, &spec.model, AuthData::None);
         assert_eq!(resolved.target_model.adapter_kind, AdapterKind::OpenAIResp);
-        assert_eq!(resolved.model_info_name, "gpt-5-mini");
+        assert_eq!(resolved.model_info_name, "openai/gpt-5-mini");
     }
 
     #[test]

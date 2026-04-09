@@ -6,7 +6,9 @@ use coop_agent::{ProviderKind, ProviderSpec, create_provider};
 use coop_core::Provider;
 
 use crate::config::Config;
-use crate::model_catalog::{resolve_configured_model, resolve_model_reference};
+use crate::model_catalog::{
+    normalize_model_key, resolve_configured_model, resolve_model_reference,
+};
 use crate::provider_registry::ProviderRegistry;
 
 pub(crate) fn create_primary_provider(config: &Config) -> Result<Arc<dyn Provider>> {
@@ -24,26 +26,32 @@ pub(crate) fn build_provider_registry(
     let mut registry = ProviderRegistry::new(primary);
 
     let primary_model = registry.primary().model_info().name;
+    let primary_key = normalize_model_key(&primary_model);
     let mut seen = std::collections::HashSet::new();
     for group in &config.groups {
-        let model = resolve_model_reference(config, group.trigger_model_or_default());
-        if model.resolved != primary_model && seen.insert(model.resolved.clone()) {
-            match create_provider_for_model(config, &model.resolved) {
+        let requested = resolve_model_reference(config, group.trigger_model_or_default());
+        let model = resolve_configured_model(config, &requested.resolved)
+            .map(|resolved| resolved.model.id)
+            .unwrap_or_else(|| requested.resolved.clone());
+        let key = normalize_model_key(&model);
+
+        if key != primary_key && seen.insert(key) {
+            match create_provider_for_model(config, &model) {
                 Ok(provider) => {
                     info!(
                         provider = provider.name(),
-                        model = %model.resolved,
-                        requested_model = %model.requested,
-                        alias = model.alias.as_deref().unwrap_or(""),
+                        model = %model,
+                        requested_model = %requested.requested,
+                        alias = requested.alias.as_deref().unwrap_or(""),
                         "registered trigger model provider"
                     );
-                    registry.register(model.resolved, provider);
+                    registry.register(model, provider);
                 }
                 Err(error) => {
                     warn!(
-                        model = %model.resolved,
-                        requested_model = %model.requested,
-                        alias = model.alias.as_deref().unwrap_or(""),
+                        model = %model,
+                        requested_model = %requested.requested,
+                        alias = requested.alias.as_deref().unwrap_or(""),
                         error = %error,
                         "failed to create trigger model provider, will use primary"
                     );
@@ -57,11 +65,14 @@ pub(crate) fn build_provider_registry(
 
 pub(crate) fn provider_spec(config: &Config, model: &str) -> Result<ProviderSpec> {
     let requested_model = resolve_model_reference(config, model);
+    let resolved_model = resolve_configured_model(config, &requested_model.resolved);
     let default_model = resolve_model_reference(config, &config.agent.model);
+    let resolved_default_model = resolve_configured_model(config, &default_model.resolved);
     let provider = if config.providers.is_empty() {
         &config.provider
     } else {
-        resolve_configured_model(config, &requested_model.resolved)
+        resolved_model
+            .as_ref()
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "model '{}' is not configured in any provider",
@@ -71,11 +82,18 @@ pub(crate) fn provider_spec(config: &Config, model: &str) -> Result<ProviderSpec
             .provider
     };
 
+    let model = resolved_model.as_ref().map_or_else(
+        || requested_model.resolved.clone(),
+        |resolved| resolved.model.id.clone(),
+    );
+    let default_model =
+        resolved_default_model.map_or(default_model.resolved, |resolved| resolved.model.id);
+
     let kind = ProviderKind::from_name(&provider.name)?;
     Ok(ProviderSpec {
         kind,
-        model: requested_model.resolved,
-        default_model: Some(default_model.resolved),
+        model,
+        default_model: Some(default_model),
         default_model_context_limit: config.agent.context_limit,
         model_context_limits: provider.model_context_limits.clone(),
         api_keys: provider.api_keys.clone(),
@@ -124,6 +142,18 @@ mod tests {
         .expect("config parses");
         let provider = create_primary_provider(&config).expect("provider creates");
         assert_eq!(provider.name(), "openai-compatible");
+    }
+
+    #[test]
+    fn provider_spec_uses_exact_configured_model_id_for_openai_compatible() {
+        let config: Config = toml::from_str(
+            "[agent]\nid = \"test\"\nmodel = \"demo-model\"\nworkspace = \".\"\n\n[provider]\nname = \"openai-compatible\"\nbase_url = \"http://localhost:8000/v1\"\nmodels = [\"openai/demo-model\"]\n",
+        )
+        .expect("config parses");
+
+        let spec = provider_spec(&config, &config.agent.model).expect("provider spec resolves");
+        assert_eq!(spec.model, "openai/demo-model");
+        assert_eq!(spec.default_model.as_deref(), Some("openai/demo-model"));
     }
 
     #[test]
